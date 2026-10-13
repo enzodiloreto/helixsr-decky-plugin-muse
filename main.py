@@ -77,6 +77,17 @@ def _dir_for_tag(tag: str) -> Path | None:
     return None
 
 
+def _plugin_version() -> str:
+    try:
+        base = os.environ.get("DECKY_PLUGIN_DIR", "")
+        if base:
+            import json as _json
+            return _json.loads(Path(base, "package.json").read_text()).get("version", "?")
+    except (OSError, ValueError):
+        pass
+    return "?"
+
+
 def _new_dl_state(tag: str = "") -> dict:
     return {"running": False, "done": False, "ok": False, "error": "",
             "tag": tag, "downloaded": 0, "total": 0,
@@ -133,7 +144,8 @@ class Plugin:
                                  "network_built": helixscan.network_ready(d),
                                  "dll_version": dll_version})
             return {"active_tag": self.settings.getSetting("active_tag", ""),
-                    "versions": versions, "root": str(_helixsr_root())}
+                    "versions": versions, "root": str(_helixsr_root()),
+                    "plugin_version": _plugin_version()}
         return await asyncio.to_thread(_state)
 
     async def set_active_version(self, tag: str) -> dict:
@@ -303,39 +315,57 @@ class Plugin:
             return {"ok": False, "output": f"{type(e).__name__}: {e}"}
 
     async def start_build(self) -> dict:
-        """Run helixsr-setup.sh --yes in the background (builds the network, ~1 min).
-        Game prompts default to no on EOF; use install_games afterwards."""
+        """Run helixsr-setup.sh --yes (builds the network). The process is
+        spawned in the foreground so startup failures surface immediately;
+        only waiting for it happens in the background. Game prompts default
+        to no on EOF; use install_games afterwards."""
         if self._build_task and not self._build_task.done():
             return {"ok": False, "error": "build already running"}
         d = await self._active_dir()
         if d is None:
             return {"ok": False, "error": "no HelixSR version downloaded"}
+        script = d / "helixsr-setup.sh"
+        if not script.is_file():
+            return {"ok": False, "error": f"helixsr-setup.sh not found in {d}: re-download the version"}
         log = _helixsr_root() / f"build-{_tag_of_dir(d)}.log"
+        bash = shutil.which("bash") or "bash"
+        import datetime
+        header = (f"[helixsr] plugin v{_plugin_version()} building network in {d}\n"
+                  f"[helixsr] start: {datetime.datetime.now().isoformat(timespec='seconds')}\n"
+                  f"[helixsr] bash: {bash}, setup.sh: {script.stat().st_size} bytes\n")
+        with open(log, "w") as f:
+            f.write(header)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                bash, str(script), "--yes",
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=open(log, "a"), stderr=subprocess.STDOUT,
+                cwd=str(d))
+        except Exception as e:  # noqa: BLE001
+            with open(log, "a") as f:
+                f.write(f"[helixsr] could not start build: {type(e).__name__}: {e}\n")
+            return {"ok": False, "error": f"could not start build: {type(e).__name__}: {e}"}
         self._build_log = log
+        self._build_running = True
 
-        async def _run():
-            self._build_running = True
+        async def _watch():
             try:
-                with open(log, "w") as f:
-                    f.write(f"[helixsr] building network in {d}\n")
-                proc = await asyncio.create_subprocess_exec(
-                    "bash", str(d / "helixsr-setup.sh"), "--yes",
-                    stdin=asyncio.subprocess.DEVNULL,
-                    stdout=open(log, "a"), stderr=subprocess.STDOUT,
-                    cwd=str(d))
                 await proc.wait()
                 rc = proc.returncode
                 with open(log, "a") as f:
-                    f.write(f"\n[helixsr] setup exited rc={rc}\n")
+                    if log.stat().st_size <= len(header) + 1:
+                        f.write("[helixsr] NOTE: the setup script produced no output at all "
+                                "(it may have failed before its first message)\n")
+                    f.write(f"[helixsr] setup exited rc={rc}\n")
                 await decky.emit("helixsr_build_done", rc == 0, rc)
             except Exception as e:  # noqa: BLE001
                 with open(log, "a") as f:
-                    f.write(f"\n[helixsr] build failed: {e}\n")
+                    f.write(f"\n[helixsr] build watch failed: {e}\n")
                 await decky.emit("helixsr_build_done", False, -1)
             finally:
                 self._build_running = False
 
-        self._build_task = self.loop.create_task(_run())
+        self._build_task = self.loop.create_task(_watch())
         return {"ok": True, "log": str(log)}
 
     async def get_build_status(self) -> dict:
@@ -349,6 +379,7 @@ class Plugin:
                 pass
         d = await self._active_dir()
         return {"running": running, "log": tail,
+                "log_path": str(self._build_log) if self._build_log else "",
                 "network_built": bool(d and helixscan.network_ready(d))}
 
     # Asyncio-compatible long-running code, executed in a task when the plugin is loaded

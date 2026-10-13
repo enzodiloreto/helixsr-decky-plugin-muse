@@ -335,6 +335,11 @@ function Content() {
           </PanelSectionRow>
         </PanelSection>
       )}
+      {state?.plugin_version && (
+        <PanelSectionRow>
+          <div style={{ fontSize: 11, opacity: 0.6 }}>plugin v{state.plugin_version}</div>
+        </PanelSectionRow>
+      )}
     </div>
   );
 };

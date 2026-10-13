@@ -22,6 +22,7 @@ export interface HelixState {
   active_tag: string;
   versions: HelixVersion[];
   root: string;
+  plugin_version: string;
 }
 
 export interface HelixGame {
@@ -67,4 +68,4 @@ export const apiGetScanStatus = callable<[], ScanStatus>("get_scan_status");
 export const apiInstallGames = callable<[indices: number[]], { ok: boolean; output: string; rc?: number }>("install_games");
 export const apiUninstallGames = callable<[indices: number[]], { ok: boolean; output: string; rc?: number }>("uninstall_games");
 export const apiStartBuild = callable<[], { ok: boolean; log?: string; error?: string }>("start_build");
-export const apiGetBuildStatus = callable<[], { running: boolean; log: string; network_built: boolean }>("get_build_status");
+export const apiGetBuildStatus = callable<[], { running: boolean; log: string; log_path: string; network_built: boolean }>("get_build_status");
