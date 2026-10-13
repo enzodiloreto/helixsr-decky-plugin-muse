@@ -77,6 +77,26 @@ def _dir_for_tag(tag: str) -> Path | None:
     return None
 
 
+# NVIDIA's DLSS SDK DLL that HelixSR builds its network from, verified by hash.
+# Same file and hash as the reference setup/helixsr_setup.py downloads
+# (Apache-2.0, (c) lonewolf0622). The plugin fetches it with its own TLS
+# stack because the system Python the setup picks may lack SSL support
+# ("unknown url type: https"), then hands it to the setup via --dlss.
+DLSS_URL = 'https://raw.githubusercontent.com/NVIDIA/DLSS/v310.7.0/lib/Windows_x86_64/rel/nvngx_dlss.dll'
+DLSS_SHA256 = 'be6e434a94ca32499515eb62ca0e6c274526055d568d0426e4c652dcdfb6ee6e'
+DLSS_LICENSE = 'https://github.com/NVIDIA/DLSS/blob/v310.7.0/LICENSE.txt'
+DLSS_FILE = 'nvngx_dlss.dll'
+
+
+def _sha256_file(p: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _plugin_version() -> str:
     try:
         base = os.environ.get("DECKY_PLUGIN_DIR", "")
@@ -315,15 +335,18 @@ class Plugin:
             return {"ok": False, "output": f"{type(e).__name__}: {e}"}
 
     async def start_build(self) -> dict:
-        """Run helixsr-setup.sh --yes (builds the network). The process is
-        spawned in the foreground so startup failures surface immediately;
-        only waiting for it happens in the background. Game prompts default
-        to no on EOF; use install_games afterwards."""
-        if self._build_task and not self._build_task.done():
+        """Build the network: a background thread first ensures NVIDIA's DLSS
+        DLL (downloaded with the plugin's own TLS, verified by hash), then the
+        reference helixsr-setup.sh runs with --dlss so its Python never needs
+        HTTPS. Game prompts default to no on EOF; use install_games after."""
+        thread_alive = bool(self._build_thread and self._build_thread.is_alive())
+        if thread_alive:
             return {"ok": False, "error": "build already running"}
         d = await self._active_dir()
         if d is None:
             return {"ok": False, "error": "no HelixSR version downloaded"}
+        if helixscan.network_ready(d):
+            return {"ok": False, "error": "the network is already built — nothing to do"}
         script = d / "helixsr-setup.sh"
         if not script.is_file():
             return {"ok": False, "error": f"helixsr-setup.sh not found in {d}: re-download the version"}
@@ -335,41 +358,151 @@ class Plugin:
                   f"[helixsr] bash: {bash}, setup.sh: {script.stat().st_size} bytes\n")
         with open(log, "w") as f:
             f.write(header)
+        self._build_log = log
+        self._build_running = True
+        self._build_thread = threading.Thread(
+            target=self._build_run, args=(d, log, header, bash, str(script)), daemon=True)
+        self._build_thread.start()
+        return {"ok": True, "log": str(log)}
+
+    def _build_log_line(self, log: Path, msg: str):
+        with open(log, "a") as f:
+            f.write(msg + "\n")
+
+    def _emit_sync(self, ok: bool, rc: int):
+        try:
+            fut = asyncio.run_coroutine_threadsafe(decky.emit("helixsr_build_done", ok, rc), self.loop)
+            fut.result(timeout=30)
+        except Exception as e:  # noqa: BLE001
+            decky.logger.warning(f"helixsr build emit failed: {e}")
+
+    def _finish_build(self, log: Path, ok: bool, rc: int, note: str):
+        self._build_log_line(log, f"[helixsr] {note} (rc={rc})")
+        self._build_running = False
+        self._emit_sync(ok, rc)
+
+    def _build_run(self, d: Path, log: Path, header: str, bash: str, script: str):
+        """Phase 1 (worker thread): ensure the DLSS SDK DLL, with progress to
+        the build log. Phase 2 is scheduled back on the event loop."""
+        line = lambda msg: self._build_log_line(log, msg)  # noqa: E731
+        try:
+            if not self._alive:
+                self._build_running = False
+                return
+            dlss = d / DLSS_FILE
+            if dlss.is_file() and _sha256_file(dlss) == DLSS_SHA256:
+                line("[helixsr] reusing verified nvngx_dlss.dll")
+            else:
+                if dlss.is_file():
+                    line("[helixsr] existing nvngx_dlss.dll failed checksum, re-downloading")
+                    dlss.unlink()
+                line("[helixsr] HelixSR needs NVIDIA's DLSS 310.7.0 DLL to build its network on this PC.")
+                line(f"[helixsr] downloading from NVIDIA's GitHub ({DLSS_URL}), used once and deleted.")
+                line(f"[helixsr] the DLL is NVIDIA's, under NVIDIA's license: {DLSS_LICENSE}")
+                req = urllib.request.Request(DLSS_URL, headers={"User-Agent": "helixsr-decky-plugin"})
+                try:
+                    r = urllib.request.urlopen(req, timeout=120, context=_ssl_context())
+                except Exception as e:  # noqa: BLE001
+                    line(f"[helixsr] DLSS download failed: {type(e).__name__}: {e}")
+                    self._finish_build(log, False, -1, "setup failed: dlss download failed")
+                    return
+                try:
+                    total = int(r.headers.get("Content-Length") or 0)
+                except (TypeError, ValueError):
+                    total = 0
+                got, last_pct = 0, -1
+                try:
+                    with r, open(dlss, "wb") as f:
+                        while True:
+                            if not self._alive:
+                                self._build_running = False
+                                return
+                            chunk = r.read(1 << 20)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            got += len(chunk)
+                            pct = int(100 * got / total) if total else -1
+                            if pct >= last_pct + 5:
+                                last_pct = pct
+                                if total:
+                                    line(f"[helixsr] downloading nvngx_dlss.dll {got >> 20}/{total >> 20} MB ({pct}%)")
+                                else:
+                                    line(f"[helixsr] downloading nvngx_dlss.dll {got >> 20} MB ...")
+                except Exception as e:  # noqa: BLE001
+                    dlss.unlink(missing_ok=True)
+                    line(f"[helixsr] DLSS download failed: {type(e).__name__}: {e}")
+                    self._finish_build(log, False, -1, "setup failed: dlss download failed")
+                    return
+                if _sha256_file(dlss) != DLSS_SHA256:
+                    dlss.unlink(missing_ok=True)
+                    line("[helixsr] downloaded file is not the expected DLSS 310.7.0 DLL (checksum mismatch)")
+                    self._finish_build(log, False, -1, "setup failed: dlss checksum mismatch")
+                    return
+                line(f"[helixsr] nvngx_dlss.dll downloaded and verified ({got >> 20} MB)")
+            if not self._alive:
+                self._build_running = False
+                return
+            fut = asyncio.run_coroutine_threadsafe(
+                self._spawn_and_watch(d, log, header, bash, script, dlss), self.loop)
+            fut.result()
+            proc = self._build_proc
+            if not self._alive and proc is not None and proc.returncode is None:
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
+        except Exception as e:  # noqa: BLE001 (e.g. event loop closed by unload)
+            try:
+                line(f"[helixsr] build aborted: {type(e).__name__}: {e}")
+            except OSError:
+                pass
+            self._build_running = False
+
+    async def _spawn_and_watch(self, d: Path, log: Path, header: str,
+                               bash: str, script: str, dlss: Path):
         try:
             proc = await asyncio.create_subprocess_exec(
-                bash, str(script), "--yes",
+                bash, script, "--yes", "--dlss", str(dlss),
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=open(log, "a"), stderr=subprocess.STDOUT,
                 cwd=str(d))
         except Exception as e:  # noqa: BLE001
-            with open(log, "a") as f:
-                f.write(f"[helixsr] could not start build: {type(e).__name__}: {e}\n")
-            return {"ok": False, "error": f"could not start build: {type(e).__name__}: {e}"}
-        self._build_log = log
-        self._build_proc = proc
-        self._build_running = True
-
-        async def _watch():
+            self._build_log_line(log, f"[helixsr] could not start build: {type(e).__name__}: {e}")
             try:
-                await proc.wait()
-                rc = proc.returncode
-                with open(log, "a") as f:
-                    if log.stat().st_size <= len(header) + 1:
-                        f.write("[helixsr] NOTE: the setup script produced no output at all "
-                                "(it may have failed before its first message)\n")
-                    f.write(f"[helixsr] setup exited rc={rc}\n")
-                await decky.emit("helixsr_build_done", rc == 0, rc)
-            except Exception as e:  # noqa: BLE001
-                with open(log, "a") as f:
-                    f.write(f"\n[helixsr] build watch failed: {e}\n")
                 await decky.emit("helixsr_build_done", False, -1)
-            finally:
-                self._build_running = False
-                if self._build_proc is proc:
-                    self._build_proc = None
+            except Exception:  # noqa: BLE001 (e.g. unloading)
+                pass
+            self._build_running = False
+            return
+        self._build_proc = proc
 
-        self._build_task = self.loop.create_task(_watch())
-        return {"ok": True, "log": str(log)}
+        try:
+            await proc.wait()
+            rc = proc.returncode
+            if log.stat().st_size <= len(header) + 1:
+                self._build_log_line(log, "[helixsr] NOTE: the setup script produced no output at all "
+                                          "(it may have failed before its first message)")
+            if rc == 0:
+                dlss.unlink(missing_ok=True)
+                self._build_log_line(log, "[helixsr] network built; once-used nvngx_dlss.dll removed")
+            else:
+                self._build_log_line(log, "[helixsr] setup failed; nvngx_dlss.dll kept for retry")
+            self._build_log_line(log, f"[helixsr] setup exited rc={rc}")
+            try:
+                await decky.emit("helixsr_build_done", rc == 0, rc)
+            except Exception:  # noqa: BLE001 (e.g. unloading)
+                pass
+        except Exception as e:  # noqa: BLE001
+            self._build_log_line(log, f"\n[helixsr] build watch failed: {e}")
+            try:
+                await decky.emit("helixsr_build_done", False, -1)
+            except Exception:  # noqa: BLE001 (e.g. unloading)
+                pass
+        finally:
+            self._build_running = False
+            if self._build_proc is proc:
+                self._build_proc = None
 
     async def get_build_status(self) -> dict:
         running = bool(self._build_running)
@@ -389,12 +522,13 @@ class Plugin:
     # MUST NOT BLOCK - spawn tasks for long work.
     async def _main(self):
         self.loop = asyncio.get_event_loop()
+        self._alive = True
         self.settings = SettingsManager(
             name="settings",
             settings_directory=os.environ["DECKY_PLUGIN_SETTINGS_DIR"],
         )
         self.settings.read()
-        self._build_task = None
+        self._build_thread: threading.Thread | None = None
         self._build_running = False
         self._build_log: Path | None = None
         self._dl = _new_dl_state()
@@ -407,11 +541,10 @@ class Plugin:
     # completely removed
     async def _unload(self):
         decky.logger.info("HelixSR unloading")
-        # Stop tracking (and kill) a running build so a plugin reload neither
-        # orphans the setup script nor leaves a dangling watch task behind.
-        task, self._build_task = self._build_task, None
-        if task and not task.done():
-            task.cancel()
+        # Mark this instance dead so a DLSS download / pending spawn in
+        # _build_run aborts instead of orphaning work after a reload, and
+        # terminate a running setup script for the same reason.
+        self._alive = False
         proc, self._build_proc = self._build_proc, None
         if proc is not None and proc.returncode is None:
             try:
