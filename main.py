@@ -97,6 +97,41 @@ def _sha256_file(p: Path) -> str:
     return h.hexdigest()
 
 
+# Executables a HelixSR release needs (+x): ZipFile extraction drops stored
+# modes, so these are (re-)applied after download and repaired at build start.
+EXEC_FILES = ("helixsr-setup.sh", "helixsr-uninstall.sh", "setup/lib/model/launch_synth")
+
+
+def _restore_zip_modes(z: zipfile.ZipFile, root: Path):
+    """Re-apply the Unix modes stored in the zip (extractall ignores them)."""
+    for info in z.infolist():
+        name = info.filename
+        if name.startswith("/") or ".." in Path(name).parts:
+            continue
+        dest = root / name
+        mode = (info.external_attr >> 16) & 0o777
+        if mode and dest.is_file():
+            try:
+                dest.chmod(mode)
+            except OSError:
+                pass
+
+
+def _repair_exec_bits(d: Path) -> list[str]:
+    """Ensure the release's executables are executable (heals installs
+    extracted before _restore_zip_modes existed). Returns what was fixed."""
+    fixed = []
+    for rel in EXEC_FILES:
+        p = d / rel
+        try:
+            if p.is_file() and not os.access(p, os.X_OK):
+                p.chmod(0o755)
+                fixed.append(rel)
+        except OSError:
+            pass
+    return fixed
+
+
 def _plugin_version() -> str:
     try:
         base = os.environ.get("DECKY_PLUGIN_DIR", "")
@@ -205,7 +240,13 @@ class Plugin:
             with zipfile.ZipFile(tmp) as z:
                 # Top-level folder HelixSR-x.y.z
                 top = z.namelist()[0].split("/")[0]
-                z.extractall(root)
+                for info in z.infolist():
+                    # extractall() is skipped: it would also write absolute
+                    # paths and ".." entries outside root (Zip Slip)
+                    if info.filename.startswith("/") or ".." in Path(info.filename).parts:
+                        continue
+                    z.extract(info, root)
+                _restore_zip_modes(z, root)
             tmp.unlink(missing_ok=True)
             d = root / top
             (d / "helixsr-setup.sh").chmod(0o755)
@@ -389,6 +430,9 @@ class Plugin:
             if not self._alive:
                 self._build_running = False
                 return
+            fixed = _repair_exec_bits(d)
+            if fixed:
+                line(f"[helixsr] restored executable permission: {', '.join(fixed)}")
             dlss = d / DLSS_FILE
             if dlss.is_file() and _sha256_file(dlss) == DLSS_SHA256:
                 line("[helixsr] reusing verified nvngx_dlss.dll")
