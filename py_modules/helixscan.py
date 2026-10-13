@@ -440,10 +440,11 @@ def other_stores():
     return found
 
 
-def games(here, extra=()):
+def games(here, extra=(), stop=None):
     """All compatible games, in the reference's order. ADAPTED: returns
     (games, skipped) where skipped counts game folders that raised while
-    being examined, so one bad folder cannot abort the whole scan."""
+    being examined, so one bad folder cannot abort the whole scan. ADAPTED:
+    optional stop() callback aborts the scan between games (cancellation)."""
     out, skipped = [], 0
     for common in steam_libraries():
         try:
@@ -451,6 +452,8 @@ def games(here, extra=()):
         except OSError:
             continue
         for d in entries:
+            if stop is not None and stop():
+                return out, skipped
             if not d.is_dir():
                 continue
             try:
@@ -461,6 +464,8 @@ def games(here, extra=()):
             if g.route:
                 out.append(g)
     for name, d in other_stores():   # games from other stores (skipped when already listed)
+        if stop is not None and stop():
+            return out, skipped
         try:
             d = d.resolve()
         except OSError:

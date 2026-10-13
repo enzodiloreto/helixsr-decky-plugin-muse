@@ -20,6 +20,7 @@ import {
   HelixState,
   DownloadStatus,
   ScanStatus,
+  apiCancelScan,
   apiGetBuildStatus,
   apiGetDownloadStatus,
   apiGetReleases,
@@ -33,6 +34,7 @@ import {
   apiStartScan,
   apiUninstallGames,
 } from "./services/api";
+import { PLUGIN_VERSION } from "./version";
 
 function fmtSize(n: number) {
   return `${(n / 1e6).toFixed(1)} MB`;
@@ -59,6 +61,23 @@ function Content() {
       return s;
     } catch (e) {
       console.error("[helixsr] get_state failed", e);
+      return null;
+    }
+  };
+
+  const refreshReleases = async () => {
+    try {
+      const relsRes = await apiGetReleases();
+      setReleases(relsRes.releases);
+      if (!picked) setPicked(relsRes.releases[0]?.tag || "");
+      if (relsRes.error) {
+        setOutput(`Failed to load HelixSR releases: ${relsRes.error}`);
+      } else if (relsRes.releases.length) {
+        setOutput("");
+      }
+      return relsRes;
+    } catch (e) {
+      console.error("[helixsr] get_releases failed", e);
       return null;
     }
   };
@@ -107,6 +126,8 @@ function Content() {
             setOutput(`Downloaded ${st.dir}. Network built: ${st.network_built ? "yes" : "no — run Build"}.`);
             setState(await apiSetActiveVersion(st.tag));
             setPicked(st.tag);
+            setGames([]);
+            setGamesTag("");
             toaster.toast({ title: `Downloaded ${st.tag}`, body: "Set as active version" });
           } else {
             toaster.toast({ title: "Download failed", body: st.error || "" });
@@ -132,6 +153,8 @@ function Content() {
             setGames(st.games);
             setGamesTag(st.tag || "");
             setOutput(`Found ${st.games.length} compatible game(s) with ${st.tag}.${st.skipped ? ` ${st.skipped} folder(s) skipped (unreadable).` : ""}`);
+          } else if (st.cancelled) {
+            setOutput("Scan cancelled.");
           } else {
             setGames([]);
             setOutput(st.error || "game scan failed");
@@ -172,6 +195,8 @@ function Content() {
       try {
         setState(await apiSetActiveVersion(picked));
         setPicked(picked);
+        setGames([]);
+        setGamesTag("");
       } finally {
         setBusy("");
         refreshState();
@@ -200,16 +225,18 @@ function Content() {
     try {
       await apiRemoveVersion(picked);
       setOutput(`Removed ${picked}.`);
+      setGames([]);
+      setGamesTag("");
     } finally {
       setBusy("");
       refreshState();
     }
   };
 
-  const onBuild = async () => {
+  const onBuild = async (rebuild: boolean) => {
     setBusy("build");
     try {
-      const r = await apiStartBuild();
+      const r = await apiStartBuild(rebuild);
       if (!r.ok) {
         toaster.toast({ title: "Build not started", body: r.error || "" });
         setOutput(r.error || "build not started");
@@ -237,6 +264,14 @@ function Content() {
       setOutput("Scanning Steam libraries for DLSS / XeSS / FSR games ...");
     } catch (e) {
       console.error("[helixsr] start_scan failed", e);
+    }
+  };
+
+  const onCancelScan = async () => {
+    try {
+      await apiCancelScan();
+    } catch (e) {
+      console.error("[helixsr] cancel_scan failed", e);
     }
   };
 
@@ -271,6 +306,16 @@ function Content() {
 
   return (
     <div>
+      {state && state.plugin_version !== PLUGIN_VERSION && (
+        <PanelSection title="Warning">
+          <PanelSectionRow>
+            <div style={{ fontSize: 12 }}>
+              UI v{PLUGIN_VERSION} but backend v{state.plugin_version || "unknown"} — a partial update.
+              Reinstall the plugin zip and restart Decky.
+            </div>
+          </PanelSectionRow>
+        </PanelSection>
+      )}
       <PanelSection title="Version">
         <PanelSectionRow>
           <DropdownItem
@@ -280,6 +325,11 @@ function Content() {
             selectedOption={picked}
             onChange={(o) => setPicked(String(o.data))}
           />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" disabled={busy !== "" || !releases.length} onClick={() => refreshReleases()}>
+            Reload releases
+          </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
           <ButtonItem layout="below" disabled={busy !== "" || downloading || !picked} onClick={onDownloadOrUse}>
@@ -306,8 +356,8 @@ function Content() {
           </PanelSectionRow>
         )}
         <PanelSectionRow>
-          <ButtonItem layout="below" disabled={busy !== "" || building || !activeVersion} onClick={onBuild}>
-            {building ? "Building network ..." : "Build network (setup.sh)"}
+          <ButtonItem layout="below" disabled={busy !== "" || building || !activeVersion} onClick={() => onBuild(Boolean(activeVersion?.network_built))}>
+            {building ? "Building network ..." : activeVersion?.network_built ? "Rebuild network (setup.sh)" : "Build network (setup.sh)"}
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
@@ -317,6 +367,13 @@ function Content() {
             {scanning ? "Scanning ..." : `Scan games${gamesTag ? ` (${gamesTag})` : ""}`}
           </ButtonItem>
         </PanelSectionRow>
+        {scanning && (
+          <PanelSectionRow>
+            <ButtonItem layout="below" onClick={onCancelScan}>
+              Cancel scan
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
         {scanning && (
           <PanelSectionRow>
             <div style={{ width: "100%" }}>

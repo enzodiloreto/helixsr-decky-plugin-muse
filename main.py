@@ -7,6 +7,7 @@ import ssl
 import subprocess
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -149,9 +150,37 @@ def _new_dl_state(tag: str = "") -> dict:
             "dir": "", "network_built": False}
 
 
+def _zip_top(z: zipfile.ZipFile) -> str:
+    """The release's top-level folder: the single directory all files share.
+    Falls back to the legacy first-entry assumption for odd layouts."""
+    tops = set()
+    for info in z.infolist():
+        name = info.filename
+        if name.startswith("/") or ".." in Path(name).parts or info.is_dir():
+            continue
+        parts = name.split("/")
+        if len(parts) > 1:
+            tops.add(parts[0])
+    if len(tops) == 1:
+        return tops.pop()
+    return z.namelist()[0].split("/")[0]
+
+
 def _new_scan_state() -> dict:
-    return {"running": False, "done": False, "ok": False, "error": "",
+    return {"running": False, "done": False, "ok": False, "cancelled": False, "error": "",
             "games": [], "tag": "", "skipped": 0}
+
+
+def _empty_scan_cache() -> dict:
+    return {"dir": "", "games": [], "tag": "", "time": 0.0}
+
+
+# Reuse a scan for install/uninstall while it is fresh (a full library walk
+# takes minutes on big collections; game folders rarely change).
+SCAN_CACHE_TTL = 300
+
+# Give up on a hung shader compile eventually instead of polling forever.
+BUILD_TIMEOUT = 4 * 3600
 
 
 class Plugin:
@@ -220,6 +249,7 @@ class Plugin:
 
     def _download_run(self, tag: str, zip_url: str):
         st = self._dl
+        tmp: Path | None = None
         try:
             root = _helixsr_root()
             root.mkdir(parents=True, exist_ok=True)
@@ -237,9 +267,10 @@ class Plugin:
                             break
                         f.write(chunk)
                         st["downloaded"] += len(chunk)
+            if st["total"] and st["downloaded"] != st["total"]:
+                raise OSError(f"incomplete download: got {st['downloaded']} of {st['total']} bytes")
             with zipfile.ZipFile(tmp) as z:
-                # Top-level folder HelixSR-x.y.z
-                top = z.namelist()[0].split("/")[0]
+                top = _zip_top(z)
                 for info in z.infolist():
                     # extractall() is skipped: it would also write absolute
                     # paths and ".." entries outside root (Zip Slip)
@@ -256,6 +287,11 @@ class Plugin:
         except Exception as e:  # noqa: BLE001
             decky.logger.error(f"download {tag} failed: {e}")
             st["error"] = str(e)
+            if tmp is not None:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
         else:
             st["ok"] = True
         finally:
@@ -282,6 +318,13 @@ class Plugin:
         tag = self.settings.getSetting("active_tag", "")
         d = _dir_for_tag(tag) if tag else None
         if d is None:
+            if tag:
+                # Heal a stale selection instead of silently using another version.
+                try:
+                    self.settings.setSetting("active_tag", "")
+                    self.settings.commit()
+                except Exception:  # noqa: BLE001
+                    pass
             rest = _version_dirs()
             d = rest[-1] if rest else None
         return d
@@ -295,6 +338,7 @@ class Plugin:
             return {"ok": False, "error": "no HelixSR version downloaded"}
         self._scan = _new_scan_state()
         self._scan["running"] = True
+        self._scan_stop.clear()
         threading.Thread(target=self._scan_run, args=(d, _tag_of_dir(d)), daemon=True).start()
         return {"ok": True}
 
@@ -302,7 +346,13 @@ class Plugin:
         st = self._scan
         try:
             with self._ops_lock:
-                gl, skipped = helixscan.games(d)
+                gl, skipped = helixscan.games(d, stop=self._scan_stop.is_set)
+                self._scan_cache = {"dir": str(d), "games": gl, "tag": tag,
+                                    "time": time.monotonic()}
+            if self._scan_stop.is_set():
+                st["cancelled"] = True
+                st["error"] = "scan cancelled"
+                return
             out = []
             for i, g in enumerate(gl, 1):
                 try:
@@ -327,6 +377,13 @@ class Plugin:
             st["running"] = False
             st["done"] = True
 
+    async def cancel_scan(self) -> dict:
+        """Ask a running scan to stop between games; poll get_scan_status()."""
+        if not self._scan["running"]:
+            return {"ok": False, "error": "no scan running"}
+        self._scan_stop.set()
+        return {"ok": True}
+
     async def get_scan_status(self) -> dict:
         st = dict(self._scan)
         st["games"] = list(st["games"])
@@ -350,12 +407,20 @@ class Plugin:
 
     def _game_op_run(self, op: str, d: Path, indices: list[int]) -> dict:
         """Install/uninstall via the reference implementation, in-process (no
-        child process, no prompts): fast file copies, guarded by _ops_lock."""
+        child process, no prompts): fast file copies, guarded by _ops_lock.
+        Reuses a fresh scan so every click doesn't re-walk the libraries."""
         try:
             with self._ops_lock:
                 if not helixscan.network_ready(d):
                     return {"ok": False, "output": "the network is not built: run Build first"}
-                gl, _skipped = helixscan.games(d)
+                cached = self._scan_cache
+                if cached["dir"] == str(d) and cached["games"] \
+                        and time.monotonic() - cached["time"] < SCAN_CACHE_TTL:
+                    gl = cached["games"]
+                else:
+                    gl, _skipped = helixscan.games(d)
+                    self._scan_cache = {"dir": str(d), "games": gl,
+                                        "tag": _tag_of_dir(d), "time": time.monotonic()}
                 targets = []
                 for i in indices:
                     if not 1 <= i <= len(gl):
@@ -368,6 +433,10 @@ class Plugin:
                         helixscan.install(g, d)
                     else:
                         helixscan.uninstall(g)
+                # Note: the cache is intentionally NOT invalidated here. Cached
+                # Game objects only resolve index -> folder; installed() and
+                # route-relevant markers are re-read live wherever they matter,
+                # and mutating game A never changes game B's detection.
                 return {"ok": True, "output": "\n".join(helixscan.take_log())[-8000:]}
         except SystemExit as e:
             return {"ok": False, "output": str(e) or "aborted"}
@@ -375,7 +444,7 @@ class Plugin:
             decky.logger.error(f"HelixSR {op} failed: {e}")
             return {"ok": False, "output": f"{type(e).__name__}: {e}"}
 
-    async def start_build(self) -> dict:
+    async def start_build(self, rebuild: bool = False) -> dict:
         """Build the network: a background thread first ensures NVIDIA's DLSS
         DLL (downloaded with the plugin's own TLS, verified by hash), then the
         reference helixsr-setup.sh runs with --dlss so its Python never needs
@@ -386,7 +455,7 @@ class Plugin:
         d = await self._active_dir()
         if d is None:
             return {"ok": False, "error": "no HelixSR version downloaded"}
-        if helixscan.network_ready(d):
+        if not rebuild and helixscan.network_ready(d):
             return {"ok": False, "error": "the network is already built — nothing to do"}
         script = d / "helixsr-setup.sh"
         if not script.is_file():
@@ -402,7 +471,7 @@ class Plugin:
         self._build_log = log
         self._build_running = True
         self._build_thread = threading.Thread(
-            target=self._build_run, args=(d, log, header, bash, str(script)), daemon=True)
+            target=self._build_run, args=(d, log, header, bash, str(script), bool(rebuild)), daemon=True)
         self._build_thread.start()
         return {"ok": True, "log": str(log)}
 
@@ -422,7 +491,7 @@ class Plugin:
         self._build_running = False
         self._emit_sync(ok, rc)
 
-    def _build_run(self, d: Path, log: Path, header: str, bash: str, script: str):
+    def _build_run(self, d: Path, log: Path, header: str, bash: str, script: str, rebuild: bool):
         """Phase 1 (worker thread): ensure the DLSS SDK DLL, with progress to
         the build log. Phase 2 is scheduled back on the event loop."""
         line = lambda msg: self._build_log_line(log, msg)  # noqa: E731
@@ -478,6 +547,11 @@ class Plugin:
                     line(f"[helixsr] DLSS download failed: {type(e).__name__}: {e}")
                     self._finish_build(log, False, -1, "setup failed: dlss download failed")
                     return
+                if total and got != total:
+                    dlss.unlink(missing_ok=True)
+                    line(f"[helixsr] incomplete DLSS download: got {got >> 20} of {total >> 20} MB")
+                    self._finish_build(log, False, -1, "setup failed: incomplete dlss download")
+                    return
                 if _sha256_file(dlss) != DLSS_SHA256:
                     dlss.unlink(missing_ok=True)
                     line("[helixsr] downloaded file is not the expected DLSS 310.7.0 DLL (checksum mismatch)")
@@ -488,7 +562,7 @@ class Plugin:
                 self._build_running = False
                 return
             fut = asyncio.run_coroutine_threadsafe(
-                self._spawn_and_watch(d, log, header, bash, script, dlss), self.loop)
+                self._spawn_and_watch(d, log, header, bash, script, dlss, rebuild), self.loop)
             fut.result()
             proc = self._build_proc
             if not self._alive and proc is not None and proc.returncode is None:
@@ -504,10 +578,14 @@ class Plugin:
             self._build_running = False
 
     async def _spawn_and_watch(self, d: Path, log: Path, header: str,
-                               bash: str, script: str, dlss: Path):
+                               bash: str, script: str, dlss: Path, rebuild: bool):
+        args = [bash, script, "--yes"]
+        if rebuild:
+            args.append("--rebuild")
+        args += ["--dlss", str(dlss)]
         try:
             proc = await asyncio.create_subprocess_exec(
-                bash, script, "--yes", "--dlss", str(dlss),
+                *args,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=open(log, "a"), stderr=subprocess.STDOUT,
                 cwd=str(d))
@@ -522,7 +600,29 @@ class Plugin:
         self._build_proc = proc
 
         try:
-            await proc.wait()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=BUILD_TIMEOUT)
+            except asyncio.TimeoutError:
+                self._build_log_line(log, f"[helixsr] build timed out after {BUILD_TIMEOUT // 3600}h and was stopped")
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=60)
+                except asyncio.TimeoutError:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    await proc.wait()
+                rc = proc.returncode
+                self._build_log_line(log, f"[helixsr] setup exited rc={rc}")
+                try:
+                    await decky.emit("helixsr_build_done", False, rc)
+                except Exception:  # noqa: BLE001 (e.g. unloading)
+                    pass
+                return
             rc = proc.returncode
             if log.stat().st_size <= len(header) + 1:
                 self._build_log_line(log, "[helixsr] NOTE: the setup script produced no output at all "
@@ -577,6 +677,8 @@ class Plugin:
         self._build_log: Path | None = None
         self._dl = _new_dl_state()
         self._scan = _new_scan_state()
+        self._scan_stop = threading.Event()
+        self._scan_cache = _empty_scan_cache()
         self._ops_lock = threading.Lock()
         self._build_proc = None
         decky.logger.info("HelixSR-Decky-Plugin-Muse loaded")

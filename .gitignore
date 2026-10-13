@@ -35,6 +35,9 @@ Thumbs.db
 # Ignore built ts files
 dist/
 
+# Generated frontend version stamp (pnpm prebuild)
+src/version.ts
+
 __pycache__/
 
 /.yalc

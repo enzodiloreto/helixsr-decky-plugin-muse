@@ -51,6 +51,7 @@ export interface ScanStatus {
   running: boolean;
   done: boolean;
   ok: boolean;
+  cancelled: boolean;
   error: string;
   games: HelixGame[];
   tag: string;
@@ -64,8 +65,9 @@ export const apiRemoveVersion = callable<[tag: string], { ok: boolean; error?: s
 export const apiStartDownload = callable<[tag: string, zip_url: string], { ok: boolean; error?: string }>("start_download");
 export const apiGetDownloadStatus = callable<[], DownloadStatus>("get_download_status");
 export const apiStartScan = callable<[], { ok: boolean; error?: string }>("start_scan");
+export const apiCancelScan = callable<[], { ok: boolean; error?: string }>("cancel_scan");
 export const apiGetScanStatus = callable<[], ScanStatus>("get_scan_status");
 export const apiInstallGames = callable<[indices: number[]], { ok: boolean; output: string; rc?: number }>("install_games");
 export const apiUninstallGames = callable<[indices: number[]], { ok: boolean; output: string; rc?: number }>("uninstall_games");
-export const apiStartBuild = callable<[], { ok: boolean; log?: string; error?: string }>("start_build");
+export const apiStartBuild = callable<[rebuild: boolean], { ok: boolean; log?: string; error?: string }>("start_build");
 export const apiGetBuildStatus = callable<[], { running: boolean; log: string; log_path: string; network_built: boolean }>("get_build_status");
