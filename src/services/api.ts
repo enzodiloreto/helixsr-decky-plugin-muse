@@ -31,7 +31,7 @@ export interface HelixGame {
   installed: boolean;
 }
 
-export const apiGetReleases = callable<[], HelixRelease[]>("get_releases");
+export const apiGetReleases = callable<[], { releases: HelixRelease[]; error: string }>("get_releases");
 export const apiGetState = callable<[], HelixState>("get_state");
 export const apiSetActiveVersion = callable<[tag: string], HelixState>("set_active_version");
 export const apiDownloadVersion = callable<[tag: string, zip_url: string], { ok: boolean; dir?: string; network_built?: boolean; error?: string }>("download_version");

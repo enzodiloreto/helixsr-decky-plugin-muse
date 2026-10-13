@@ -58,10 +58,11 @@ function Content() {
   useEffect(() => {
     (async () => {
       try {
-        const [rels, s] = await Promise.all([apiGetReleases(), apiGetState()]);
-        setReleases(rels);
+        const [relsRes, s] = await Promise.all([apiGetReleases(), apiGetState()]);
+        setReleases(relsRes.releases);
         setState(s);
-        setPicked(s.active_tag || s.versions[0]?.tag || rels[0]?.tag || "");
+        setPicked(s.active_tag || s.versions[0]?.tag || relsRes.releases[0]?.tag || "");
+        if (relsRes.error) setOutput(`Failed to load HelixSR releases: ${relsRes.error}`);
       } catch (e) {
         console.error("[helixsr] init failed", e);
       }

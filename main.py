@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -109,13 +110,24 @@ def _run_install_script(helixsr_dir: Path, args: list[str], timeout: int = 300) 
 
 
 class Plugin:
-    async def get_releases(self) -> list[dict]:
+    async def get_releases(self) -> dict:
         def _fetch():
             try:
                 data = _fetch_json(RELEASES_URL)
+            except urllib.error.HTTPError as e:
+                try:
+                    detail = e.read().decode("utf-8", errors="replace")[:300]
+                except Exception:
+                    detail = ""
+                err = f"GitHub API HTTP {e.code}: {detail}".strip()
+                if e.code in (403, 429):
+                    err += " (possible API rate limit — wait a bit and reopen the panel)"
+                decky.logger.warning(f"get_releases failed: {err}")
+                return {"releases": [], "error": err}
             except Exception as e:  # noqa: BLE001
-                decky.logger.warning(f"get_releases failed: {e}")
-                return []
+                err = f"{type(e).__name__}: {e}"
+                decky.logger.warning(f"get_releases failed: {err}")
+                return {"releases": [], "error": err}
             out = []
             for r in data:
                 tag = r.get("tag_name", "")
@@ -127,7 +139,7 @@ class Plugin:
                             "published_at": r.get("published_at", "")[:10],
                             "zip_name": a["name"], "zip_url": a["browser_download_url"],
                             "size": a.get("size", 0)})
-            return out
+            return {"releases": out, "error": ""}
         return await asyncio.to_thread(_fetch)
 
     async def get_state(self) -> dict:
