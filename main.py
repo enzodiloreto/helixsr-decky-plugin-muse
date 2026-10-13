@@ -346,6 +346,7 @@ class Plugin:
                 f.write(f"[helixsr] could not start build: {type(e).__name__}: {e}\n")
             return {"ok": False, "error": f"could not start build: {type(e).__name__}: {e}"}
         self._build_log = log
+        self._build_proc = proc
         self._build_running = True
 
         async def _watch():
@@ -364,6 +365,8 @@ class Plugin:
                 await decky.emit("helixsr_build_done", False, -1)
             finally:
                 self._build_running = False
+                if self._build_proc is proc:
+                    self._build_proc = None
 
         self._build_task = self.loop.create_task(_watch())
         return {"ok": True, "log": str(log)}
@@ -397,13 +400,24 @@ class Plugin:
         self._dl = _new_dl_state()
         self._scan = _new_scan_state()
         self._ops_lock = threading.Lock()
+        self._build_proc = None
         decky.logger.info("HelixSR-Decky-Plugin-Muse loaded")
 
     # Function called first during the unload process, utilize this to handle your plugin being stopped, but not
     # completely removed
     async def _unload(self):
         decky.logger.info("HelixSR unloading")
-        pass
+        # Stop tracking (and kill) a running build so a plugin reload neither
+        # orphans the setup script nor leaves a dangling watch task behind.
+        task, self._build_task = self._build_task, None
+        if task and not task.done():
+            task.cancel()
+        proc, self._build_proc = self._build_proc, None
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
 
     # Function called after `_unload` during uninstall, utilize this to clean up processes and other remnants of your
     # plugin that may remain on the system
