@@ -3,6 +3,7 @@ import asyncio
 import json
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -29,8 +30,28 @@ def _helixsr_root() -> Path:
 
 def _fetch_json(url: str, timeout: int = 30):
     req = urllib.request.Request(url, headers={"User-Agent": "helixsr-decky-plugin", "Accept": "application/vnd.github+json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as r:
         return json.loads(r.read().decode("utf-8"))
+
+
+_SSL_CONTEXT: ssl.SSLContext | None = None
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """TLS context using the CA bundle shipped with the plugin.
+
+    The Python running Decky plugins on SteamOS may not find any system
+    CA certificates, which makes every HTTPS call fail with
+    CERTIFICATE_VERIFY_FAILED. The vendored Mozilla bundle fixes that.
+    """
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is None:
+        bundle = Path(__file__).parent / "py_modules" / "cacert.pem"
+        if bundle.is_file():
+            _SSL_CONTEXT = ssl.create_default_context(cafile=str(bundle))
+        else:
+            _SSL_CONTEXT = ssl.create_default_context()
+    return _SSL_CONTEXT
 
 
 def _version_dirs() -> list[Path]:
@@ -166,7 +187,7 @@ class Plugin:
             tmp = root / f".{tag}.zip"
             try:
                 req = urllib.request.Request(zip_url, headers={"User-Agent": "helixsr-decky-plugin"})
-                with urllib.request.urlopen(req, timeout=120) as r, open(tmp, "wb") as f:
+                with urllib.request.urlopen(req, timeout=120, context=_ssl_context()) as r, open(tmp, "wb") as f:
                     shutil.copyfileobj(r, f)
                 with zipfile.ZipFile(tmp) as z:
                     # Top-level folder HelixSR-x.y.z
