@@ -1,0 +1,11 @@
+{
+  "name": "HelixSR-Decky-Plugin-Muse",
+  "author": "Enzo",
+  "flags": ["debug"],
+  "api_version": 1,
+  "publish": {
+    "tags": ["utility"],
+    "description": "Download HelixSR releases, build the network, and install it into compatible games.",
+    "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/PluginLoader"
+  }
+}
