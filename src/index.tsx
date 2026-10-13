@@ -74,8 +74,14 @@ function Content() {
       } catch (e) {
         console.error("[helixsr] init failed", e);
       }
-      const listener = addEventListener<[ok: boolean, rc: number]>("helixsr_build_done", (ok, rc) => {
+      const listener = addEventListener<[ok: boolean, rc: number]>("helixsr_build_done", async (ok, rc) => {
         setBuilding(false);
+        try {
+          const st = await apiGetBuildStatus();
+          setOutput(st.log || `Build finished rc=${rc}, no log captured (full log: ${st.log_path}).`);
+        } catch {
+          setOutput(`Build finished rc=${rc}, could not read build log.`);
+        }
         toaster.toast({ title: ok ? "HelixSR build done" : "HelixSR build failed", body: `rc=${rc}` });
         refreshState();
       });
@@ -211,6 +217,10 @@ function Content() {
       }
       setBuilding(true);
       setOutput("Build started (compiling shaders — can take several minutes). Polling log ...");
+      try {
+        const s0 = await apiGetBuildStatus();
+        if (s0.log) setOutput(s0.log);
+      } catch { /* first poll will retry */ }
     } finally {
       setBusy("");
     }
