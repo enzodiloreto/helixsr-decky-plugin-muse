@@ -3,6 +3,7 @@ import {
   DropdownItem,
   PanelSection,
   PanelSectionRow,
+  ProgressBar,
   staticClasses
 } from "@decky/ui";
 import {
@@ -17,15 +18,19 @@ import {
   HelixGame,
   HelixRelease,
   HelixState,
-  apiDownloadVersion,
+  DownloadStatus,
+  ScanStatus,
   apiGetBuildStatus,
+  apiGetDownloadStatus,
   apiGetReleases,
+  apiGetScanStatus,
   apiGetState,
   apiInstallGames,
-  apiListGames,
   apiRemoveVersion,
   apiSetActiveVersion,
   apiStartBuild,
+  apiStartDownload,
+  apiStartScan,
   apiUninstallGames,
 } from "./services/api";
 
@@ -42,6 +47,9 @@ function Content() {
   const [busy, setBusy] = useState<string>("");
   const [output, setOutput] = useState<string>("");
   const [building, setBuilding] = useState<boolean>(false);
+  const [downloading, setDownloading] = useState<boolean>(false);
+  const [dl, setDl] = useState<DownloadStatus | null>(null);
+  const [scanning, setScanning] = useState<boolean>(false);
 
   const refreshState = async () => {
     try {
@@ -80,6 +88,55 @@ function Content() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Poll download progress while a download runs
+  useEffect(() => {
+    if (!downloading) return;
+    const t = setInterval(async () => {
+      try {
+        const st = await apiGetDownloadStatus();
+        setDl(st);
+        if (st.done) {
+          setDownloading(false);
+          if (st.ok) {
+            setOutput(`Downloaded ${st.dir}. Network built: ${st.network_built ? "yes" : "no — run Build"}.`);
+            setState(await apiSetActiveVersion(st.tag));
+            setPicked(st.tag);
+            toaster.toast({ title: `Downloaded ${st.tag}`, body: "Set as active version" });
+          } else {
+            toaster.toast({ title: "Download failed", body: st.error || "" });
+            setOutput(st.error || "download failed");
+          }
+          refreshState();
+        }
+      } catch { /* ignore */ }
+    }, 500);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [downloading]);
+
+  // Poll scan status while a scan runs
+  useEffect(() => {
+    if (!scanning) return;
+    const t = setInterval(async () => {
+      try {
+        const st: ScanStatus = await apiGetScanStatus();
+        if (st.done) {
+          setScanning(false);
+          if (st.ok) {
+            setGames(st.games);
+            setGamesTag(st.tag || "");
+            setOutput(`Found ${st.games.length} compatible game(s) with ${st.tag}.${st.skipped ? ` ${st.skipped} folder(s) skipped (unreadable).` : ""}`);
+          } else {
+            setGames([]);
+            setOutput(st.error || "game scan failed");
+          }
+        }
+      } catch { /* ignore */ }
+    }, 1000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scanning]);
+
   // Poll build log while a build runs
   useEffect(() => {
     if (!building) return;
@@ -104,24 +161,30 @@ function Content() {
 
   const onDownloadOrUse = async () => {
     if (!picked) return;
-    setBusy("version");
-    try {
-      if (!pickedDownloaded) {
-        if (!pickedRelease) return;
-        setOutput(`Downloading ${pickedRelease.zip_name} (${fmtSize(pickedRelease.size)}) ...`);
-        const r = await apiDownloadVersion(picked, pickedRelease.zip_url);
-        if (!r.ok) {
-          toaster.toast({ title: "Download failed", body: r.error || "" });
-          setOutput(r.error || "download failed");
-          return;
-        }
-        setOutput(`Downloaded ${r.dir}. Network built: ${r.network_built ? "yes" : "no — run Build"}.`);
+    if (pickedDownloaded) {
+      setBusy("version");
+      try {
+        setState(await apiSetActiveVersion(picked));
+        setPicked(picked);
+      } finally {
+        setBusy("");
+        refreshState();
       }
-      setState(await apiSetActiveVersion(picked));
-      setPicked(picked);
-    } finally {
-      setBusy("");
-      refreshState();
+      return;
+    }
+    if (!pickedRelease) return;
+    setDl(null);
+    try {
+      const r = await apiStartDownload(picked, pickedRelease.zip_url);
+      if (!r.ok) {
+        toaster.toast({ title: "Download not started", body: r.error || "" });
+        setOutput(r.error || "download not started");
+        return;
+      }
+      setDownloading(true);
+      setOutput(`Downloading ${pickedRelease.zip_name} (${fmtSize(pickedRelease.size)}) ...`);
+    } catch (e) {
+      console.error("[helixsr] start_download failed", e);
     }
   };
 
@@ -147,26 +210,23 @@ function Content() {
         return;
       }
       setBuilding(true);
-      setOutput("Build started (~1 min). Polling log ...");
+      setOutput("Build started (compiling shaders — can take several minutes). Polling log ...");
     } finally {
       setBusy("");
     }
   };
 
-  const onListGames = async () => {
-    setBusy("games");
+  const onScan = async () => {
     try {
-      const r = await apiListGames();
+      const r = await apiStartScan();
       if (!r.ok) {
-        setOutput(r.error || "game scan failed");
-        setGames([]);
+        setOutput(r.error || "scan not started");
         return;
       }
-      setGames(r.games);
-      setGamesTag(r.tag || "");
-      setOutput(`Found ${r.games.length} compatible game(s) with ${r.tag}.`);
-    } finally {
-      setBusy("");
+      setScanning(true);
+      setOutput("Scanning Steam libraries for DLSS / XeSS / FSR games ...");
+    } catch (e) {
+      console.error("[helixsr] start_scan failed", e);
     }
   };
 
@@ -176,7 +236,7 @@ function Content() {
       const r = await apiInstallGames([g.index]);
       setOutput(r.output);
       toaster.toast({ title: r.ok ? `Installed in ${g.name}` : "Install failed", body: r.ok ? "" : r.output.slice(-200) });
-      onListGames();
+      if (r.ok) setGames((gs) => gs.map((x) => (x.index === g.index ? { ...x, installed: true, status: "HelixSR installed" } : x)));
     } finally {
       setBusy("");
     }
@@ -188,7 +248,7 @@ function Content() {
       const r = await apiUninstallGames([g.index]);
       setOutput(r.output);
       toaster.toast({ title: r.ok ? `Removed from ${g.name}` : "Uninstall failed", body: r.ok ? "" : r.output.slice(-200) });
-      onListGames();
+      if (r.ok) onScan();
     } finally {
       setBusy("");
     }
@@ -212,10 +272,22 @@ function Content() {
           />
         </PanelSectionRow>
         <PanelSectionRow>
-          <ButtonItem layout="below" disabled={busy !== "" || !picked} onClick={onDownloadOrUse}>
-            {pickedDownloaded ? `Use ${picked}` : `Download ${picked}`}
+          <ButtonItem layout="below" disabled={busy !== "" || downloading || !picked} onClick={onDownloadOrUse}>
+            {pickedDownloaded ? `Use ${picked}` : downloading ? "Downloading ..." : `Download ${picked}`}
           </ButtonItem>
         </PanelSectionRow>
+        {downloading && (
+          <PanelSectionRow>
+            <div style={{ width: "100%" }}>
+              <ProgressBar nProgress={dl && dl.total > 0 ? Math.min(100, (100 * dl.downloaded) / dl.total) : 0} />
+              <div style={{ fontSize: 12, marginTop: 4 }}>
+                {dl && dl.total > 0
+                  ? `${fmtSize(dl.downloaded)} / ${fmtSize(dl.total)} (${Math.floor((100 * dl.downloaded) / dl.total)}%)`
+                  : dl ? `${fmtSize(dl.downloaded)} downloaded ...` : "Starting download ..."}
+              </div>
+            </div>
+          </PanelSectionRow>
+        )}
         {pickedDownloaded && (
           <PanelSectionRow>
             <ButtonItem layout="below" disabled={busy !== ""} onClick={onRemove}>
@@ -231,15 +303,23 @@ function Content() {
       </PanelSection>
       <PanelSection title="Games">
         <PanelSectionRow>
-          <ButtonItem layout="below" disabled={busy === "games" || !activeVersion} onClick={onListGames}>
-            {`Scan games${gamesTag ? ` (${gamesTag})` : ""}`}
+          <ButtonItem layout="below" disabled={scanning || busy !== "" || !activeVersion} onClick={onScan}>
+            {scanning ? "Scanning ..." : `Scan games${gamesTag ? ` (${gamesTag})` : ""}`}
           </ButtonItem>
         </PanelSectionRow>
+        {scanning && (
+          <PanelSectionRow>
+            <div style={{ width: "100%" }}>
+              <ProgressBar indeterminate={true} />
+              <div style={{ fontSize: 12, marginTop: 4 }}>Walking Steam libraries — this can take a few minutes on large collections ...</div>
+            </div>
+          </PanelSectionRow>
+        )}
         {games.map((g) => (
           <PanelSectionRow key={g.index}>
             <ButtonItem
               layout="below"
-              disabled={busy !== ""}
+              disabled={busy !== "" || scanning}
               description={`${g.name} — ${g.status}`}
               onClick={() => (g.installed ? onUninstall(g) : onInstall(g))}
             >

@@ -5,8 +5,8 @@ import re
 import shutil
 import ssl
 import subprocess
-import sys
 import tempfile
+import threading
 import urllib.error
 import urllib.request
 import zipfile
@@ -16,12 +16,12 @@ from pathlib import Path
 # For easy intellisense checkout the decky-loader code repo
 # and add the `decky-loader/plugin/imports` path to `python.analysis.extraPaths` in `.vscode/settings.json`
 import decky
+import helixscan
 from settings import SettingsManager
 
 GITHUB_OWNER = "lonewolf0622"
 GITHUB_REPO = "HelixSR"
 RELEASES_URL = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases?per_page=30"
-EMBED_MAGIC = b"HXSRNET1"
 
 
 def _helixsr_root() -> Path:
@@ -77,57 +77,15 @@ def _dir_for_tag(tag: str) -> Path | None:
     return None
 
 
-def _has_embedded_network(dll: Path) -> bool:
-    try:
-        with open(dll, "rb") as f:
-            f.seek(-32, os.SEEK_END)
-            return f.read(8) == EMBED_MAGIC
-    except OSError:
-        return False
+def _new_dl_state(tag: str = "") -> dict:
+    return {"running": False, "done": False, "ok": False, "error": "",
+            "tag": tag, "downloaded": 0, "total": 0,
+            "dir": "", "network_built": False}
 
 
-def _network_built(d: Path) -> bool:
-    dll = d / "amd_fidelityfx_dx12.dll"
-    if dll.exists() and _has_embedded_network(dll):
-        return True
-    return (d / "helixsr_weights.bin").exists() and (d / "helixsr_kernels.pak").exists()
-
-
-def _dll_version(d: Path) -> str:
-    try:
-        data = (d / "amd_fidelityfx_dx12.dll").read_bytes()[: 4 << 20]
-        m = re.search(rb"\x00HelixSR (\d+\.\d+\.\d+)\x00", data)
-        return m.group(1).decode() if m else "?"
-    except OSError:
-        return "?"
-
-
-def _parse_game_list(output: str) -> list[dict]:
-    games: list[dict] = []
-    for line in output.splitlines():
-        m = re.match(r"\s*(\d+)\.\s+(.*?)\s{2,}(.*)\s*$", line)
-        if m:
-            idx = int(m.group(1))
-            name = m.group(2).strip()
-            status = m.group(3).strip()
-            games.append({"index": idx, "name": name, "status": status,
-                          "installed": status.lower().startswith("helixsr installed")})
-    return games
-
-
-def _run_install_script(helixsr_dir: Path, args: list[str], timeout: int = 300) -> dict:
-    script = helixsr_dir / "setup" / "helixsr_install.py"
-    if not script.exists():
-        return {"ok": False, "output": f"helixsr_install.py not found in {helixsr_dir}"}
-    cmd = [sys.executable, str(script), str(helixsr_dir)] + args
-    try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        output = (p.stdout or "") + (p.stderr or "")
-        return {"ok": p.returncode == 0, "output": output[-8000:], "rc": p.returncode}
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "output": "timed out"}
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "output": str(e)}
+def _new_scan_state() -> dict:
+    return {"running": False, "done": False, "ok": False, "error": "",
+            "games": [], "tag": "", "skipped": 0}
 
 
 class Plugin:
@@ -167,9 +125,13 @@ class Plugin:
         def _state():
             versions = []
             for d in _version_dirs():
+                try:
+                    dll_version = helixscan.version_of(d / "amd_fidelityfx_dx12.dll")
+                except OSError:
+                    dll_version = "?"
                 versions.append({"tag": _tag_of_dir(d), "dir": d.name,
-                                 "network_built": _network_built(d),
-                                 "dll_version": _dll_version(d)})
+                                 "network_built": helixscan.network_ready(d),
+                                 "dll_version": dll_version})
             return {"active_tag": self.settings.getSetting("active_tag", ""),
                     "versions": versions, "root": str(_helixsr_root())}
         return await asyncio.to_thread(_state)
@@ -180,32 +142,55 @@ class Plugin:
         decky.logger.info(f"HelixSR active_tag={tag}")
         return await self.get_state()
 
-    async def download_version(self, tag: str, zip_url: str) -> dict:
-        def _dl():
+    async def start_download(self, tag: str, zip_url: str) -> dict:
+        """Download + extract a release in a background thread; poll get_download_status()."""
+        if self._dl["running"]:
+            return {"ok": False, "error": "a download is already running"}
+        self._dl = _new_dl_state(tag)
+        self._dl["running"] = True
+        threading.Thread(target=self._download_run, args=(tag, zip_url), daemon=True).start()
+        return {"ok": True}
+
+    def _download_run(self, tag: str, zip_url: str):
+        st = self._dl
+        try:
             root = _helixsr_root()
             root.mkdir(parents=True, exist_ok=True)
             tmp = root / f".{tag}.zip"
-            try:
-                req = urllib.request.Request(zip_url, headers={"User-Agent": "helixsr-decky-plugin"})
-                with urllib.request.urlopen(req, timeout=120, context=_ssl_context()) as r, open(tmp, "wb") as f:
-                    shutil.copyfileobj(r, f)
-                with zipfile.ZipFile(tmp) as z:
-                    # Top-level folder HelixSR-x.y.z
-                    top = z.namelist()[0].split("/")[0]
-                    z.extractall(root)
-                tmp.unlink(missing_ok=True)
-                d = root / top
-                (d / "helixsr-setup.sh").chmod(0o755)
-                (d / "helixsr-uninstall.sh").chmod(0o755)
-                if not self.settings.getSetting("active_tag"):
-                    self.settings.setSetting("active_tag", tag)
-                    self.settings.commit()
-                return {"ok": True, "dir": top,
-                        "network_built": _network_built(d)}
-            except Exception as e:  # noqa: BLE001
-                decky.logger.error(f"download_version {tag} failed: {e}")
-                return {"ok": False, "error": str(e)}
-        return await asyncio.to_thread(_dl)
+            req = urllib.request.Request(zip_url, headers={"User-Agent": "helixsr-decky-plugin"})
+            with urllib.request.urlopen(req, timeout=120, context=_ssl_context()) as r:
+                try:
+                    st["total"] = int(r.headers.get("Content-Length") or 0)
+                except (TypeError, ValueError):
+                    st["total"] = 0
+                with open(tmp, "wb") as f:
+                    while True:
+                        chunk = r.read(1 << 20)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        st["downloaded"] += len(chunk)
+            with zipfile.ZipFile(tmp) as z:
+                # Top-level folder HelixSR-x.y.z
+                top = z.namelist()[0].split("/")[0]
+                z.extractall(root)
+            tmp.unlink(missing_ok=True)
+            d = root / top
+            (d / "helixsr-setup.sh").chmod(0o755)
+            (d / "helixsr-uninstall.sh").chmod(0o755)
+            st["dir"] = top
+            st["network_built"] = helixscan.network_ready(d)
+        except Exception as e:  # noqa: BLE001
+            decky.logger.error(f"download {tag} failed: {e}")
+            st["error"] = str(e)
+        else:
+            st["ok"] = True
+        finally:
+            st["running"] = False
+            st["done"] = True
+
+    async def get_download_status(self) -> dict:
+        return dict(self._dl)
 
     async def remove_version(self, tag: str) -> dict:
         def _rm():
@@ -228,28 +213,94 @@ class Plugin:
             d = rest[-1] if rest else None
         return d
 
-    async def list_games(self) -> dict:
+    async def start_scan(self) -> dict:
+        """Scan Steam libraries for compatible games in a background thread; poll get_scan_status()."""
+        if self._scan["running"]:
+            return {"ok": False, "error": "a scan is already running"}
         d = await self._active_dir()
         if d is None:
-            return {"ok": False, "error": "no HelixSR version downloaded", "games": []}
-        res = await asyncio.to_thread(_run_install_script, d, ["list"])
-        if not res["ok"]:
-            return {"ok": False, "error": res["output"][-500:], "games": []}
-        return {"ok": True, "games": _parse_game_list(res["output"]), "tag": _tag_of_dir(d)}
+            return {"ok": False, "error": "no HelixSR version downloaded"}
+        self._scan = _new_scan_state()
+        self._scan["running"] = True
+        threading.Thread(target=self._scan_run, args=(d, _tag_of_dir(d)), daemon=True).start()
+        return {"ok": True}
+
+    def _scan_run(self, d: Path, tag: str):
+        st = self._scan
+        try:
+            with self._ops_lock:
+                gl, skipped = helixscan.games(d)
+            out = []
+            for i, g in enumerate(gl, 1):
+                try:
+                    inst = g.installed()
+                except Exception:  # noqa: BLE001
+                    inst = False
+                try:
+                    status = "HelixSR installed" if inst else g.label()
+                except Exception:  # noqa: BLE001
+                    status = g.route or "compatible"
+                out.append({"index": i, "name": g.name, "folder": str(g.folder),
+                            "route": g.route, "inputs": list(g.inputs),
+                            "installed": inst, "status": status})
+            st["games"] = out
+            st["tag"] = tag
+            st["skipped"] = skipped
+            st["ok"] = True
+        except Exception as e:  # noqa: BLE001
+            decky.logger.error(f"game scan failed: {e}")
+            st["error"] = f"{type(e).__name__}: {e}"
+        finally:
+            st["running"] = False
+            st["done"] = True
+
+    async def get_scan_status(self) -> dict:
+        st = dict(self._scan)
+        st["games"] = list(st["games"])
+        return st
 
     async def install_games(self, indices: list[int]) -> dict:
-        d = await self._active_dir()
-        if d is None:
-            return {"ok": False, "output": "no HelixSR version downloaded"}
-        args = ["install"] + [str(int(i)) for i in indices]
-        return await asyncio.to_thread(_run_install_script, d, args)
+        return await self._game_op("install", indices)
 
     async def uninstall_games(self, indices: list[int]) -> dict:
+        return await self._game_op("uninstall", indices)
+
+    async def _game_op(self, op: str, indices: list[int]) -> dict:
         d = await self._active_dir()
         if d is None:
             return {"ok": False, "output": "no HelixSR version downloaded"}
-        args = ["uninstall"] + [str(int(i)) for i in indices]
-        return await asyncio.to_thread(_run_install_script, d, args)
+        try:
+            clean = [int(i) for i in indices]
+        except (TypeError, ValueError):
+            return {"ok": False, "output": f"bad game numbers: {indices}"}
+        return await asyncio.to_thread(self._game_op_run, op, d, clean)
+
+    def _game_op_run(self, op: str, d: Path, indices: list[int]) -> dict:
+        """Install/uninstall via the reference implementation, in-process (no
+        child process, no prompts): fast file copies, guarded by _ops_lock."""
+        try:
+            with self._ops_lock:
+                if not helixscan.network_ready(d):
+                    return {"ok": False, "output": "the network is not built: run Build first"}
+                gl, _skipped = helixscan.games(d)
+                targets = []
+                for i in indices:
+                    if not 1 <= i <= len(gl):
+                        return {"ok": False, "output": f"not a game number: {i} (scan found {len(gl)})"}
+                    targets.append(gl[i - 1])
+                helixscan.take_log()
+                for g in targets:
+                    decky.logger.info(f"HelixSR {op} {g.name} (route {g.route})")
+                    if op == "install":
+                        helixscan.install(g, d)
+                    else:
+                        helixscan.uninstall(g)
+                return {"ok": True, "output": "\n".join(helixscan.take_log())[-8000:]}
+        except SystemExit as e:
+            return {"ok": False, "output": str(e) or "aborted"}
+        except Exception as e:  # noqa: BLE001
+            decky.logger.error(f"HelixSR {op} failed: {e}")
+            return {"ok": False, "output": f"{type(e).__name__}: {e}"}
 
     async def start_build(self) -> dict:
         """Run helixsr-setup.sh --yes in the background (builds the network, ~1 min).
@@ -298,7 +349,7 @@ class Plugin:
                 pass
         d = await self._active_dir()
         return {"running": running, "log": tail,
-                "network_built": bool(d and _network_built(d))}
+                "network_built": bool(d and helixscan.network_ready(d))}
 
     # Asyncio-compatible long-running code, executed in a task when the plugin is loaded
     # MUST NOT BLOCK - spawn tasks for long work.
@@ -312,6 +363,9 @@ class Plugin:
         self._build_task = None
         self._build_running = False
         self._build_log: Path | None = None
+        self._dl = _new_dl_state()
+        self._scan = _new_scan_state()
+        self._ops_lock = threading.Lock()
         decky.logger.info("HelixSR-Decky-Plugin-Muse loaded")
 
     # Function called first during the unload process, utilize this to handle your plugin being stopped, but not

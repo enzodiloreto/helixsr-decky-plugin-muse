@@ -27,16 +27,43 @@ export interface HelixState {
 export interface HelixGame {
   index: number;
   name: string;
-  status: string;
+  folder: string;
+  route: string;
+  inputs: string[];
   installed: boolean;
+  status: string;
+}
+
+export interface DownloadStatus {
+  running: boolean;
+  done: boolean;
+  ok: boolean;
+  error: string;
+  tag: string;
+  downloaded: number;
+  total: number;
+  dir: string;
+  network_built: boolean;
+}
+
+export interface ScanStatus {
+  running: boolean;
+  done: boolean;
+  ok: boolean;
+  error: string;
+  games: HelixGame[];
+  tag: string;
+  skipped: number;
 }
 
 export const apiGetReleases = callable<[], { releases: HelixRelease[]; error: string }>("get_releases");
 export const apiGetState = callable<[], HelixState>("get_state");
 export const apiSetActiveVersion = callable<[tag: string], HelixState>("set_active_version");
-export const apiDownloadVersion = callable<[tag: string, zip_url: string], { ok: boolean; dir?: string; network_built?: boolean; error?: string }>("download_version");
 export const apiRemoveVersion = callable<[tag: string], { ok: boolean; error?: string }>("remove_version");
-export const apiListGames = callable<[], { ok: boolean; games: HelixGame[]; tag?: string; error?: string }>("list_games");
+export const apiStartDownload = callable<[tag: string, zip_url: string], { ok: boolean; error?: string }>("start_download");
+export const apiGetDownloadStatus = callable<[], DownloadStatus>("get_download_status");
+export const apiStartScan = callable<[], { ok: boolean; error?: string }>("start_scan");
+export const apiGetScanStatus = callable<[], ScanStatus>("get_scan_status");
 export const apiInstallGames = callable<[indices: number[]], { ok: boolean; output: string; rc?: number }>("install_games");
 export const apiUninstallGames = callable<[indices: number[]], { ok: boolean; output: string; rc?: number }>("uninstall_games");
 export const apiStartBuild = callable<[], { ok: boolean; log?: string; error?: string }>("start_build");
