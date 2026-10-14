@@ -1,6 +1,6 @@
 // Display-only Material You primitives (cards, chips, stepper, divider).
 // No focusable elements: gamepad navigation stays entirely on Decky controls.
-import { CSSProperties, ReactNode } from "react";
+import { CSSProperties, ReactNode, useState } from "react";
 import { Focusable } from "@decky/ui";
 import { M3, M3Tone } from "./theme";
 
@@ -168,6 +168,11 @@ export function MButton(props: {
   style?: CSSProperties;
 }) {
   const { variant = "tonal", disabled, onClick, description, children, style } = props;
+  // Inline styles cannot do :hover, so hover/focus feedback is tracked state.
+  // Gamepad focus keeps Steam's native ring via Focusable on top of this.
+  const [hover, setHover] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const lit = !disabled && (hover || focused);
   const body = (
     <>
       <div style={{ ...M3.type.label, fontSize: 14, textAlign: "center" }}>{children}</div>
@@ -196,9 +201,12 @@ export function MButton(props: {
     justifyContent: "center",
     gap: 2,
     padding: "10px 16px",
+    margin: "4px 0",
     borderRadius: M3.shape.full,
     cursor: disabled ? "default" : "pointer",
     userSelect: "none",
+    transition: "filter 120ms ease, background-color 120ms ease",
+    ...(lit ? { filter: "brightness(1.22)" } : {}),
     ...variantStyle[variant],
     ...(disabled ? disabledStyle : {}),
     ...style,
@@ -218,6 +226,10 @@ export function MButton(props: {
       style={box}
       onActivate={() => fire()}
       onClick={() => fire()}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
       onKeyDown={(e: any) => {
         if (e.key === "Enter") fire();
       }}
