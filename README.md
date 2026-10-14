@@ -42,9 +42,12 @@ The panel follows four steps, with a status line and current step shown on top:
    or the experimental DLSS loader). **Install in / Remove from** each game,
    **Install/Remove all** at once, or **Migrate** every outdated game to the active
    build in one go. Per-game **Settings** edit `helixsr.ini` inline (sharpening,
-   sharpness, game slider, WaveSize). Extra non-Steam folders can be added by path.
+   sharpness, game slider, WaveSize), with named **presets** and a per-game **Log**
+   viewer offering one-tap fixes for known patterns. **Verify installs** detects
+   games a Steam update broke, with one-tap **Repair**. Extra non-Steam folders
+   can be added by path.
 4. **Storage** — per-version disk use, remove-all-except-active (refuses versions
-   games still use), clear cached SDK files.
+   games still use), clear cached SDK files, and full **Reset everything**.
 5. **Log** — every failure surfaces its actual reason here instead of failing
    silently; destructive actions ask for a second tap to confirm.
 

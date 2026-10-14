@@ -290,7 +290,7 @@ def _plugin_version() -> str:
 
 
 def _new_dl_state(tag: str = "") -> dict:
-    return {"running": False, "done": False, "ok": False, "error": "",
+    return {"running": False, "done": False, "ok": False, "cancelled": False, "error": "",
             "tag": tag, "downloaded": 0, "total": 0,
             "dir": "", "network_built": False}
 
@@ -393,13 +393,12 @@ def _read_ini_values(p: Path):
 
 
 def _normalize_ini_values(values: dict):
-    """Validate RPC settings (template key names). Returns (normalized, error)."""
+    """Validate RPC settings (template key names). Only provided keys are
+    returned, so partial updates (e.g. auto-fix) leave the rest untouched."""
     norm = {}
-    for key in ("Sharpener", "Sharpness", "UseGameSlider", "WaveSize"):
-        if key not in values:
-            norm[key] = INI_DEFAULTS[key]
-            continue
-        v = values[key]
+    for key, v in values.items():
+        if key not in INI_SECTIONS:
+            return None, f"unknown setting: {key}"
         if key == "Sharpener":
             if not isinstance(v, str) or v.lower() not in ("off", "nvidia", "rcas"):
                 return None, f"bad Sharpener: {v!r} (off, nvidia, rcas)"
@@ -413,17 +412,17 @@ def _normalize_ini_values(values: dict):
                 return None, f"bad Sharpness: {v!r} (0.0 to 1.0)"
             norm[key] = str(round(f, 2))
         elif key == "UseGameSlider":
-            if not isinstance(v, bool):
+            if isinstance(v, bool):
+                norm[key] = "true" if v else "false"
+            elif isinstance(v, str) and v.lower() in ("true", "false"):
+                norm[key] = v.lower()
+            else:
                 return None, f"bad UseGameSlider: {v!r} (true or false)"
-            norm[key] = "true" if v else "false"
         elif key == "WaveSize":
             s = str(v)
             if s not in ("default", "64", "32"):
                 return None, f"bad WaveSize: {v!r} (default, 64, 32)"
             norm[key] = s
-    for k in values:
-        if k not in INI_SECTIONS:
-            return None, f"unknown setting: {k}"
     return norm, ""
 
 
@@ -465,6 +464,41 @@ def _new_mig_state() -> dict:
     return {"running": False, "done": False, "ok": False, "error": "",
             "tag": "", "total": 0, "current": 0, "current_name": "",
             "results": []}
+
+
+def _repair_direct(g, here):
+    """Plugin addition (not reference code): reinstall the FSR drop-in after a
+    game update replaced HelixSR's DLL. The reference's install_direct()
+    deliberately refuses this case ("left as it is") so it never clobbers an
+    unrecognized file; repair is explicit instead: the game's current DLL
+    becomes the new backup, then the drop-in proceeds as usual."""
+    for t in g.fsr_targets:
+        orig = helixscan.original(t)
+        if t.exists() and not helixscan.is_helixsr(t):
+            decky.logger.info(f"HelixSR repair {t}: not HelixSR (game updated); keeping it as {orig.name}")
+            if orig.exists():
+                orig.unlink()
+            os.replace(t, orig)
+        if not t.exists():
+            if not orig.exists():
+                decky.logger.info(f"HelixSR repair {t}: game file and backup both missing; skipped")
+                continue
+            shutil.copyfile(orig, t)
+        if helixscan.is_helixsr(t):
+            if not orig.exists():
+                decky.logger.info(f"HelixSR repair {t}: HelixSR without a backup of the game's file; left as it is")
+                continue
+            helixscan.copy_checked(here / helixscan.DLL, t)   # update
+        else:
+            if not orig.exists():
+                os.replace(t, orig)
+            helixscan.copy_checked(here / helixscan.DLL, t)
+        helixscan.copy_network(here, t.parent)
+        made = helixscan.read_marker(t.parent).get("ini_made")
+        (t.parent / helixscan.MARKER).write_text(json.dumps(
+            {"helixsr": helixscan.version_of(here / helixscan.DLL), "files": [t.name],
+             "route": "direct", "ini_made": helixscan.make_ini(t.parent, made)}, indent=1) + "\n")
+        decky.logger.info(f"HelixSR repair installed {t} (the game's file kept as {orig.name})")
 
 
 class Plugin:
@@ -553,7 +587,15 @@ class Plugin:
             return {"ok": False, "error": "a download is already running"}
         self._dl = _new_dl_state(tag)
         self._dl["running"] = True
+        self._dl_stop.clear()
         threading.Thread(target=self._download_run, args=(tag, zip_url), daemon=True).start()
+        return {"ok": True}
+
+    async def cancel_download(self) -> dict:
+        """Ask a running release download to stop; poll get_download_status()."""
+        if not self._dl["running"]:
+            return {"ok": False, "error": "no download running"}
+        self._dl_stop.set()
         return {"ok": True}
 
     def _download_run(self, tag: str, zip_url: str):
@@ -571,11 +613,18 @@ class Plugin:
                     st["total"] = 0
                 with open(tmp, "wb") as f:
                     while True:
+                        if self._dl_stop.is_set():
+                            break
                         chunk = r.read(1 << 20)
                         if not chunk:
                             break
                         f.write(chunk)
                         st["downloaded"] += len(chunk)
+            if self._dl_stop.is_set():
+                tmp.unlink(missing_ok=True)
+                st["cancelled"] = True
+                st["error"] = "download cancelled"
+                return
             if st["total"] and st["downloaded"] != st["total"]:
                 raise OSError(f"incomplete download: got {st['downloaded']} of {st['total']} bytes")
             with zipfile.ZipFile(tmp) as z:
@@ -1102,6 +1151,11 @@ class Plugin:
     async def uninstall_games(self, indices: list[int]) -> dict:
         return await self._game_op("uninstall", indices)
 
+    async def repair_games(self, indices: list[int]) -> dict:
+        """Reinstall into games a Steam update broke (drop-in DLL replaced).
+        Other routes repair through the normal install path (idempotent)."""
+        return await self._game_op("repair", indices)
+
     def _resolve_games(self, d: Path, extra: list | None = None) -> list:
         """Cached or fresh Game objects for installs. Call with _ops_lock held."""
         if extra is None:
@@ -1164,6 +1218,11 @@ class Plugin:
                     decky.logger.info(f"HelixSR {op} {g.name} (route {g.route})")
                     if op == "install":
                         helixscan.install(g, d)
+                    elif op == "repair":
+                        if g.route == "direct":
+                            _repair_direct(g, d)
+                        else:
+                            helixscan.install(g, d)
                     else:
                         helixscan.uninstall(g)
                 # Note: the cache is intentionally NOT invalidated here. Cached
@@ -1248,6 +1307,296 @@ class Plugin:
             decky.logger.error(f"HelixSR game settings failed: {e}")
             msg = f"{type(e).__name__}: {e}"
             return {"ok": False, "error" if op == "get" else "output": msg}
+
+    # Documented log patterns with one-tap fixes (structure carries more later).
+    LOG_FIXES = [
+        {"id": "wave64", "match": "wave32",
+         "label": "32-lane shaders detected — set WaveSize 64 (RX 7000/9000, OptiScaler games)",
+         "settings": {"WaveSize": "64"}},
+    ]
+
+    def _game_log_paths(self, g) -> list:
+        paths = []
+        if g.target is not None:
+            folder = g.target / helixscan.FOLDER
+            if (folder / "helixsr.log").is_file():
+                paths.append(folder / "helixsr.log")
+            for name in ("helixsr.log", "helixsr_loader.log"):
+                if (g.target / name).is_file():
+                    paths.append(g.target / name)
+        for t in g.fsr_targets:
+            p = t.parent / "helixsr.log"
+            if p.is_file() and p not in paths:
+                paths.append(p)
+        return paths
+
+    async def get_game_log(self, index: int) -> dict:
+        d = await self._active_dir()
+        if d is None:
+            return {"ok": False, "error": "no HelixSR version downloaded"}
+        try:
+            idx = int(index)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": f"bad game number: {index}"}
+        extra = self._extra_folders()
+        return await asyncio.to_thread(self._game_log_run, d, idx, extra)
+
+    def _game_log_run(self, d: Path, index: int, extra: list) -> dict:
+        try:
+            with self._ops_lock:
+                gl = self._resolve_games(d, extra)
+                if not 1 <= index <= len(gl):
+                    return {"ok": False, "error": f"not a game number: {index} (scan found {len(gl)})"}
+                g = gl[index - 1]
+                paths = self._game_log_paths(g)
+                if not paths:
+                    return {"ok": False, "error": "no helixsr.log yet — launch the game once with HelixSR installed"}
+                logs = []
+                for p in paths:
+                    try:
+                        tail = p.read_bytes()[-6000:].decode("utf-8", errors="replace")
+                    except OSError as e:
+                        tail = f"<unreadable: {e}>"
+                    logs.append({"path": str(p), "tail": tail})
+                blob = "\n".join(l["tail"] for l in logs).lower()
+                fixes = [{"id": f["id"], "label": f["label"]}
+                         for f in self.LOG_FIXES if f["match"].lower() in blob]
+                return {"ok": True, "name": g.name, "logs": logs, "fixes": fixes}
+        except Exception as e:  # noqa: BLE001
+            decky.logger.error(f"HelixSR game log failed: {e}")
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    async def apply_log_fix(self, index: int, fix_id: str) -> dict:
+        d = await self._active_dir()
+        if d is None:
+            return {"ok": False, "output": "no HelixSR version downloaded"}
+        try:
+            idx = int(index)
+        except (TypeError, ValueError):
+            return {"ok": False, "output": f"bad game number: {index}"}
+        fix = next((f for f in self.LOG_FIXES if f["id"] == str(fix_id)), None)
+        if fix is None:
+            return {"ok": False, "output": f"unknown fix: {fix_id}"}
+        extra = self._extra_folders()
+        cur = await asyncio.to_thread(self._game_log_run, d, idx, extra)
+        if not cur.get("ok"):
+            return {"ok": False, "output": cur.get("error", "cannot read log")}
+        if str(fix_id) not in [f["id"] for f in cur.get("fixes", [])]:
+            return {"ok": False, "output": "pattern no longer present in the log"}
+        return await asyncio.to_thread(self._game_settings_run, "set", d, idx, dict(fix["settings"]))
+
+    async def get_ini_presets(self) -> dict:
+        try:
+            presets = self.settings.getSetting("ini_presets", {})
+        except Exception:  # noqa: BLE001
+            presets = {}
+        if not isinstance(presets, dict):
+            presets = {}
+        return {"ok": True, "presets": {str(k): v for k, v in presets.items() if isinstance(v, dict)}}
+
+    async def save_ini_preset(self, name: str, values: dict) -> dict:
+        name = str(name or "").strip()
+        if not name or len(name) > 40:
+            return {"ok": False, "error": "preset name must be 1-40 characters"}
+        if not isinstance(values, dict):
+            return {"ok": False, "error": "bad settings"}
+        norm, err = _normalize_ini_values(values)
+        if err:
+            return {"ok": False, "error": err}
+        full = dict(INI_DEFAULTS)
+        full.update(norm)
+        try:
+            presets = self.settings.getSetting("ini_presets", {})
+        except Exception:  # noqa: BLE001
+            presets = {}
+        if not isinstance(presets, dict):
+            presets = {}
+        presets[name] = full
+        self.settings.setSetting("ini_presets", presets)
+        self.settings.commit()
+        return {"ok": True, "presets": presets}
+
+    async def delete_ini_preset(self, name: str) -> dict:
+        try:
+            presets = self.settings.getSetting("ini_presets", {})
+        except Exception:  # noqa: BLE001
+            presets = {}
+        if not isinstance(presets, dict):
+            presets = {}
+        presets.pop(str(name), None)
+        self.settings.setSetting("ini_presets", presets)
+        self.settings.commit()
+        return {"ok": True, "presets": presets}
+
+    async def apply_ini_preset(self, index: int, name: str) -> dict:
+        d = await self._active_dir()
+        if d is None:
+            return {"ok": False, "output": "no HelixSR version downloaded"}
+        try:
+            idx = int(index)
+        except (TypeError, ValueError):
+            return {"ok": False, "output": f"bad game number: {index}"}
+        try:
+            presets = self.settings.getSetting("ini_presets", {})
+        except Exception:  # noqa: BLE001
+            presets = {}
+        if not isinstance(presets, dict) or str(name) not in presets:
+            return {"ok": False, "output": f"no preset named {name}"}
+        return await asyncio.to_thread(self._game_settings_run, "set", d, idx,
+                                       dict(presets[str(name)]))
+
+    async def verify_installs(self) -> dict:
+        d = await self._active_dir()
+        if d is None:
+            return {"ok": False, "error": "no HelixSR version downloaded"}
+        extra = self._extra_folders()
+        return await asyncio.to_thread(self._verify_run, d, extra)
+
+    def _install_traces(self, g) -> bool:
+        """Marker/backup files proving HelixSR was installed here, even if the
+        live files no longer qualify (e.g. a Steam update replaced the DLL)."""
+        if g.target is not None and (g.target / helixscan.FOLDER / helixscan.MARKER).is_file():
+            return True
+        for t in g.fsr_targets:
+            if helixscan.original(t).exists():
+                return True
+            if (t.parent / helixscan.MARKER).is_file():
+                return True
+        return False
+
+    def _verify_run(self, d: Path, extra: list) -> dict:
+        try:
+            with self._ops_lock:
+                gl = self._resolve_games(d, extra)
+                results = []
+                for i, g in enumerate(gl, 1):
+                    try:
+                        installed = g.installed()
+                    except Exception:  # noqa: BLE001
+                        installed = False
+                    if not installed and not self._install_traces(g):
+                        continue
+                    problems = self._verify_game(g)
+                    results.append({"index": i, "name": g.name, "route": g.route,
+                                    "installed": installed, "ok": not problems,
+                                    "problems": problems})
+            return {"ok": True, "games": results}
+        except Exception as e:  # noqa: BLE001
+            decky.logger.error(f"HelixSR verify failed: {e}")
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    def _verify_game(self, g) -> list:
+        problems = []
+        if g.route == "direct":
+            if not g.fsr_targets:
+                return ["no FSR DLL found anymore"]
+            for t in g.fsr_targets:
+                orig = helixscan.original(t)
+                if not t.exists():
+                    problems.append(f"missing {t.name} (game updated?)")
+                elif not helixscan.is_helixsr(t):
+                    problems.append(f"{t.name} is no longer HelixSR (game updated?)")
+                if not orig.exists():
+                    problems.append(f"backup {orig.name} missing")
+        elif g.route == "optiscaler":
+            if g.target is None:
+                return ["game folder not found anymore"]
+            folder = g.target / helixscan.FOLDER
+            marker = folder / helixscan.MARKER
+            if not marker.is_file():
+                problems.append("HelixSR folder record missing")
+                return problems
+            try:
+                rec = json.loads(marker.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return ["install record unreadable"]
+            opti = rec.get("optiscaler", "dxgi.dll") if isinstance(rec, dict) else "dxgi.dll"
+            if not (g.target / opti).exists():
+                problems.append(f"{opti} missing next to the game's exe")
+            for n in (helixscan.OWN, helixscan.OWN_SR):
+                if not (folder / n).is_file():
+                    problems.append(f"{n} missing in HelixSR folder")
+            if not (g.target / "OptiScaler.ini").is_file():
+                problems.append("OptiScaler.ini missing next to the game's exe")
+        elif g.route == "dlss":
+            if g.target is None:
+                return ["game folder not found anymore"]
+            if not helixscan.is_loader(g.target / helixscan.LOADER):
+                problems.append(f"{helixscan.LOADER} missing or replaced next to the game's exe")
+            if not helixscan.is_helixsr(g.target / helixscan.CORE):
+                problems.append(f"{helixscan.CORE} missing or replaced next to the game's exe")
+        else:
+            problems.append(f"unknown route {g.route}")
+        return problems
+
+    async def factory_reset(self) -> dict:
+        busy = self._dl["running"] or self._scan["running"] or self._mig["running"] \
+            or self._pu["running"] \
+            or bool(self._build_thread and self._build_thread.is_alive())
+        if busy:
+            return {"ok": False, "error": "finish the running task first"}
+        d = await self._active_dir()
+        extra = self._extra_folders()
+        return await asyncio.to_thread(self._factory_reset_run, d, extra)
+
+    def _factory_reset_run(self, d: Path | None, extra: list) -> dict:
+        uninstalled, failed = [], []
+        try:
+            with self._ops_lock:
+                if d is not None:
+                    gl, _skipped = helixscan.games(d, extra)
+                    for g in gl:
+                        try:
+                            if not g.installed():
+                                continue
+                        except Exception:  # noqa: BLE001
+                            continue
+                        try:
+                            helixscan.take_log()
+                            helixscan.uninstall(g)
+                            uninstalled.append(g.name)
+                        except Exception as e:  # noqa: BLE001
+                            failed.append(f"{g.name}: {e}")
+                removed, skipped, freed = [], [], 0
+                still_used: dict[str, list] = {}
+                if d is not None:
+                    gl2, _skipped = helixscan.games(d, extra)
+                    for g in gl2:
+                        try:
+                            if not g.installed():
+                                continue
+                        except Exception:  # noqa: BLE001
+                            continue
+                        for v in _marker_versions(g):
+                            still_used.setdefault(v, []).append(g.name)
+                for v in _version_dirs():
+                    tag = _tag_of_dir(v)
+                    try:
+                        dll_version = helixscan.version_of(v / "amd_fidelityfx_dx12.dll")
+                    except OSError:
+                        dll_version = "?"
+                    users = still_used.get(dll_version, []) if dll_version != "?" else []
+                    if users:
+                        skipped.append(f"{tag} (still used by {', '.join(users)})")
+                        continue
+                    freed += _dir_size(v)
+                    shutil.rmtree(v, ignore_errors=True)
+                    removed.append(tag)
+                try:
+                    self._scan_cache_path().unlink(missing_ok=True)
+                except OSError:
+                    pass
+                self._scan_cache = _empty_scan_cache()
+                self.settings.setSetting("active_tag", "")
+                self.settings.setSetting("extra_folders", [])
+                self.settings.commit()
+                return {"ok": True, "games_uninstalled": uninstalled, "games_failed": failed,
+                        "versions_removed": removed, "versions_skipped": skipped,
+                        "freed_mb": round(freed / 1e6, 1),
+                        "note": "ini presets were kept"}
+        except Exception as e:  # noqa: BLE001
+            decky.logger.error(f"HelixSR factory reset failed: {e}")
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
     async def start_build(self, rebuild: bool = False) -> dict:
         """Build the network: a background thread first ensures NVIDIA's DLSS
@@ -1481,6 +1830,7 @@ class Plugin:
         self._build_running = False
         self._build_log: Path | None = None
         self._dl = _new_dl_state()
+        self._dl_stop = threading.Event()
         self._scan = _new_scan_state()
         self._mig = _new_mig_state()
         self._update_check = {"at": 0.0, "result": {"ok": True, "update_available": False}}

@@ -53,6 +53,7 @@ class PluginCase(unittest.TestCase):
         p.settings = StaticSettings(active)
         p._alive = True
         p._dl = main._new_dl_state()
+        p._dl_stop = threading.Event()
         p._scan = main._new_scan_state()
         p._mig = main._new_mig_state()
         p._update_check = {"at": 0.0, "result": {"ok": True, "update_available": False}}
@@ -610,9 +611,204 @@ class PluginCase(unittest.TestCase):
         self.assertIn("Sharpness = 0.7", out)
         self.assertNotIn("\n\n", out.replace("\r\n", "\n"))
 
-    # --- helpers ------------------------------------------------------------
-
     def test_repair_exec_bits(self):
+        d = self.tmp / "healed"
+        (d / "setup/lib/model").mkdir(parents=True)
+        t = d / "setup/lib/model/launch_synth"; t.write_bytes(b"elf"); t.chmod(0o644)
+        self.assertEqual(main._repair_exec_bits(d), ["setup/lib/model/launch_synth"])
+        self.assertEqual(_mode(t), 0o755)
+        self.assertEqual(main._repair_exec_bits(d), [])
+
+    # --- logs, presets, verify, cancel, reset ----------------------------------
+
+    def test_game_log_and_fix(self):
+        self._version_dir(tag="9.9.9")
+        home = make_steam_home(self.tmp)
+        os.environ["DECKY_USER_HOME"] = str(home)
+        p = self._plugin()
+        folder = home / ".local/share/lib/steamapps/common/GameB"
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            idx = await self._game_index(p, "GameB")
+            self.assertTrue((await p.install_games([idx], "optiscaler"))["ok"])
+            r = await p.get_game_log(idx)
+            self.assertFalse(r["ok"])
+            self.assertIn("launch the game", r["error"])
+            (folder / "HelixSR" / "helixsr.log").write_text(
+                "helixsr 1.0\nnetwork kernels wave32, all good\n")
+            r = await p.get_game_log(idx)
+            self.assertTrue(r["ok"], r.get("error"))
+            self.assertEqual(len(r["logs"]), 1)
+            self.assertIn("wave32", r["logs"][0]["tail"])
+            self.assertEqual([f["id"] for f in r["fixes"]], ["wave64"])
+            w = await p.apply_log_fix(idx, "wave64")
+            self.assertTrue(w["ok"], w.get("output"))
+            r2 = await p.get_game_settings(idx)
+            self.assertEqual(r2["values"]["WaveSize"], "64")
+            self.assertEqual(r2["values"]["Sharpener"], "off")
+            (folder / "HelixSR" / "helixsr.log").write_text("helixsr 1.0\nall good\n")
+            stale = await p.apply_log_fix(idx, "wave64")
+            self.assertFalse(stale["ok"])
+            self.assertIn("no longer present", stale["output"])
+            unknown = await p.apply_log_fix(idx, "nope")
+            self.assertFalse(unknown["ok"])
+        asyncio.run(go())
+
+    def test_ini_presets(self):
+        p = self._plugin()
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            self.assertEqual((await p.get_ini_presets())["presets"], {})
+            bad = await p.save_ini_preset("", {"WaveSize": "64"})
+            self.assertFalse(bad["ok"])
+            bad = await p.save_ini_preset("x", {"WaveSize": "128"})
+            self.assertFalse(bad["ok"])
+            ok = await p.save_ini_preset("perf", {"Sharpener": "rcas", "Sharpness": "0.8",
+                                                  "UseGameSlider": False, "WaveSize": "64"})
+            self.assertTrue(ok["ok"])
+            self.assertIn("perf", (await p.get_ini_presets())["presets"])
+            rm = await p.delete_ini_preset("perf")
+            self.assertNotIn("perf", rm["presets"])
+        asyncio.run(go())
+
+    def test_preset_apply_and_partial_set(self):
+        self._version_dir(tag="9.9.9")
+        home = make_steam_home(self.tmp)
+        os.environ["DECKY_USER_HOME"] = str(home)
+        p = self._plugin()
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            idx = await self._game_index(p, "GameB")
+            self.assertTrue((await p.install_games([idx], "optiscaler"))["ok"])
+            await p.save_ini_preset("q", {"Sharpener": "nvidia", "Sharpness": "0.6",
+                                          "UseGameSlider": True, "WaveSize": "default"})
+            w = await p.apply_ini_preset(idx, "q")
+            self.assertTrue(w["ok"], w.get("output"))
+            r = await p.get_game_settings(idx)
+            self.assertEqual(r["values"]["Sharpener"], "nvidia")
+            # partial set leaves the rest untouched
+            w = await p.set_game_settings(idx, {"WaveSize": "64"})
+            self.assertTrue(w["ok"], w.get("output"))
+            r = await p.get_game_settings(idx)
+            self.assertEqual(r["values"]["WaveSize"], "64")
+            self.assertEqual(r["values"]["Sharpener"], "nvidia")
+            missing = await p.apply_ini_preset(idx, "nope")
+            self.assertFalse(missing["ok"])
+        asyncio.run(go())
+
+    def test_verify_and_repair(self):
+        self._version_dir(tag="9.9.9")
+        home = make_steam_home(self.tmp)
+        os.environ["DECKY_USER_HOME"] = str(home)
+        p = self._plugin()
+        ga = home / ".local/share/lib/steamapps/common/GameA/bin/amd_fidelityfx_upscaler_dx12.dll"
+        gb = home / ".local/share/lib/steamapps/common/GameB"
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            idx_a = await self._game_index(p, "GameA")
+            idx_b = await self._game_index(p, "GameB")
+            self.assertTrue((await p.install_games([idx_a]))["ok"])
+            self.assertTrue((await p.install_games([idx_b], "optiscaler"))["ok"])
+            v = await p.verify_installs()
+            self.assertTrue(v["ok"])
+            self.assertTrue(all(g["ok"] for g in v["games"]), v["games"])
+            # simulate a Steam update overwriting the drop-in
+            ga.write_bytes(b"brand new game DLL")
+            v = await p.verify_installs()
+            bad = next(g for g in v["games"] if g["name"] == "GameA")
+            self.assertFalse(bad["ok"])
+            self.assertTrue(any("pdate" in x for x in bad["problems"]), bad["problems"])
+            # plain install refuses to clobber the unrecognized file ...
+            r = await p.install_games([idx_a])
+            self.assertTrue(r["ok"])
+            self.assertIn("left as it is", r["output"])
+            # ... repair refreshes the backup and drops in again
+            r = await p.repair_games([idx_a])
+            self.assertTrue(r["ok"], r["output"])
+            self.assertTrue(main.helixscan.is_helixsr(ga))
+            self.assertEqual((ga.parent / "amd_fidelityfx_upscaler_dx12.original.dll").read_bytes(),
+                             b"brand new game DLL")
+            # simulate a deleted OptiScaler loader
+            (gb / "dxgi.dll").unlink()
+            v = await p.verify_installs()
+            bad = next(g for g in v["games"] if g["name"] == "GameB")
+            self.assertFalse(bad["ok"])
+            self.assertIn("dxgi.dll missing next to the game's exe", bad["problems"])
+            self.assertTrue((await p.install_games([idx_b], "optiscaler"))["ok"])
+            v = await p.verify_installs()
+            self.assertTrue(all(g["ok"] for g in v["games"]), v["games"])
+        asyncio.run(go())
+
+    def test_download_cancel(self):
+        p = self._plugin()
+
+        import time
+
+        class Slow:
+            headers = {}
+
+            def read(self, n):
+                time.sleep(0.2)
+                return b"x" * (1 << 20)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            with mock.patch.object(main.urllib.request, "urlopen", return_value=Slow()):
+                self.assertEqual(await p.start_download("v9.9.9", "https://example.invalid/x.zip"),
+                                 {"ok": True})
+                await asyncio.sleep(0.3)
+                self.assertEqual(await p.cancel_download(), {"ok": True})
+                st = await self._wait_done(p.get_download_status)
+            self.assertTrue(st["cancelled"])
+            self.assertFalse(st["ok"])
+            root = Path(os.environ["DECKY_PLUGIN_RUNTIME_DIR"]) / "helixsr"
+            self.assertFalse((root / ".v9.9.9.zip").exists())
+            self.assertEqual(await p.cancel_download(), {"ok": False, "error": "no download running"})
+        asyncio.run(go())
+
+    def test_factory_reset(self):
+        old = self._version_dir(tag="9.9.8")
+        new = self._version_dir(tag="9.9.9")
+        (old / "pad.bin").write_bytes(b"\x00" * (3 << 20))
+        home = make_steam_home(self.tmp)
+        os.environ["DECKY_USER_HOME"] = str(home)
+        ga = home / ".local/share/lib/steamapps/common/GameA/bin/amd_fidelityfx_upscaler_dx12.dll"
+        original = ga.read_bytes()
+        p = self._plugin(active="v9.9.9")
+        p.settings.setSetting("extra_folders", ["/tmp"])
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            await p.save_ini_preset("keep", {"Sharpener": "off", "Sharpness": "0.5",
+                                             "UseGameSlider": False, "WaveSize": "default"})
+            idx = await self._game_index(p, "GameA")
+            self.assertTrue((await p.install_games([idx]))["ok"])
+            p._dl["running"] = True
+            busy = await p.factory_reset()
+            self.assertFalse(busy["ok"])
+            p._dl["running"] = False
+            r = await p.factory_reset()
+            self.assertTrue(r["ok"], r.get("error"))
+            self.assertEqual(r["games_uninstalled"], ["GameA"])
+            self.assertEqual(sorted(r["versions_removed"]), ["v9.9.8", "v9.9.9"])
+            self.assertGreaterEqual(r["freed_mb"], 3.0)
+            self.assertEqual(ga.read_bytes(), original)
+            rt = Path(os.environ["DECKY_PLUGIN_RUNTIME_DIR"]) / "helixsr"
+            self.assertFalse((rt / "scan-cache.json").exists())
+            self.assertEqual(p.settings.getSetting("active_tag"), "")
+            self.assertEqual(p.settings.getSetting("extra_folders"), [])
+            self.assertIn("keep", (await p.get_ini_presets())["presets"])
+        asyncio.run(go())
         d = self.tmp / "healed"
         (d / "setup/lib/model").mkdir(parents=True)
         t = d / "setup/lib/model/launch_synth"

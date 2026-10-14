@@ -24,21 +24,31 @@ import {
   HelixRelease,
   HelixState,
   DownloadStatus,
+  GameLog,
   GameSettings,
+  LogFix,
   MigrationStatus,
   PluginUpdateInfo,
   PluginUpdateStatus,
   ReadinessCheck,
   ScanCache,
   ScanStatus,
+  VerifyResult,
   apiAddScanFolder,
+  apiApplyIniPreset,
+  apiApplyLogFix,
+  apiCancelDownload,
   apiCancelScan,
   apiCheckBuildReady,
   apiCheckPluginUpdate,
   apiClearDlssCache,
+  apiDeleteIniPreset,
+  apiFactoryReset,
   apiGetBuildStatus,
   apiGetDownloadStatus,
+  apiGetGameLog,
   apiGetGameSettings,
+  apiGetIniPresets,
   apiGetLastScan,
   apiGetMigrationStatus,
   apiGetPluginUpdateStatus,
@@ -49,6 +59,8 @@ import {
   apiRemoveOldVersions,
   apiRemoveScanFolder,
   apiRemoveVersion,
+  apiRepairGames,
+  apiSaveIniPreset,
   apiSetActiveVersion,
   apiSetGameSettings,
   apiStartBuild,
@@ -57,6 +69,7 @@ import {
   apiStartPluginUpdate,
   apiStartScan,
   apiUninstallGames,
+  apiVerifyInstalls,
 } from "./services/api";
 import { PLUGIN_VERSION } from "./version";
 
@@ -136,6 +149,13 @@ function Content() {
   const [iniFor, setIniFor] = useState<number | null>(null);
   const [ini, setIni] = useState<GameSettings | null>(null);
   const [iniPath, setIniPath] = useState<string>("");
+  const [presets, setPresets] = useState<Record<string, GameSettings>>({});
+  const [presetPick, setPresetPick] = useState<string>("");
+  const [presetName, setPresetName] = useState<string>("");
+  const [logFor, setLogFor] = useState<number | null>(null);
+  const [gameLogs, setGameLogs] = useState<GameLog[]>([]);
+  const [logFixes, setLogFixes] = useState<LogFix[]>([]);
+  const [verify, setVerify] = useState<VerifyResult[] | null>(null);
   const [migrating, setMigrating] = useState<boolean>(false);
   const [mig, setMig] = useState<MigrationStatus | null>(null);
   const [folderInput, setFolderInput] = useState<string>("");
@@ -277,7 +297,9 @@ function Content() {
         if (st.done) {
           setDownloading(false);
           setDlRate("");
-          if (st.ok) {
+          if (st.cancelled) {
+            setOutput("Download cancelled.");
+          } else if (st.ok) {
             setOutput(`Downloaded ${st.dir}. Network built: ${st.network_built ? "yes" : "no — run Build"}.`);
             setState(await apiSetActiveVersion(st.tag));
             setPicked(st.tag);
@@ -307,8 +329,12 @@ function Content() {
           if (st.ok) {
             setGames(st.games);
             setGamesTag(st.tag || "");
+            setVerify(null);
             setIniFor(null);
             setIni(null);
+            setLogFor(null);
+            setGameLogs([]);
+            setLogFixes([]);
             const rm: Record<number, string> = {};
             st.games.forEach((g) => { rm[g.index] = g.route; });
             setRoutes(rm);
@@ -394,6 +420,14 @@ function Content() {
   const activeVersion = state?.versions.find((v) => v.tag === state.active_tag);
   const pickedRelease = releases.find((r) => r.tag === picked);
   const pickedDownloaded = picked ? downloadedTags.has(picked) : false;
+
+  const onCancelDownload = async () => {
+    try {
+      await apiCancelDownload();
+    } catch (e) {
+      console.error("[helixsr] cancel_download failed", e);
+    }
+  };
 
   const onDownloadOrUse = async () => {
     if (!picked) return;
@@ -529,6 +563,9 @@ function Content() {
       setIni(r.values);
       setIniPath(r.path || "");
       setIniFor(g.index);
+      setPresetPick("");
+      setPresetName("");
+      await onLoadPresets();
       if (r.note) setOutput(r.note);
     } finally {
       setBusy("");
@@ -545,6 +582,153 @@ function Content() {
     } finally {
       setBusy("");
     }
+  };
+
+  const onVerify = async () => {
+    setBusy("verify");
+    try {
+      const r = await apiVerifyInstalls();
+      if (!r.ok) {
+        setOutput(r.error || "verify failed");
+        return;
+      }
+      setVerify(r.games);
+      const broken = r.games.filter((g) => !g.ok);
+      setOutput(broken.length
+        ? `${broken.length} game(s) need repair:\n${broken.map((g) => `✗ ${g.name}: ${g.problems.join("; ")}`).join("\n")}`
+        : `All ${r.games.length} installed game(s) verified OK.`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const onRepair = async (indices: number[]) => {
+    if (!indices.length) return;
+    setBusy("repair");
+    try {
+      const r = await apiRepairGames(indices);
+      setOutput(r.output || "");
+      toaster.toast({ title: r.ok ? "Repair done" : "Repair failed", body: r.ok ? "" : (r.output || "").slice(-200) });
+      if (r.ok) onVerify();
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const onOpenLog = async (g: HelixGame) => {
+    setBusy(`log-${g.index}`);
+    try {
+      const r = await apiGetGameLog(g.index);
+      if (!r.ok) {
+        setOutput(r.error || "cannot read log");
+        return;
+      }
+      setGameLogs(r.logs || []);
+      setLogFixes(r.fixes || []);
+      setLogFor(g.index);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const onApplyFix = async (fixId: string) => {
+    if (logFor === null) return;
+    setBusy("log-fix");
+    try {
+      const r = await apiApplyLogFix(logFor, fixId);
+      setOutput(r.output || "");
+      toaster.toast({ title: r.ok ? "Fix applied" : "Fix failed", body: r.ok ? "" : (r.output || "").slice(-200) });
+      if (r.ok) onOpenLog({ index: logFor } as HelixGame);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const onLoadPresets = async () => {
+    try {
+      const r = await apiGetIniPresets();
+      if (r.ok) setPresets(r.presets || {});
+    } catch (e) {
+      console.error("[helixsr] get_ini_presets failed", e);
+    }
+  };
+
+  const onSavePreset = async () => {
+    if (!presetName.trim()) return;
+    setBusy("preset");
+    try {
+      const r = await apiSaveIniPreset(presetName.trim(), {
+        Sharpener: "off", Sharpness: "0.5", UseGameSlider: "false", WaveSize: "default",
+        ...(ini || {}),
+      });
+      if (!r.ok) {
+        setOutput(r.error || "cannot save preset");
+        return;
+      }
+      setPresets(r.presets || {});
+      setPresetName("");
+      setOutput(`Preset "${presetName.trim()}" saved.`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const onDeletePreset = async () => {
+    if (!presetPick) return;
+    setBusy("preset");
+    try {
+      const r = await apiDeleteIniPreset(presetPick);
+      if (r.ok) setPresets(r.presets || {});
+      setPresetPick("");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const onApplyPreset = async () => {
+    if (iniFor === null || !presetPick) return;
+    setBusy("preset");
+    try {
+      const r = await apiApplyIniPreset(iniFor, presetPick);
+      setOutput(r.output || "");
+      toaster.toast({ title: r.ok ? `Preset "${presetPick}" applied` : "Apply failed", body: r.ok ? "" : (r.output || "").slice(-200) });
+      if (r.ok) {
+        const g = games.find((x) => x.index === iniFor);
+        if (g) onOpenIni(g);
+      }
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const onResetAll = async () => {
+    await armOrRun("reset everything",
+      "Tap again to confirm: uninstall everywhere and wipe versions, caches and settings (presets are kept).",
+      async () => {
+        setBusy("reset");
+        try {
+          const r = await apiFactoryReset();
+          if (!r.ok) {
+            setOutput(r.error || "reset failed");
+            return;
+          }
+          const lines = [
+            `Uninstalled: ${(r.games_uninstalled || []).join(", ") || "none"}`,
+            ...((r.games_failed || []).map((x) => `FAILED: ${x}`)),
+            `Versions removed: ${(r.versions_removed || []).join(", ") || "none"}`,
+            ...((r.versions_skipped || []).map((x) => `kept ${x}`)),
+            `Freed ${r.freed_mb} MB.`,
+            r.note || "",
+          ];
+          setOutput(lines.join("\n"));
+          setGames([]);
+          setGamesTag("");
+          setVerify(null);
+          refreshState();
+        } finally {
+          setBusy("");
+        }
+      });
   };
 
   const onInstallAll = async () => {
@@ -832,6 +1016,13 @@ function Content() {
             </div>
           </PanelSectionRow>
         )}
+        {downloading && (
+          <PanelSectionRow>
+            <ButtonItem layout="below" onClick={onCancelDownload}>
+              Cancel download
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
         {pickedDownloaded && (
           <PanelSectionRow>
             <ButtonItem layout="below" disabled={busy !== ""} onClick={onRemove}>
@@ -930,6 +1121,36 @@ function Content() {
             </ButtonItem>
           </PanelSectionRow>
         )}
+        {installedCount > 0 && (
+          <PanelSectionRow>
+            <ButtonItem layout="below" disabled={busy !== "" || scanning} onClick={onVerify}>
+              Verify installs
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
+        {verify && verify.some((v) => !v.ok) && (
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              disabled={busy !== ""}
+              onClick={() => onRepair(verify.filter((v) => !v.ok).map((v) => v.index))}
+            >
+              {`Repair all ${verify.filter((v) => !v.ok).length} broken game(s)`}
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
+        {verify && verify.filter((v) => !v.ok).map((v) => (
+          <PanelSectionRow key={`verify-${v.index}`}>
+            <ButtonItem
+              layout="below"
+              disabled={busy !== ""}
+              description={v.problems.join("; ")}
+              onClick={() => onRepair([v.index])}
+            >
+              {`Repair ${v.name}`}
+            </ButtonItem>
+          </PanelSectionRow>
+        ))}
         {games.map((g) => (
           <Card key={g.index} variant="outlined" style={{ width: "100%", marginBottom: M3.space.sm }}>
             <PanelSectionRow>
@@ -966,6 +1187,37 @@ function Content() {
                   {`Settings — ${g.name}`}
                 </ButtonItem>
               </PanelSectionRow>
+            )}
+            {g.installed && logFor !== g.index && (
+              <PanelSectionRow>
+                <ButtonItem layout="below" disabled={busy !== "" || scanning} onClick={() => onOpenLog(g)}>
+                  {`Log — ${g.name}`}
+                </ButtonItem>
+              </PanelSectionRow>
+            )}
+            {g.installed && logFor === g.index && (
+              <div>
+                {gameLogs.map((l, i) => (
+                  <PanelSectionRow key={i}>
+                    <Card tone="neutral" radius={M3.shape.md} style={{ background: M3.color.surfaceContainerLow, width: "100%" }}>
+                      <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs, overflowWrap: "anywhere" }}>{l.path}</div>
+                      <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 12, maxHeight: 200, overflowY: "auto", overflowX: "hidden", fontFamily: M3.mono }}>{l.tail.slice(-4000)}</div>
+                    </Card>
+                  </PanelSectionRow>
+                ))}
+                {logFixes.map((f) => (
+                  <PanelSectionRow key={f.id}>
+                    <ButtonItem layout="below" disabled={busy !== ""} description={f.label} onClick={() => onApplyFix(f.id)}>
+                      Apply fix
+                    </ButtonItem>
+                  </PanelSectionRow>
+                ))}
+                <PanelSectionRow>
+                  <ButtonItem layout="below" onClick={() => { setLogFor(null); setGameLogs([]); setLogFixes([]); }}>
+                    Close log
+                  </ButtonItem>
+                </PanelSectionRow>
+              </div>
             )}
             {g.installed && iniFor === g.index && ini && (
               <div>
@@ -1019,13 +1271,51 @@ function Content() {
                     onChange={(o) => setIni({ ...ini, WaveSize: String(o.data) })}
                   />
                 </PanelSectionRow>
+                {Object.keys(presets).length > 0 && (
+                  <PanelSectionRow>
+                    <DropdownItem
+                      label="Preset"
+                      description="Apply a saved set of values"
+                      rgOptions={Object.keys(presets).map((n) => ({ data: n, label: n }))}
+                      selectedOption={presetPick}
+                      onChange={(o) => setPresetPick(String(o.data))}
+                    />
+                  </PanelSectionRow>
+                )}
+                {presetPick && presets[presetPick] && (
+                  <PanelSectionRow>
+                    <ButtonItem layout="below" disabled={busy !== ""} onClick={onApplyPreset}>
+                      {`Apply "${presetPick}"`}
+                    </ButtonItem>
+                  </PanelSectionRow>
+                )}
+                {presetPick && (
+                  <PanelSectionRow>
+                    <ButtonItem layout="below" disabled={busy !== ""} onClick={onDeletePreset}>
+                      {`Delete "${presetPick}"`}
+                    </ButtonItem>
+                  </PanelSectionRow>
+                )}
+                <PanelSectionRow>
+                  <TextField
+                    label="Preset name"
+                    description="Save the current editor values as a preset"
+                    value={presetName}
+                    onChange={(e) => setPresetName((e.target as HTMLInputElement).value)}
+                  />
+                </PanelSectionRow>
+                <PanelSectionRow>
+                  <ButtonItem layout="below" disabled={busy !== "" || !presetName.trim()} onClick={onSavePreset}>
+                    Save preset
+                  </ButtonItem>
+                </PanelSectionRow>
                 <PanelSectionRow>
                   <ButtonItem layout="below" disabled={busy !== ""} onClick={onSaveIni}>
                     Save settings
                   </ButtonItem>
                 </PanelSectionRow>
                 <PanelSectionRow>
-                  <ButtonItem layout="below" onClick={() => { setIniFor(null); setIni(null); }}>
+                  <ButtonItem layout="below" onClick={() => { setIniFor(null); setIni(null); setPresetPick(""); setPresetName(""); }}>
                     Close settings
                   </ButtonItem>
                 </PanelSectionRow>
@@ -1077,6 +1367,11 @@ function Content() {
         <PanelSectionRow>
           <ButtonItem layout="below" disabled={busy !== ""} onClick={onClearDlss}>
             {confirm === "clear SDK cache" ? "Confirm clear cache?" : "Clear cached SDK files"}
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" disabled={busy !== ""} onClick={onResetAll}>
+            {confirm === "reset everything" ? "Confirm reset all?" : "Reset everything"}
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>

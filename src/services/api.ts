@@ -74,12 +74,32 @@ export interface DownloadStatus {
   running: boolean;
   done: boolean;
   ok: boolean;
+  cancelled: boolean;
   error: string;
   tag: string;
   downloaded: number;
   total: number;
   dir: string;
   network_built: boolean;
+}
+
+export interface GameLog {
+  path: string;
+  tail: string;
+}
+
+export interface LogFix {
+  id: string;
+  label: string;
+}
+
+export interface VerifyResult {
+  index: number;
+  name: string;
+  route: string;
+  installed: boolean;
+  ok: boolean;
+  problems: string[];
 }
 
 export interface ScanStatus {
@@ -130,12 +150,22 @@ export const apiGetState = callable<[], HelixState>("get_state");
 export const apiSetActiveVersion = callable<[tag: string], HelixState>("set_active_version");
 export const apiRemoveVersion = callable<[tag: string], { ok: boolean; error?: string }>("remove_version");
 export const apiStartDownload = callable<[tag: string, zip_url: string], { ok: boolean; error?: string }>("start_download");
+export const apiCancelDownload = callable<[], { ok: boolean; error?: string }>("cancel_download");
 export const apiGetDownloadStatus = callable<[], DownloadStatus>("get_download_status");
 export const apiStartScan = callable<[], { ok: boolean; error?: string }>("start_scan");
 export const apiCancelScan = callable<[], { ok: boolean; error?: string }>("cancel_scan");
 export const apiGetScanStatus = callable<[], ScanStatus>("get_scan_status");
 export const apiGetLastScan = callable<[], ScanCache>("get_last_scan");
 export const apiInstallGames = callable<[indices: number[], route: string], { ok: boolean; output: string; rc?: number }>("install_games");
+export const apiRepairGames = callable<[indices: number[]], { ok: boolean; output: string }>("repair_games");
+export const apiVerifyInstalls = callable<[], { ok: boolean; games: VerifyResult[]; error?: string }>("verify_installs");
+export const apiGetGameLog = callable<[index: number], { ok: boolean; name?: string; logs?: GameLog[]; fixes?: LogFix[]; error?: string }>("get_game_log");
+export const apiApplyLogFix = callable<[index: number, fix_id: string], { ok: boolean; output?: string }>("apply_log_fix");
+export const apiGetIniPresets = callable<[], { ok: boolean; presets: Record<string, GameSettings> }>("get_ini_presets");
+export const apiSaveIniPreset = callable<[name: string, values: GameSettings], { ok: boolean; presets?: Record<string, GameSettings>; error?: string }>("save_ini_preset");
+export const apiDeleteIniPreset = callable<[name: string], { ok: boolean; presets?: Record<string, GameSettings> }>("delete_ini_preset");
+export const apiApplyIniPreset = callable<[index: number, name: string], { ok: boolean; output?: string }>("apply_ini_preset");
+export const apiFactoryReset = callable<[], { ok: boolean; games_uninstalled?: string[]; games_failed?: string[]; versions_removed?: string[]; versions_skipped?: string[]; freed_mb?: number; note?: string; error?: string }>("factory_reset");
 export const apiGetGameSettings = callable<[index: number], { ok: boolean; path?: string; values?: GameSettings; note?: string; error?: string }>("get_game_settings");
 export const apiSetGameSettings = callable<[index: number, values: GameSettings], { ok: boolean; output?: string; path?: string }>("set_game_settings");
 export const apiUninstallGames = callable<[indices: number[]], { ok: boolean; output: string; rc?: number }>("uninstall_games");
