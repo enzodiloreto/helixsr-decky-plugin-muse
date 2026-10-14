@@ -37,7 +37,21 @@ export function Card(props: {
           }
         : { background: bg, color: fg };
   return (
-    <div style={{ borderRadius: radius, padding: M3.space.md, ...base, ...style }}>
+    <div
+      style={{
+        borderRadius: radius,
+        padding: M3.space.md,
+        // Contain padding/borders inside the panel width (Steam content-box
+        // + width:100% otherwise overflows the right edge by 2x padding),
+        // never exceed it, and wrap unbreakable strings (paths, log lines).
+        boxSizing: "border-box",
+        maxWidth: "100%",
+        minWidth: 0,
+        overflowWrap: "anywhere",
+        ...base,
+        ...style,
+      }}
+    >
       {children}
     </div>
   );
@@ -54,6 +68,7 @@ export function Chip(props: { tone?: M3Tone; children: ReactNode }) {
         color: fg,
         borderRadius: M3.shape.full,
         padding: "3px 10px",
+        maxWidth: "100%",
         ...M3.type.caption,
         fontWeight: 500,
         whiteSpace: "nowrap",

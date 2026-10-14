@@ -817,7 +817,7 @@ function Content() {
         </PanelSectionRow>
         {downloading && (
           <PanelSectionRow>
-            <div style={{ width: "100%" }}>
+            <div style={{ width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
               <ProgressBar nProgress={dl && dl.total > 0 ? Math.min(100, (100 * dl.downloaded) / dl.total) : 0} nTransitionSec={M3.motion.bar} />
               <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.xs, fontVariantNumeric: M3.tabular }}>
                 {dl && dl.total > 0
@@ -854,7 +854,7 @@ function Content() {
         </PanelSectionRow>
         {building && buildProg && (
           <PanelSectionRow>
-            <div style={{ width: "100%" }}>
+            <div style={{ width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
               <ProgressBar nProgress={buildProg.pct} nTransitionSec={M3.motion.bar} />
               <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.xs, fontVariantNumeric: M3.tabular }}>{buildProg.pct}% — {buildProg.label}</div>
             </div>
@@ -883,7 +883,7 @@ function Content() {
         )}
         {scanning && (
           <PanelSectionRow>
-            <div style={{ width: "100%" }}>
+            <div style={{ width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
               <ProgressBar indeterminate={true} />
               <div style={{ fontSize: 12, marginTop: 4 }}>Walking Steam libraries — this can take a few minutes on large collections ...</div>
             </div>
@@ -903,7 +903,7 @@ function Content() {
         )}
         {migrating && (
           <PanelSectionRow>
-            <div style={{ width: "100%" }}>
+            <div style={{ width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
               <ProgressBar nProgress={mig && mig.total > 0 ? Math.min(100, (100 * mig.current) / mig.total) : 0} nTransitionSec={M3.motion.bar} />
               <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.xs, fontVariantNumeric: M3.tabular }}>
                 {mig && mig.total > 0 ? `Migrating ${mig.current}/${mig.total}${mig.current_name ? `: ${mig.current_name}` : ""} ...` : "Starting migration ..."}
@@ -928,8 +928,8 @@ function Content() {
         {games.map((g) => (
           <Card key={g.index} variant="outlined" style={{ width: "100%", marginBottom: M3.space.sm }}>
             <PanelSectionRow>
-              <div style={{ display: "flex", alignItems: "center", gap: M3.space.sm, flexWrap: "wrap", width: "100%" }}>
-                <span style={{ ...M3.type.title, flex: 1 }}>{g.name}</span>
+              <div style={{ display: "flex", alignItems: "center", gap: M3.space.sm, flexWrap: "wrap", width: "100%", boxSizing: "border-box", minWidth: 0 }}>
+                <span style={{ ...M3.type.title, flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>{g.name}</span>
                 {g.installed
                   ? <Chip tone="success">Installed</Chip>
                   : <Chip tone="secondary">{ROUTE_SHORT[g.route] || g.route}</Chip>}
@@ -1097,7 +1097,7 @@ function Content() {
         )}
         {updating && (
           <PanelSectionRow>
-            <div style={{ width: "100%" }}>
+            <div style={{ width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
               <ProgressBar nProgress={pu && pu.total > 0 ? Math.min(100, (100 * pu.downloaded) / pu.total) : 0} nTransitionSec={M3.motion.bar} />
               <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.xs, fontVariantNumeric: M3.tabular }}>
                 {pu && pu.total > 0
@@ -1120,7 +1120,7 @@ function Content() {
         <PanelSection title="Log">
           <PanelSectionRow>
             <Card tone="neutral" radius={M3.shape.md} style={{ background: M3.color.surfaceContainerLow, width: "100%" }}>
-              <div ref={logRef} style={{ whiteSpace: "pre-wrap", fontSize: 12, maxHeight: 240, overflowY: "auto", fontFamily: M3.mono }}>{output.slice(-4000)}</div>
+              <div ref={logRef} style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 12, maxHeight: 240, overflowY: "auto", overflowX: "hidden", fontFamily: M3.mono }}>{output.slice(-4000)}</div>
             </Card>
           </PanelSectionRow>
         </PanelSection>
