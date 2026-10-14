@@ -370,6 +370,43 @@ class PluginCase(unittest.TestCase):
             self.assertEqual(entry["installed_versions"], ["9.9.9"])
         asyncio.run(go())
 
+    def test_migration_carries_old_dirs(self):
+        import decky  # stubbed in tests/_common
+        home = self.tmp / "deckyhome"
+        old_settings = home / "settings" / "helixsr-decky-plugin-muse"
+        old_data = home / "data" / "helixsr-decky-plugin-muse"
+        old_settings.mkdir(parents=True)
+        (old_settings / "settings.json").write_text('{"active_tag": "v9.9.9"}')
+        (old_data / "helixsr").mkdir(parents=True)
+        (old_data / "helixsr" / "scan-cache.json").write_text("{}")
+        new_settings = home / "settings" / "helixsr-muse-plugin"
+        new_data = home / "data" / "helixsr-muse-plugin"
+        new_settings.mkdir(parents=True)
+        new_data.mkdir(parents=True)
+
+        decky.DECKY_HOME = str(home)
+
+        def _move_contents(src, dst):
+            # Emulate decky.migrate_*: move directory contents, remove source.
+            src, dst = Path(src), Path(dst)
+            if not src.is_dir():
+                return {}
+            dst.mkdir(parents=True, exist_ok=True)
+            for child in list(src.iterdir()):
+                shutil.move(str(child), str(dst / child.name))
+            shutil.rmtree(src, ignore_errors=True)
+            return {}
+
+        decky.migrate_settings = lambda *ps: [_move_contents(p, new_settings) for p in ps]
+        decky.migrate_runtime = lambda *ps: [_move_contents(p, new_data) for p in ps]
+
+        p = self._plugin()
+        asyncio.run(p._migration())
+        self.assertEqual(json.loads((new_settings / "settings.json").read_text())["active_tag"], "v9.9.9")
+        self.assertTrue((new_data / "helixsr" / "scan-cache.json").is_file())
+        self.assertFalse(old_settings.exists())
+        self.assertFalse(old_data.exists())
+
     def test_last_scan_corrupt_is_empty(self):
         p = self._plugin()
         cache = p._scan_cache_path()

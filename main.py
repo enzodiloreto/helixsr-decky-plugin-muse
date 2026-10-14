@@ -1299,7 +1299,7 @@ class Plugin:
         self._scan_cache = _empty_scan_cache()
         self._ops_lock = threading.Lock()
         self._build_proc = None
-        decky.logger.info("HelixSR-Decky-Plugin-Muse loaded")
+        decky.logger.info("HelixSR Muse Plugin loaded")
 
     # Function called first during the unload process, utilize this to handle your plugin being stopped, but not
     # completely removed
@@ -1325,19 +1325,10 @@ class Plugin:
     # Migrations that should be performed before entering `_main()`.
     async def _migration(self):
         decky.logger.info("HelixSR migrating")
-        # Here's a migration example for logs:
-        # - `~/.config/helixsr-decky-plugin-muse/plugin.log` will be migrated to `decky.decky_LOG_DIR/plugin.log`
-        decky.migrate_logs(os.path.join(decky.DECKY_USER_HOME,
-                                               ".config", "helixsr-decky-plugin-muse", "plugin.log"))
-        # Here's a migration example for settings:
-        # - `~/homebrew/settings/helixsr-decky-plugin-muse.json` is migrated to `decky.decky_SETTINGS_DIR/settings.json`
-        # - `~/.config/helixsr-decky-plugin-muse/` all files and directories under this root are migrated to `decky.decky_SETTINGS_DIR/`
-        decky.migrate_settings(
-            os.path.join(decky.DECKY_HOME, "settings", "helixsr-decky-plugin-muse.json"),
-            os.path.join(decky.DECKY_USER_HOME, ".config", "helixsr-decky-plugin-muse"))
-        # Here's a migration example for runtime data:
-        # - `~/homebrew/helixsr-decky-plugin-muse/` all files and directories under this root are migrated to `decky.decky_RUNTIME_DIR/`
-        # - `~/.local/share/helixsr-decky-plugin-muse/` all files and directories under this root are migrated to `decky.decky_RUNTIME_DIR/`
-        decky.migrate_runtime(
-            os.path.join(decky.DECKY_HOME, "helixsr-decky-plugin-muse"),
-            os.path.join(decky.DECKY_USER_HOME, ".local", "share", "helixsr-decky-plugin-muse"))
+        # Renamed in v0.0.15 (was helixsr-decky-plugin-muse): carry settings
+        # and downloads over to the new per-plugin directories. One-shot: the
+        # old locations are removed by the migrate calls. Uninstall the old
+        # plugin entry afterwards; its code directory is unaffected by this.
+        old_base = "helixsr-decky-plugin-muse"
+        decky.migrate_settings(os.path.join(decky.DECKY_HOME, "settings", old_base))
+        decky.migrate_runtime(os.path.join(decky.DECKY_HOME, "data", old_base))
