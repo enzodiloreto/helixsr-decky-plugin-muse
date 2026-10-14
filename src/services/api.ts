@@ -25,7 +25,30 @@ export interface HelixState {
   versions: HelixVersion[];
   root: string;
   plugin_version: string;
+  update_pending: string;
   extra_folders: string[];
+}
+
+export interface PluginUpdateInfo {
+  ok: boolean;
+  current?: string;
+  update_available?: boolean;
+  latest?: string;
+  url?: string;
+  size?: number;
+  body?: string;
+  error?: string;
+}
+
+export interface PluginUpdateStatus {
+  running: boolean;
+  done: boolean;
+  ok: boolean;
+  error: string;
+  version: string;
+  url: string;
+  downloaded: number;
+  total: number;
 }
 
 export interface HelixGame {
@@ -124,4 +147,7 @@ export const apiRemoveOldVersions = callable<[], { ok: boolean; removed: string[
 export const apiClearDlssCache = callable<[], { ok: boolean; cleared: string[]; freed_mb: number }>("clear_dlss_cache");
 export const apiAddScanFolder = callable<[path: string], { ok: boolean; folders?: string[]; error?: string }>("add_scan_folder");
 export const apiRemoveScanFolder = callable<[path: string], { ok: boolean; folders?: string[] }>("remove_scan_folder");
+export const apiCheckPluginUpdate = callable<[force: boolean], PluginUpdateInfo>("check_plugin_update");
+export const apiStartPluginUpdate = callable<[], { ok: boolean; version?: string; error?: string }>("start_plugin_update");
+export const apiGetPluginUpdateStatus = callable<[], PluginUpdateStatus>("get_plugin_update_status");
 export const apiGetBuildStatus = callable<[], { running: boolean; log: string; log_path: string; network_built: boolean }>("get_build_status");

@@ -190,6 +190,94 @@ def _dir_size(d: Path) -> int:
     return total
 
 
+PLUGIN_REPO = "enzodiloreto/helixsr-decky-plugin-muse"
+PLUGIN_RELEASES_URL = f"https://api.github.com/repos/{PLUGIN_REPO}/releases?per_page=5"
+PLUGIN_PACKAGE_NAME = "helixsr-muse-plugin"
+PLUGIN_DISPLAY_NAME = "HelixSR Muse Plugin"
+PLUGIN_UPDATE_TTL = 6 * 3600
+
+
+def _split_version(tag: str) -> list:
+    t = str(tag or "").strip()
+    if t[:1].lower() == "v":
+        t = t[1:]
+    t = re.split(r"[-+]", t, 1)[0]
+    parts = []
+    for x in t.split("."):
+        m = re.match(r"\d+", x)
+        parts.append(int(m.group(0)) if m else 0)
+    return parts
+
+
+def _compare_versions(a: str, b: str) -> int:
+    """-1/0/1 numeric dotted comparison, ignoring a leading v."""
+    pa, pb = _split_version(a), _split_version(b)
+    n = max(len(pa), len(pb))
+    pa += [0] * (n - len(pa))
+    pb += [0] * (n - len(pb))
+    return (pa > pb) - (pa < pb)
+
+
+def _largest_zip(release: dict):
+    """Biggest .zip asset of a GitHub release dict, or None."""
+    assets = [a for a in (release.get("assets") or []) if str(a.get("name", "")).endswith(".zip")]
+    if not assets:
+        return None
+    return sorted(assets, key=lambda x: x.get("size", 0) or 0, reverse=True)[0]
+
+
+def _install_plugin_zip(zip_path: Path, plug: Path, current: str) -> str:
+    """Validate a plugin release zip and swap it over the plugin directory.
+
+    Staging happens inside the plugin dir (same filesystem, and a sandbox
+    denial fails fast before anything is touched). The swap is two renames
+    with restore on failure; the running code is unaffected (Linux keeps
+    serving renamed/vanished paths to open handles and imports).
+    Returns the installed version.
+    """
+    plug = plug.resolve()
+    stage = plug / ".update-stage"
+    shutil.rmtree(stage, ignore_errors=True)
+    try:
+        with zipfile.ZipFile(zip_path) as z:
+            names = [i.filename for i in z.infolist()
+                     if not i.filename.startswith("/") and ".." not in Path(i.filename).parts]
+            tops = {n.split("/")[0] for n in names if "/" in n}
+            if len(tops) != 1:
+                raise OSError("unexpected plugin zip layout")
+            top = tops.pop()
+            for info in z.infolist():
+                if info.filename.startswith("/") or ".." in Path(info.filename).parts:
+                    continue
+                z.extract(info, stage)
+            meta = json.loads((stage / top / "plugin.json").read_text(encoding="utf-8"))
+            pkg = json.loads((stage / top / "package.json").read_text(encoding="utf-8"))
+        if meta.get("name") != PLUGIN_DISPLAY_NAME:
+            raise OSError(f"zip is not {PLUGIN_DISPLAY_NAME}")
+        new_version = str(pkg.get("version") or "")
+        if not new_version or _compare_versions(new_version, current) <= 0:
+            raise OSError(f"zip version {new_version or '?'} is not newer than {current}")
+        if not (stage / top / "dist" / "index.js").is_file() or not (stage / top / "main.py").is_file():
+            raise OSError("zip is missing dist/index.js or main.py")
+        bak = plug.parent / (plug.name + ".update-bak")
+        shutil.rmtree(bak, ignore_errors=True)
+        os.rename(plug, bak)
+        # Note: the stage moved along with plug; its new home is under bak.
+        staged_top = bak / stage.name / top
+        try:
+            os.rename(staged_top, plug)
+        except Exception:
+            try:
+                os.rename(bak, plug)
+            except OSError:
+                pass
+            raise
+        shutil.rmtree(bak, ignore_errors=True)
+        return new_version
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
 def _plugin_version() -> str:
     try:
         base = os.environ.get("DECKY_PLUGIN_DIR", "")
@@ -401,10 +489,9 @@ class Plugin:
             out = []
             for r in data:
                 tag = r.get("tag_name", "")
-                assets = [a for a in r.get("assets", []) if a.get("name", "").endswith(".zip")]
-                if not assets:
+                a = _largest_zip(r)
+                if not tag or a is None:
                     continue
-                a = sorted(assets, key=lambda x: x.get("size", 0), reverse=True)[0]
                 out.append({"tag": tag, "name": r.get("name", tag),
                             "published_at": r.get("published_at", "")[:10],
                             "zip_name": a["name"], "zip_url": a["browser_download_url"],
@@ -428,6 +515,7 @@ class Plugin:
             return {"active_tag": self.settings.getSetting("active_tag", ""),
                     "versions": versions, "root": str(_helixsr_root()),
                     "plugin_version": _plugin_version(),
+                    "update_pending": self._update_pending,
                     "extra_folders": self._extra_folders()}
         return await asyncio.to_thread(_state)
 
@@ -521,6 +609,106 @@ class Plugin:
 
     async def get_download_status(self) -> dict:
         return dict(self._dl)
+
+    async def check_plugin_update(self, force: bool = False) -> dict:
+        """Is there a newer HelixSR Muse Plugin release? Cached for 6h."""
+        now = time.monotonic()
+        if not force and self._update_check["at"] and now - self._update_check["at"] < PLUGIN_UPDATE_TTL:
+            return dict(self._update_check["result"])
+        current = _plugin_version()
+        try:
+            data = await asyncio.to_thread(_fetch_json, PLUGIN_RELEASES_URL)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        best = None
+        for r in data:
+            if not isinstance(r, dict) or r.get("draft"):
+                continue
+            tag = str(r.get("tag_name") or "")
+            asset = _largest_zip(r)
+            if not tag or asset is None:
+                continue
+            if _compare_versions(tag, current) > 0 and \
+                    (best is None or _compare_versions(tag, best["latest"]) > 0):
+                best = {"latest": tag, "url": asset["browser_download_url"],
+                        "size": asset.get("size", 0) or 0,
+                        "body": (r.get("body") or "")[:2000]}
+        result = {"ok": True, "current": current, "update_available": best is not None}
+        if best:
+            result.update(best)
+        self._update_check = {"at": now, "result": result}
+        return dict(result)
+
+    async def start_plugin_update(self) -> dict:
+        """Download the newest release and install it over the plugin directory
+        in a background thread; poll get_plugin_update_status(). The new code
+        takes effect after Decky restarts."""
+        if self._pu["running"]:
+            return {"ok": False, "error": "an update is already running"}
+        busy = self._dl["running"] or self._scan["running"] or self._mig["running"] \
+            or bool(self._build_thread and self._build_thread.is_alive())
+        if busy:
+            return {"ok": False, "error": "finish the running download, scan, build or migration first"}
+        check = await self.check_plugin_update()
+        if not check.get("ok"):
+            return {"ok": False, "error": check.get("error") or "update check failed"}
+        if not check.get("update_available"):
+            return {"ok": False, "error": "already on the newest version"}
+        self._pu = {"running": True, "done": False, "ok": False, "error": "",
+                    "version": check["latest"], "url": check["url"],
+                    "downloaded": 0, "total": check.get("size", 0) or 0}
+        threading.Thread(target=self._plugin_update_run, daemon=True).start()
+        return {"ok": True, "version": check["latest"]}
+
+    async def get_plugin_update_status(self) -> dict:
+        return dict(self._pu)
+
+    def _plugin_update_run(self):
+        st = self._pu
+        tmp: Path | None = None
+        try:
+            if not self._alive:
+                return
+            root = _helixsr_root()
+            root.mkdir(parents=True, exist_ok=True)
+            tmp = root / ".plugin-update.zip"
+            req = urllib.request.Request(st["url"], headers={"User-Agent": "helixsr-muse-plugin"})
+            with urllib.request.urlopen(req, timeout=120, context=_ssl_context()) as r:
+                try:
+                    total = int(r.headers.get("Content-Length") or 0)
+                except (TypeError, ValueError):
+                    total = 0
+                if total:
+                    st["total"] = total
+                with open(tmp, "wb") as f:
+                    while True:
+                        if not self._alive:
+                            return
+                        chunk = r.read(1 << 20)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        st["downloaded"] += len(chunk)
+            if st["total"] and st["downloaded"] != st["total"]:
+                raise OSError(f"incomplete download: got {st['downloaded']} of {st['total']} bytes")
+            plug = Path(os.environ.get("DECKY_PLUGIN_DIR") or "")
+            if not plug.is_dir():
+                raise OSError("DECKY_PLUGIN_DIR unknown: install the zip manually")
+            new_version = _install_plugin_zip(tmp, plug, _plugin_version())
+            st["ok"] = True
+            self._update_pending = new_version
+            self._update_check = {"at": 0.0, "result": {"ok": True, "update_available": False}}
+        except Exception as e:  # noqa: BLE001
+            decky.logger.error(f"plugin self-update failed: {e}")
+            st["error"] = str(e)
+        finally:
+            try:
+                if tmp is not None:
+                    tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            st["running"] = False
+            st["done"] = True
 
     async def remove_version(self, tag: str) -> dict:
         def _rm():
@@ -1295,6 +1483,10 @@ class Plugin:
         self._dl = _new_dl_state()
         self._scan = _new_scan_state()
         self._mig = _new_mig_state()
+        self._update_check = {"at": 0.0, "result": {"ok": True, "update_available": False}}
+        self._pu = {"running": False, "done": False, "ok": False, "error": "",
+                    "version": "", "url": "", "downloaded": 0, "total": 0}
+        self._update_pending = ""
         self._scan_stop = threading.Event()
         self._scan_cache = _empty_scan_cache()
         self._ops_lock = threading.Lock()

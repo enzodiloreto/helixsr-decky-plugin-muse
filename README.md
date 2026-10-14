@@ -14,7 +14,9 @@ runs HelixSR's own `helixsr-setup.sh` unmodified.
 On your Deck (or desktop Steam with Decky), Decky > Settings > Developer >
 **Install Plugin from ZIP File**, using the zip attached to a
 [release](https://github.com/enzodiloreto/helixsr-decky-plugin-muse/releases)
-(or URL-install it from the release download link).
+(or URL-install it from the release download link). Afterwards the plugin updates
+itself: when a new release exists, a **Plugin update** section appears — review the
+notes, download & install in one tap, then restart Decky to apply it.
 
 Upgrading from ≤ v0.0.14 (named *HelixSR-Decky-Plugin-Muse*)? Install the new zip —
 it appears as *HelixSR Muse Plugin* and carries your settings and downloads over

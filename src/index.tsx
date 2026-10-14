@@ -24,18 +24,22 @@ import {
   DownloadStatus,
   GameSettings,
   MigrationStatus,
+  PluginUpdateInfo,
+  PluginUpdateStatus,
   ReadinessCheck,
   ScanCache,
   ScanStatus,
   apiAddScanFolder,
   apiCancelScan,
   apiCheckBuildReady,
+  apiCheckPluginUpdate,
   apiClearDlssCache,
   apiGetBuildStatus,
   apiGetDownloadStatus,
   apiGetGameSettings,
   apiGetLastScan,
   apiGetMigrationStatus,
+  apiGetPluginUpdateStatus,
   apiGetReleases,
   apiGetScanStatus,
   apiGetState,
@@ -48,6 +52,7 @@ import {
   apiStartBuild,
   apiStartDownload,
   apiStartMigration,
+  apiStartPluginUpdate,
   apiStartScan,
   apiUninstallGames,
 } from "./services/api";
@@ -126,6 +131,9 @@ function Content() {
   const [migrating, setMigrating] = useState<boolean>(false);
   const [mig, setMig] = useState<MigrationStatus | null>(null);
   const [folderInput, setFolderInput] = useState<string>("");
+  const [puCheck, setPuCheck] = useState<PluginUpdateInfo | null>(null);
+  const [updating, setUpdating] = useState<boolean>(false);
+  const [pu, setPu] = useState<PluginUpdateStatus | null>(null);
   const [confirm, setConfirm] = useState<string>("");
   const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const logRef = useRef<HTMLDivElement | null>(null);
@@ -205,12 +213,17 @@ function Content() {
         } catch { /* no cached scan yet */ }
         try {
           // Resume polling for operations still running (e.g. panel was closed).
-          const [dl0, sc0, mg0] = await Promise.all([
-            apiGetDownloadStatus(), apiGetScanStatus(), apiGetMigrationStatus()]);
+          const [dl0, sc0, mg0, pu0] = await Promise.all([
+            apiGetDownloadStatus(), apiGetScanStatus(), apiGetMigrationStatus(),
+            apiGetPluginUpdateStatus()]);
           if (dl0.running) { setDl(dl0); setDownloading(true); }
           if (sc0.running) setScanning(true);
           if (mg0.running) { setMig(mg0); setMigrating(true); }
+          if (pu0.running) { setPu(pu0); setUpdating(true); }
         } catch { /* nothing running */ }
+        try {
+          setPuCheck(await apiCheckPluginUpdate(false));
+        } catch { /* update check is best-effort */ }
       } catch (e) {
         console.error("[helixsr] init failed", e);
       }
@@ -303,6 +316,31 @@ function Content() {
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scanning]);
+
+  // Poll plugin-update status while an update runs
+  useEffect(() => {
+    if (!updating) return;
+    const t = setInterval(async () => {
+      try {
+        const st = await apiGetPluginUpdateStatus();
+        setPu(st);
+        if (st.done) {
+          setUpdating(false);
+          if (st.ok) {
+            setOutput(`Plugin update to v${st.version} installed — restart Decky to apply it.`);
+            toaster.toast({ title: `Plugin updated to v${st.version}`, body: "Restart Decky to apply" });
+            refreshState();
+            onCheckPluginUpdate(false);
+          } else {
+            setOutput(st.error || "plugin update failed");
+            toaster.toast({ title: "Plugin update failed", body: st.error || "" });
+          }
+        }
+      } catch { /* ignore */ }
+    }, 1000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [updating]);
 
   // Poll migration status while a migration runs
   useEffect(() => {
@@ -595,6 +633,30 @@ function Content() {
       });
   };
 
+  const onCheckPluginUpdate = async (force: boolean) => {
+    try {
+      setPuCheck(await apiCheckPluginUpdate(force));
+    } catch (e) {
+      console.error("[helixsr] check_plugin_update failed", e);
+    }
+  };
+
+  const onStartPluginUpdate = async () => {
+    try {
+      const r = await apiStartPluginUpdate();
+      if (!r.ok) {
+        setOutput(r.error || "update not started");
+        toaster.toast({ title: "Update not started", body: r.error || "" });
+        return;
+      }
+      setUpdating(true);
+      setPu(null);
+      setOutput(`Downloading plugin update v${r.version} ...`);
+    } catch (e) {
+      console.error("[helixsr] start_plugin_update failed", e);
+    }
+  };
+
   const onMigrate = async () => {
     if (!activeVersion) return;
     await armOrRun(`migrate to ${activeVersion.tag}`,
@@ -669,7 +731,15 @@ function Content() {
 
   return (
     <div>
-      {state && state.plugin_version !== PLUGIN_VERSION && (
+      {state && state.update_pending ? (
+        <PanelSection title="Restart needed">
+          <PanelSectionRow>
+            <div style={{ fontSize: 12 }}>
+              v{state.update_pending} downloaded — restart Decky to apply it.
+            </div>
+          </PanelSectionRow>
+        </PanelSection>
+      ) : state && state.plugin_version !== PLUGIN_VERSION ? (
         <PanelSection title="Warning">
           <PanelSectionRow>
             <div style={{ fontSize: 12 }}>
@@ -678,7 +748,7 @@ function Content() {
             </div>
           </PanelSectionRow>
         </PanelSection>
-      )}
+      ) : null}
       <PanelSection title="Status">
         <PanelSectionRow>
           <div style={{ fontSize: 12 }}>{summary}</div>
@@ -973,6 +1043,46 @@ function Content() {
             {confirm === "clear SDK cache" ? "Confirm clear cache?" : "Clear cached SDK files"}
           </ButtonItem>
         </PanelSectionRow>
+      </PanelSection>
+      )}
+      {(puCheck?.update_available || updating || pu?.done) && (
+      <PanelSection title="Plugin update">
+        {puCheck?.update_available && !updating && !(pu?.done && pu?.ok) && (
+          <PanelSectionRow>
+            <div style={{ fontSize: 12 }}>v{puCheck.latest} available (you run v{puCheck.current}).</div>
+          </PanelSectionRow>
+        )}
+        {puCheck?.update_available && puCheck?.body && !updating && !(pu?.done && pu?.ok) && (
+          <PanelSectionRow>
+            <div style={{ whiteSpace: "pre-wrap", fontSize: 12, maxHeight: 160, overflowY: "auto" }}>{puCheck.body.slice(0, 800)}</div>
+          </PanelSectionRow>
+        )}
+        {puCheck?.update_available && !updating && !(pu?.done && pu?.ok) && (
+          <PanelSectionRow>
+            <ButtonItem layout="below" disabled={busy !== ""} onClick={onStartPluginUpdate}>
+              {`Download & install v${puCheck.latest}`}
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
+        {updating && (
+          <PanelSectionRow>
+            <div style={{ width: "100%" }}>
+              <ProgressBar nProgress={pu && pu.total > 0 ? Math.min(100, (100 * pu.downloaded) / pu.total) : 0} />
+              <div style={{ fontSize: 12, marginTop: 4 }}>
+                {pu && pu.total > 0
+                  ? `${fmtSize(pu.downloaded)} / ${fmtSize(pu.total)} (${Math.floor((100 * pu.downloaded) / pu.total)}%)`
+                  : "Starting update ..."}
+              </div>
+            </div>
+          </PanelSectionRow>
+        )}
+        {!updating && (
+          <PanelSectionRow>
+            <ButtonItem layout="below" disabled={busy !== ""} onClick={() => onCheckPluginUpdate(true)}>
+              Check again
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
       </PanelSection>
       )}
       {output && (

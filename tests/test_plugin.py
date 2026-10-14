@@ -55,6 +55,10 @@ class PluginCase(unittest.TestCase):
         p._dl = main._new_dl_state()
         p._scan = main._new_scan_state()
         p._mig = main._new_mig_state()
+        p._update_check = {"at": 0.0, "result": {"ok": True, "update_available": False}}
+        p._pu = {"running": False, "done": False, "ok": False, "error": "",
+                 "version": "", "url": "", "downloaded": 0, "total": 0}
+        p._update_pending = ""
         p._scan_stop = threading.Event()
         p._scan_cache = main._empty_scan_cache()
         p._ops_lock = threading.Lock()
@@ -617,6 +621,160 @@ class PluginCase(unittest.TestCase):
         self.assertEqual(main._repair_exec_bits(d), ["setup/lib/model/launch_synth"])
         self.assertEqual(_mode(t), 0o755)
         self.assertEqual(main._repair_exec_bits(d), [])
+
+    # --- self-update ----------------------------------------------------------
+
+    def test_compare_versions(self):
+        cmp = main._compare_versions
+        self.assertEqual(cmp("v1.9.0", "v1.8.1"), 1)
+        self.assertEqual(cmp("v1.8.1", "v1.9.0"), -1)
+        self.assertEqual(cmp("v0.0.10", "v0.0.10"), 0)
+        self.assertEqual(cmp("v0.0.9", "v0.0.10"), -1)
+        self.assertEqual(cmp("1.2", "1.2.0"), 0)
+        self.assertEqual(cmp("v2.0", "v10.0"), -1)
+
+    def test_largest_zip(self):
+        rel = {"assets": [
+            {"name": "notes.txt", "size": 5},
+            {"name": "small.zip", "size": None},
+            {"name": "big.zip", "size": 99, "browser_download_url": "u"},
+        ]}
+        self.assertEqual(main._largest_zip(rel)["name"], "big.zip")
+        self.assertIsNone(main._largest_zip({"assets": [{"name": "x.txt"}]}))
+        self.assertIsNone(main._largest_zip({}))
+
+    def _update_zip_bytes(self, name="HelixSR Muse Plugin", version="9.9.9",
+                          flat=False, with_main=True):
+        import io
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            base = "" if flat else "plug/"
+            z.writestr(base + "plugin.json", json.dumps({"name": name}))
+            z.writestr(base + "package.json", json.dumps({"name": "helixsr-muse-plugin",
+                                                          "version": version}))
+            if with_main:
+                z.writestr(base + "dist/index.js", "console.log(1)")
+                z.writestr(base + "main.py", "x = 1\n")
+        return buf.getvalue()
+
+    def _plug_dir(self, version="0.0.1"):
+        plug = self.tmp / "plug"
+        (plug / "dist").mkdir(parents=True)
+        (plug / "dist" / "index.js").write_text("old")
+        (plug / "main.py").write_text("old = 1\n")
+        (plug / "package.json").write_text(json.dumps({"version": version}))
+        (plug / "stale.txt").write_text("remove me if replaced")
+        return plug
+
+    def test_install_plugin_zip_swaps(self):
+        plug = self._plug_dir("0.0.1")
+        zp = self.tmp / "u.zip"
+        zp.write_bytes(self._update_zip_bytes(version="9.9.9"))
+        got = main._install_plugin_zip(zp, plug, "0.0.1")
+        self.assertEqual(got, "9.9.9")
+        self.assertEqual((plug / "dist" / "index.js").read_text(), "console.log(1)")
+        self.assertFalse((plug / "stale.txt").exists())
+        self.assertFalse((plug.parent / "plug.update-bak").exists())
+        self.assertFalse((plug / ".update-stage").exists())
+
+    def test_install_plugin_zip_rejects(self):
+        plug = self._plug_dir("9.9.9")
+        before = (plug / "dist" / "index.js").read_text()
+        bad_name = self.tmp / "a.zip"
+        bad_name.write_bytes(self._update_zip_bytes(name="Something Else"))
+        with self.assertRaises(OSError):
+            main._install_plugin_zip(bad_name, plug, "0.0.1")
+        old_ver = self.tmp / "b.zip"
+        old_ver.write_bytes(self._update_zip_bytes(version="0.0.1"))
+        with self.assertRaises(OSError):
+            main._install_plugin_zip(old_ver, plug, "9.9.9")
+        no_main = self.tmp / "c.zip"
+        no_main.write_bytes(self._update_zip_bytes(with_main=False))
+        with self.assertRaises(OSError):
+            main._install_plugin_zip(no_main, plug, "0.0.1")
+        flat = self.tmp / "d.zip"
+        flat.write_bytes(self._update_zip_bytes(flat=True))
+        with self.assertRaises(OSError):
+            main._install_plugin_zip(flat, plug, "0.0.1")
+        self.assertEqual((plug / "dist" / "index.js").read_text(), before)
+
+    def test_check_plugin_update(self):
+        p = self._plugin()
+        listing = [{"tag_name": "v9.9.9", "draft": False,
+                    "assets": [{"name": "p.zip", "size": 10, "browser_download_url": "u"}],
+                    "body": "notes"}]
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            with mock.patch.object(main, "_fetch_json", return_value=listing):
+                with mock.patch.object(main, "_plugin_version", return_value="0.0.1"):
+                    r = await p.check_plugin_update()
+            self.assertTrue(r["ok"])
+            self.assertTrue(r["update_available"])
+            self.assertEqual(r["latest"], "v9.9.9")
+            self.assertEqual(r["body"], "notes")
+            with mock.patch.object(main, "_plugin_version", return_value="v9.9.9"):
+                r2 = await p.check_plugin_update(force=True)
+            self.assertTrue(r2["ok"])
+            self.assertFalse(r2["update_available"])
+        asyncio.run(go())
+
+    def test_start_plugin_update_busy(self):
+        p = self._plugin()
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            p._dl["running"] = True
+            r = await p.start_plugin_update()
+            self.assertFalse(r["ok"])
+            self.assertIn("running", r["error"])
+            p._dl["running"] = False
+        asyncio.run(go())
+
+    def test_plugin_update_end_to_end(self):
+        plug = self._plug_dir("0.0.1")
+        os.environ["DECKY_PLUGIN_DIR"] = str(plug)
+        self.addCleanup(os.environ.pop, "DECKY_PLUGIN_DIR", None)
+        payload = self._update_zip_bytes(version="9.9.9")
+        p = self._plugin()
+        listing = [{"tag_name": "v9.9.9", "draft": False,
+                    "assets": [{"name": "p.zip", "size": len(payload),
+                                "browser_download_url": "https://example.invalid/u.zip"}]}]
+
+        class Resp:
+            headers = {"Content-Length": str(len(payload))}
+
+            def __init__(self, data):
+                self._data = data
+
+            def read(self, n):
+                chunk, self._data = self._data[:n], self._data[n:]
+                return chunk
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            with mock.patch.object(main, "_fetch_json", return_value=listing), \
+                    mock.patch.object(main.urllib.request, "urlopen", return_value=Resp(payload)):
+                r = await p.start_plugin_update()
+                self.assertTrue(r["ok"], r)
+                self.assertEqual(r["version"], "v9.9.9")
+                for _ in range(400):
+                    st = await p.get_plugin_update_status()
+                    if st.get("done"):
+                        break
+                    await asyncio.sleep(0.05)
+            self.assertTrue(st["ok"], st["error"])
+            self.assertEqual((plug / "dist" / "index.js").read_text(), "console.log(1)")
+            self.assertEqual(p._update_pending, "9.9.9")
+            st = await p.get_state()
+            self.assertEqual(st["update_pending"], "9.9.9")
+        asyncio.run(go())
 
 
 if __name__ == "__main__":
