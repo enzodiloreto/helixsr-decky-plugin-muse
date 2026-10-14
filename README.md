@@ -9,6 +9,8 @@ Game detection and install/uninstall run HelixSR's own `setup/helixsr_install.py
 (vendored in `py_modules/helixscan.py` under its Apache-2.0 license); the network build
 runs HelixSR's own `helixsr-setup.sh` unmodified.
 
+Tested on Steam Deck LCD running CachyOS and Steam Machine Running SteamOS.
+
 ## Install
 
 On your Deck (or desktop Steam with Decky), Decky > Settings > Developer >
