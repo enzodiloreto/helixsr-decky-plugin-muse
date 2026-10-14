@@ -22,10 +22,14 @@ On your Deck (or desktop Steam with Decky), Decky > Settings > Developer >
    then **Build network**. The build downloads NVIDIA's DLSS DLL once (~56 MB, used to
    generate the network, then deleted), then compiles shaders through Proton/Wine's DXC —
    expect several minutes; the Log section streams progress.
-2. **Games**: **Scan games** walks your Steam libraries for DLSS / XeSS / FSR titles
-   (FSR 3.1 games get a direct DLL drop-in, others go through OptiScaler).
+2. **Games**: **Scan games** walks your Steam libraries for DLSS / XeSS / FSR titles.
+   Pick the install way per game (FSR 3.1 drop-in, OptiScaler, or the experimental
+   DLSS loader) instead of the default where it matters.
    **Install in / Remove from** each game as needed.
-3. **Log**: every failure surfaces its actual reason here instead of failing silently.
+3. **Settings** (installed games): sharpening (off / NVIDIA / RCAS + strength),
+   game-slider following, and WaveSize (64 for RX 7000 / 9000 in OptiScaler games
+   if the log says wave32) — no hand-editing of `helixsr.ini`.
+4. **Log**: every failure surfaces its actual reason here instead of failing silently.
 
 Requirements for building: any Proton installed in Steam (for the shader compiler) and
 ~200 MB free for downloads. Game installs only touch files inside each game's folder

@@ -4,6 +4,8 @@ import {
   PanelSection,
   PanelSectionRow,
   ProgressBar,
+  SliderField,
+  ToggleField,
   staticClasses
 } from "@decky/ui";
 import {
@@ -12,23 +14,26 @@ import {
   definePlugin,
   toaster,
 } from "@decky/api"
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FaPlug } from "react-icons/fa";
 import {
   HelixGame,
   HelixRelease,
   HelixState,
   DownloadStatus,
+  GameSettings,
   ScanStatus,
   apiCancelScan,
   apiGetBuildStatus,
   apiGetDownloadStatus,
+  apiGetGameSettings,
   apiGetReleases,
   apiGetScanStatus,
   apiGetState,
   apiInstallGames,
   apiRemoveVersion,
   apiSetActiveVersion,
+  apiSetGameSettings,
   apiStartBuild,
   apiStartDownload,
   apiStartScan,
@@ -38,6 +43,22 @@ import { PLUGIN_VERSION } from "./version";
 
 function fmtSize(n: number) {
   return `${(n / 1e6).toFixed(1)} MB`;
+}
+
+const ROUTE_LABELS: Record<string, string> = {
+  direct: "FSR drop-in (select AMD FSR)",
+  optiscaler: "OptiScaler (select DLSS)",
+  dlss: "DLSS loader (experimental!)",
+};
+
+function parseBuildProgress(log: string): { pct: number; label: string } | null {
+  // Matches the reference setup's bar: [####----]  42%  3:12  shaders 15/40
+  const re = /\[([#-]{20})\]\s*(\d+)%\s*(\d+:\d+)\s*(.*)/g;
+  let m: RegExpExecArray | null = null;
+  let last: RegExpExecArray | null = null;
+  while ((m = re.exec(log)) !== null) last = m;
+  if (!last) return null;
+  return { pct: Math.min(100, parseInt(last[2], 10)), label: `${last[3]} — ${last[4]}` };
 }
 
 function Content() {
@@ -51,7 +72,13 @@ function Content() {
   const [building, setBuilding] = useState<boolean>(false);
   const [downloading, setDownloading] = useState<boolean>(false);
   const [dl, setDl] = useState<DownloadStatus | null>(null);
+  const [dlRate, setDlRate] = useState<string>("");
+  const dlPrev = useRef<{ t: number; bytes: number } | null>(null);
   const [scanning, setScanning] = useState<boolean>(false);
+  const [routes, setRoutes] = useState<Record<number, string>>({});
+  const [iniFor, setIniFor] = useState<number | null>(null);
+  const [ini, setIni] = useState<GameSettings | null>(null);
+  const [iniPath, setIniPath] = useState<string>("");
 
   const refreshState = async () => {
     try {
@@ -120,8 +147,19 @@ function Content() {
       try {
         const st = await apiGetDownloadStatus();
         setDl(st);
+        const now = Date.now();
+        const prev = dlPrev.current;
+        dlPrev.current = { t: now, bytes: st.downloaded };
+        if (prev && now > prev.t && st.downloaded >= prev.bytes && !st.done) {
+          const speed = ((st.downloaded - prev.bytes) * 1000) / (now - prev.t);
+          if (speed > 0) {
+            const left = st.total > st.downloaded ? (st.total - st.downloaded) / speed : 0;
+            setDlRate(`${fmtSize(speed)}/s${st.total ? ` — ~${Math.max(1, Math.ceil(left))}s left` : ""}`);
+          }
+        }
         if (st.done) {
           setDownloading(false);
+          setDlRate("");
           if (st.ok) {
             setOutput(`Downloaded ${st.dir}. Network built: ${st.network_built ? "yes" : "no — run Build"}.`);
             setState(await apiSetActiveVersion(st.tag));
@@ -152,6 +190,9 @@ function Content() {
           if (st.ok) {
             setGames(st.games);
             setGamesTag(st.tag || "");
+            const rm: Record<number, string> = {};
+            st.games.forEach((g) => { rm[g.index] = g.route; });
+            setRoutes(rm);
             setOutput(`Found ${st.games.length} compatible game(s) with ${st.tag}.${st.skipped ? ` ${st.skipped} folder(s) skipped (unreadable).` : ""}`);
           } else if (st.cancelled) {
             setOutput("Scan cancelled.");
@@ -205,6 +246,8 @@ function Content() {
     }
     if (!pickedRelease) return;
     setDl(null);
+    setDlRate("");
+    dlPrev.current = null;
     try {
       const r = await apiStartDownload(picked, pickedRelease.zip_url);
       if (!r.ok) {
@@ -275,10 +318,40 @@ function Content() {
     }
   };
 
+  const onOpenIni = async (g: HelixGame) => {
+    setBusy(`ini-${g.index}`);
+    try {
+      const r = await apiGetGameSettings(g.index);
+      if (!r.ok || !r.values) {
+        setOutput(r.error || "cannot read settings");
+        return;
+      }
+      setIni(r.values);
+      setIniPath(r.path || "");
+      setIniFor(g.index);
+      if (r.note) setOutput(r.note);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const onSaveIni = async () => {
+    if (iniFor === null || !ini) return;
+    setBusy("ini-save");
+    try {
+      const r = await apiSetGameSettings(iniFor, ini);
+      setOutput(r.output || "");
+      toaster.toast({ title: r.ok ? "Settings saved" : "Save failed", body: r.ok ? "" : (r.output || "").slice(-200) });
+    } finally {
+      setBusy("");
+    }
+  };
+
   const onInstall = async (g: HelixGame) => {
     setBusy(`game-${g.index}`);
     try {
-      const r = await apiInstallGames([g.index]);
+      const route = routes[g.index] || g.route;
+      const r = await apiInstallGames([g.index], route);
       setOutput(r.output);
       toaster.toast({ title: r.ok ? `Installed in ${g.name}` : "Install failed", body: r.ok ? "" : r.output.slice(-200) });
       if (r.ok) setGames((gs) => gs.map((x) => (x.index === g.index ? { ...x, installed: true, status: "HelixSR installed" } : x)));
@@ -303,6 +376,8 @@ function Content() {
     data: r.tag,
     label: `${r.tag} — ${r.published_at} — ${fmtSize(r.size)}${downloadedTags.has(r.tag) ? " ✓" : ""}`,
   }));
+  const buildProg = building ? parseBuildProgress(output) : null;
+  const iniGame = iniFor !== null ? games.find((g) => g.index === iniFor) : undefined;
 
   return (
     <div>
@@ -342,8 +417,8 @@ function Content() {
               <ProgressBar nProgress={dl && dl.total > 0 ? Math.min(100, (100 * dl.downloaded) / dl.total) : 0} />
               <div style={{ fontSize: 12, marginTop: 4 }}>
                 {dl && dl.total > 0
-                  ? `${fmtSize(dl.downloaded)} / ${fmtSize(dl.total)} (${Math.floor((100 * dl.downloaded) / dl.total)}%)`
-                  : dl ? `${fmtSize(dl.downloaded)} downloaded ...` : "Starting download ..."}
+                  ? `${fmtSize(dl.downloaded)} / ${fmtSize(dl.total)} (${Math.floor((100 * dl.downloaded) / dl.total)}%)${dlRate ? ` — ${dlRate}` : ""}`
+                  : dl ? `${fmtSize(dl.downloaded)} downloaded ...${dlRate ? ` — ${dlRate}` : ""}` : "Starting download ..."}
               </div>
             </div>
           </PanelSectionRow>
@@ -360,6 +435,14 @@ function Content() {
             {building ? "Building network ..." : activeVersion?.network_built ? "Rebuild network (setup.sh)" : "Build network (setup.sh)"}
           </ButtonItem>
         </PanelSectionRow>
+        {building && buildProg && (
+          <PanelSectionRow>
+            <div style={{ width: "100%" }}>
+              <ProgressBar nProgress={buildProg.pct} />
+              <div style={{ fontSize: 12, marginTop: 4 }}>{buildProg.pct}% — {buildProg.label}</div>
+            </div>
+          </PanelSectionRow>
+        )}
       </PanelSection>
       <PanelSection title="Games">
         <PanelSectionRow>
@@ -382,18 +465,100 @@ function Content() {
             </div>
           </PanelSectionRow>
         )}
-        {games.map((g) => (
-          <PanelSectionRow key={g.index}>
-            <ButtonItem
-              layout="below"
-              disabled={busy !== "" || scanning}
-              description={`${g.name} — ${g.status}`}
-              onClick={() => (g.installed ? onUninstall(g) : onInstall(g))}
-            >
-              {`${g.installed ? "Remove from" : "Install in"} ${g.name}`}
-            </ButtonItem>
-          </PanelSectionRow>
-        ))}
+        {iniFor === null ? games.map((g) => (
+          <div key={g.index}>
+            <PanelSectionRow>
+              <ButtonItem
+                layout="below"
+                disabled={busy !== "" || scanning}
+                description={`${g.name} — ${g.status}`}
+                onClick={() => (g.installed ? onUninstall(g) : onInstall(g))}
+              >
+                {`${g.installed ? "Remove from" : "Install in"} ${g.name}`}
+              </ButtonItem>
+            </PanelSectionRow>
+            {!g.installed && g.available.length > 1 && (
+              <PanelSectionRow>
+                <DropdownItem
+                  label={`Way — ${g.name}`}
+                  rgOptions={g.available.map((a) => ({ data: a, label: ROUTE_LABELS[a] || a }))}
+                  selectedOption={routes[g.index] || g.route}
+                  onChange={(o) => setRoutes({ ...routes, [g.index]: String(o.data) })}
+                />
+              </PanelSectionRow>
+            )}
+            {g.installed && (
+              <PanelSectionRow>
+                <ButtonItem layout="below" disabled={busy !== "" || scanning} onClick={() => onOpenIni(g)}>
+                  {`Settings — ${g.name}`}
+                </ButtonItem>
+              </PanelSectionRow>
+            )}
+          </div>
+        )) : (
+          <div>
+            <PanelSectionRow>
+              <div style={{ fontSize: 12 }}>{iniPath}</div>
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <DropdownItem
+                label="Sharpener"
+                description="NVIDIA's filter, AMD FSR's RCAS, or off (as DLSS)"
+                rgOptions={[
+                  { data: "off", label: "Off" },
+                  { data: "nvidia", label: "NVIDIA" },
+                  { data: "rcas", label: "RCAS (AMD)" },
+                ]}
+                selectedOption={ini?.Sharpener || "off"}
+                onChange={(o) => setIni({ ...(ini as GameSettings), Sharpener: String(o.data) })}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <SliderField
+                label="Sharpness"
+                description="Used when a sharpener is on (0.5 is NVIDIA's default)"
+                value={parseFloat(ini?.Sharpness || "0.5")}
+                min={0}
+                max={1}
+                step={0.05}
+                showValue
+                disabled={(ini?.Sharpener || "off") === "off"}
+                onChange={(v: number) => setIni({ ...(ini as GameSettings), Sharpness: String(Math.round(v * 100) / 100) })}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ToggleField
+                label="Use game slider"
+                description="Follow the game's sharpness slider, if it has one"
+                checked={(ini?.UseGameSlider || "false") === "true"}
+                onChange={(c: boolean) => setIni({ ...(ini as GameSettings), UseGameSlider: c ? "true" : "false" })}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <DropdownItem
+                label="WaveSize"
+                description="64 for RX 7000 / 9000 in OptiScaler games if the log says wave32"
+                rgOptions={[
+                  { data: "default", label: "Default" },
+                  { data: "64", label: "64" },
+                  { data: "32", label: "32" },
+                ]}
+                selectedOption={ini?.WaveSize || "default"}
+                onChange={(o) => setIni({ ...(ini as GameSettings), WaveSize: String(o.data) })}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem layout="below" disabled={busy !== "" || !ini} onClick={onSaveIni}>
+                Save settings
+              </ButtonItem>
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem layout="below" onClick={() => { setIniFor(null); setIni(null); }}>
+                {`Back to games${iniGame ? ` (${iniGame.name})` : ""}`}
+              </ButtonItem>
+            </PanelSectionRow>
+          </div>
+        )}
       </PanelSection>
       {output && (
         <PanelSection title="Log">

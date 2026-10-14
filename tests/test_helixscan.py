@@ -38,6 +38,15 @@ class ScanTest(unittest.TestCase):
         self.assertEqual(by_name["GameB"].inputs, ["DLSS"])
         self.assertFalse(any(g.installed() for g in gl))
 
+    def test_available_routes(self):
+        gl, _ = helixscan.games(self.here)
+        by_name = {g.name: g for g in gl}
+        # FSR game without upscaler inputs: drop-in only.
+        self.assertEqual(helixscan.available_routes(by_name["GameA"]), ["direct"])
+        # DLSS game (+ loader present in `here`): OptiScaler or DLSS loader.
+        self.assertEqual(helixscan.available_routes(by_name["GameB"]),
+                         ["optiscaler", "dlss"])
+
     def test_scan_isolates_broken_game(self):
         real_walk = helixscan.walk
 

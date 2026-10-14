@@ -488,6 +488,19 @@ def overlaps(a, b):
     return a == b or a in b.parents or b in a.parents
 
 
+def available_routes(g):
+    """Install routes the reference setup offers for this game (its ask()).
+    'direct' = FSR 3.1 drop-in, 'optiscaler' = through OptiScaler,
+    'dlss' = experimental DLSS loader."""
+    ways = ['direct', 'optiscaler'] if g.can_opti else ['direct'] if g.fsr_targets \
+        else ['optiscaler'] if g.inputs and g.target else []
+    if g.can_dlss and 'dlss' not in ways:
+        ways.append('dlss')
+    if not ways and g.route:
+        ways = [g.route]
+    return ways
+
+
 def games_from(folders, here, listed=()):
     """Games in folders given by hand. ADAPTED: `here` passed explicitly."""
     out, skipped = [], 0

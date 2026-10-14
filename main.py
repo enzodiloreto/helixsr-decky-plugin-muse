@@ -1,5 +1,7 @@
 import os
 import asyncio
+import configparser
+import copy
 import json
 import re
 import shutil
@@ -183,6 +185,139 @@ SCAN_CACHE_TTL = 300
 BUILD_TIMEOUT = 4 * 3600
 
 
+# helixsr.ini settings the plugin edits (template key -> section).
+INI_SECTIONS = {"Sharpener": "Sharpening", "Sharpness": "Sharpening",
+                "UseGameSlider": "Sharpening", "WaveSize": "Compatibility"}
+INI_DEFAULTS = {"Sharpener": "off", "Sharpness": "0.5",
+                "UseGameSlider": "false", "WaveSize": "default"}
+
+
+def _find_ini(g, create=False):
+    """The helixsr.ini of an installed game, preferring the location its
+    install marker points at. With create=True, the default location for a
+    game that lost its file (caller must ensure the game is installed)."""
+    if g.target is not None:
+        folder = g.target / helixscan.FOLDER
+        if (folder / helixscan.MARKER).is_file():
+            return folder / helixscan.INI
+        if (g.target / helixscan.INI).is_file():
+            return g.target / helixscan.INI
+    for t in g.fsr_targets:
+        if (t.parent / helixscan.MARKER).is_file():
+            return t.parent / helixscan.INI
+    if not create:
+        return None
+    if g.route == "optiscaler" and g.target is not None:
+        folder = g.target / helixscan.FOLDER
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder / helixscan.INI
+    if g.route == "dlss" and g.target is not None:
+        return g.target / helixscan.INI
+    if g.route == "direct" and g.fsr_targets:
+        return g.fsr_targets[0].parent / helixscan.INI
+    return None
+
+
+def _read_ini_values(p: Path):
+    """Current helixsr.ini values with README defaults for anything missing
+    or invalid. Returns (values, note)."""
+    vals = dict(INI_DEFAULTS)
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+        cp = configparser.ConfigParser()
+        cp.optionxform = str
+        cp.read_string(text)
+    except (OSError, configparser.Error):
+        return vals, "unreadable, showing defaults"
+    try:
+        if cp.has_option("Sharpening", "Sharpener"):
+            v = cp.get("Sharpening", "Sharpener").strip().lower()
+            if v in ("off", "nvidia", "rcas"):
+                vals["Sharpener"] = v
+        if cp.has_option("Sharpening", "Sharpness"):
+            f = float(cp.get("Sharpening", "Sharpness").strip())
+            if 0.0 <= f <= 1.0:
+                vals["Sharpness"] = str(round(f, 2))
+        if cp.has_option("Sharpening", "UseGameSlider"):
+            vals["UseGameSlider"] = "true" if cp.getboolean("Sharpening", "UseGameSlider") else "false"
+        if cp.has_option("Compatibility", "WaveSize"):
+            v = cp.get("Compatibility", "WaveSize").strip()
+            if v in ("default", "64", "32"):
+                vals["WaveSize"] = v
+    except (ValueError, configparser.Error):
+        pass
+    return vals, ""
+
+
+def _normalize_ini_values(values: dict):
+    """Validate RPC settings (template key names). Returns (normalized, error)."""
+    norm = {}
+    for key in ("Sharpener", "Sharpness", "UseGameSlider", "WaveSize"):
+        if key not in values:
+            norm[key] = INI_DEFAULTS[key]
+            continue
+        v = values[key]
+        if key == "Sharpener":
+            if not isinstance(v, str) or v.lower() not in ("off", "nvidia", "rcas"):
+                return None, f"bad Sharpener: {v!r} (off, nvidia, rcas)"
+            norm[key] = v.lower()
+        elif key == "Sharpness":
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                return None, f"bad Sharpness: {v!r} (0.0 to 1.0)"
+            if not 0.0 <= f <= 1.0:
+                return None, f"bad Sharpness: {v!r} (0.0 to 1.0)"
+            norm[key] = str(round(f, 2))
+        elif key == "UseGameSlider":
+            if not isinstance(v, bool):
+                return None, f"bad UseGameSlider: {v!r} (true or false)"
+            norm[key] = "true" if v else "false"
+        elif key == "WaveSize":
+            s = str(v)
+            if s not in ("default", "64", "32"):
+                return None, f"bad WaveSize: {v!r} (default, 64, 32)"
+            norm[key] = s
+    for k in values:
+        if k not in INI_SECTIONS:
+            return None, f"unknown setting: {k}"
+    return norm, ""
+
+
+def _set_ini_value(text: str, section: str, key: str, value: str) -> str:
+    """Set one key in helixsr.ini text, preserving comments and line endings.
+    Replaces active and commented-out (`;Key =`) lines, collapsing duplicates;
+    adds the key under [section] (creating the section if needed)."""
+    nl = "\r\n" if "\r\n" in text else "\n"
+    pat = re.compile(r"^[;#]?\s*%s\s*=.*$" % re.escape(key))
+    out, replaced = [], False
+    for ln in text.split("\n"):
+        core = ln[:-1] if ln.endswith("\r") else ln
+        if pat.match(core):
+            if not replaced:
+                out.append(f"{key} = {value}")
+                replaced = True
+            # drop further duplicates
+        else:
+            out.append(ln)
+    if not replaced:
+        for i, ln in enumerate(out):
+            core = ln[:-1] if ln.endswith("\r") else ln
+            if re.match(r"^\[%s\]\s*$" % re.escape(section), core):
+                out.insert(i + 1, f"{key} = {value}")
+                replaced = True
+                break
+        if not replaced:
+            if out and out[-1].strip():
+                out.append("")
+            out.append(f"[{section}]")
+            out.append(f"{key} = {value}")
+    text2 = "\n".join(out)
+    if nl == "\r\n":
+        text2 = text2.replace("\n", "\r\n").replace("\r\r\n", "\r\n")
+    return text2
+
+
 class Plugin:
     async def get_releases(self) -> dict:
         def _fetch():
@@ -363,8 +498,12 @@ class Plugin:
                     status = "HelixSR installed" if inst else g.label()
                 except Exception:  # noqa: BLE001
                     status = g.route or "compatible"
+                try:
+                    routes = helixscan.available_routes(g)
+                except Exception:  # noqa: BLE001
+                    routes = [g.route] if g.route else []
                 out.append({"index": i, "name": g.name, "folder": str(g.folder),
-                            "route": g.route, "inputs": list(g.inputs),
+                            "route": g.route, "available": routes, "inputs": list(g.inputs),
                             "installed": inst, "status": status})
             st["games"] = out
             st["tag"] = tag
@@ -389,13 +528,24 @@ class Plugin:
         st["games"] = list(st["games"])
         return st
 
-    async def install_games(self, indices: list[int]) -> dict:
-        return await self._game_op("install", indices)
+    async def install_games(self, indices: list[int], route: str | None = None) -> dict:
+        return await self._game_op("install", indices, route)
 
     async def uninstall_games(self, indices: list[int]) -> dict:
         return await self._game_op("uninstall", indices)
 
-    async def _game_op(self, op: str, indices: list[int]) -> dict:
+    def _resolve_games(self, d: Path) -> list:
+        """Cached or fresh Game objects for installs. Call with _ops_lock held."""
+        cached = self._scan_cache
+        if cached["dir"] == str(d) and cached["games"] \
+                and time.monotonic() - cached["time"] < SCAN_CACHE_TTL:
+            return cached["games"]
+        gl, _skipped = helixscan.games(d)
+        self._scan_cache = {"dir": str(d), "games": gl,
+                            "tag": _tag_of_dir(d), "time": time.monotonic()}
+        return gl
+
+    async def _game_op(self, op: str, indices: list[int], route: str | None = None) -> dict:
         d = await self._active_dir()
         if d is None:
             return {"ok": False, "output": "no HelixSR version downloaded"}
@@ -403,9 +553,11 @@ class Plugin:
             clean = [int(i) for i in indices]
         except (TypeError, ValueError):
             return {"ok": False, "output": f"bad game numbers: {indices}"}
-        return await asyncio.to_thread(self._game_op_run, op, d, clean)
+        if route is not None and (not isinstance(route, str) or not route):
+            return {"ok": False, "output": f"bad route: {route}"}
+        return await asyncio.to_thread(self._game_op_run, op, d, clean, route)
 
-    def _game_op_run(self, op: str, d: Path, indices: list[int]) -> dict:
+    def _game_op_run(self, op: str, d: Path, indices: list[int], route: str | None = None) -> dict:
         """Install/uninstall via the reference implementation, in-process (no
         child process, no prompts): fast file copies, guarded by _ops_lock.
         Reuses a fresh scan so every click doesn't re-walk the libraries."""
@@ -413,19 +565,27 @@ class Plugin:
             with self._ops_lock:
                 if not helixscan.network_ready(d):
                     return {"ok": False, "output": "the network is not built: run Build first"}
-                cached = self._scan_cache
-                if cached["dir"] == str(d) and cached["games"] \
-                        and time.monotonic() - cached["time"] < SCAN_CACHE_TTL:
-                    gl = cached["games"]
-                else:
-                    gl, _skipped = helixscan.games(d)
-                    self._scan_cache = {"dir": str(d), "games": gl,
-                                        "tag": _tag_of_dir(d), "time": time.monotonic()}
+                gl = self._resolve_games(d)
                 targets = []
                 for i in indices:
                     if not 1 <= i <= len(gl):
                         return {"ok": False, "output": f"not a game number: {i} (scan found {len(gl)})"}
                     targets.append(gl[i - 1])
+                if op == "install" and route is not None:
+                    picked = []
+                    for g in targets:
+                        if route not in helixscan.available_routes(g):
+                            return {"ok": False, "output":
+                                    f"{g.name} cannot use route '{route}'"}
+                        # Same as the reference's per-game question: switch
+                        # routes (install() removes the old way first) and
+                        # remember OptiScaler where picked. A shallow copy
+                        # keeps the scan cache pristine on success and failure.
+                        c = copy.copy(g)
+                        c.route = route
+                        c.chosen = route == "optiscaler" and g.can_opti
+                        picked.append(c)
+                    targets = picked
                 helixscan.take_log()
                 for g in targets:
                     decky.logger.info(f"HelixSR {op} {g.name} (route {g.route})")
@@ -443,6 +603,76 @@ class Plugin:
         except Exception as e:  # noqa: BLE001
             decky.logger.error(f"HelixSR {op} failed: {e}")
             return {"ok": False, "output": f"{type(e).__name__}: {e}"}
+
+    async def get_game_settings(self, index: int) -> dict:
+        d = await self._active_dir()
+        if d is None:
+            return {"ok": False, "error": "no HelixSR version downloaded"}
+        try:
+            idx = int(index)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": f"bad game number: {index}"}
+        return await asyncio.to_thread(self._game_settings_run, "get", d, idx, None)
+
+    async def set_game_settings(self, index: int, values: dict) -> dict:
+        d = await self._active_dir()
+        if d is None:
+            return {"ok": False, "output": "no HelixSR version downloaded"}
+        try:
+            idx = int(index)
+        except (TypeError, ValueError):
+            return {"ok": False, "output": f"bad game number: {index}"}
+        if not isinstance(values, dict):
+            return {"ok": False, "output": "bad settings"}
+        return await asyncio.to_thread(self._game_settings_run, "set", d, idx, values)
+
+    def _game_settings_run(self, op: str, d: Path, index: int, values: dict | None) -> dict:
+        """Read/write a game's helixsr.ini (sharpening, WaveSize...)."""
+        try:
+            with self._ops_lock:
+                gl = self._resolve_games(d)
+                if not 1 <= index <= len(gl):
+                    msg = f"not a game number: {index} (scan found {len(gl)})"
+                    return {"ok": False, "error" if op == "get" else "output": msg}
+                g = gl[index - 1]
+                if op == "get":
+                    p = _find_ini(g)
+                    if p is None:
+                        return {"ok": False, "error":
+                                "no helixsr.ini found: install HelixSR in this game first"}
+                    vals, note = _read_ini_values(p)
+                    out = {"ok": True, "path": str(p), "values": vals}
+                    if note:
+                        out["note"] = note
+                    return out
+                norm, err = _normalize_ini_values(values or {})
+                if err:
+                    return {"ok": False, "output": err}
+                p = _find_ini(g)
+                if p is None:
+                    try:
+                        installed = g.installed()
+                    except Exception:  # noqa: BLE001
+                        installed = False
+                    if not installed:
+                        return {"ok": False, "output":
+                                "no helixsr.ini found: install HelixSR in this game first"}
+                    p = _find_ini(g, create=True)
+                    if p is None:
+                        return {"ok": False, "output": "cannot locate settings file for this game"}
+                    helixscan.make_ini(p.parent, None)
+                text = p.read_text(encoding="utf-8", errors="replace") if p.is_file() else ""
+                for key, val in norm.items():
+                    text = _set_ini_value(text, INI_SECTIONS[key], key, val)
+                p.write_text(text, encoding="utf-8")
+                return {"ok": True, "output": f"saved {p}", "path": str(p)}
+        except OSError as e:
+            msg = f"settings file error: {e}"
+            return {"ok": False, "error" if op == "get" else "output": msg}
+        except Exception as e:  # noqa: BLE001
+            decky.logger.error(f"HelixSR game settings failed: {e}")
+            msg = f"{type(e).__name__}: {e}"
+            return {"ok": False, "error" if op == "get" else "output": msg}
 
     async def start_build(self, rebuild: bool = False) -> dict:
         """Build the network: a background thread first ensures NVIDIA's DLSS

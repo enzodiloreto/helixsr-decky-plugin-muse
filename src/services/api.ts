@@ -30,9 +30,17 @@ export interface HelixGame {
   name: string;
   folder: string;
   route: string;
+  available: string[];
   inputs: string[];
   installed: boolean;
   status: string;
+}
+
+export interface GameSettings {
+  Sharpener: string;
+  Sharpness: string;
+  UseGameSlider: string;
+  WaveSize: string;
 }
 
 export interface DownloadStatus {
@@ -67,7 +75,9 @@ export const apiGetDownloadStatus = callable<[], DownloadStatus>("get_download_s
 export const apiStartScan = callable<[], { ok: boolean; error?: string }>("start_scan");
 export const apiCancelScan = callable<[], { ok: boolean; error?: string }>("cancel_scan");
 export const apiGetScanStatus = callable<[], ScanStatus>("get_scan_status");
-export const apiInstallGames = callable<[indices: number[]], { ok: boolean; output: string; rc?: number }>("install_games");
+export const apiInstallGames = callable<[indices: number[], route: string], { ok: boolean; output: string; rc?: number }>("install_games");
+export const apiGetGameSettings = callable<[index: number], { ok: boolean; path?: string; values?: GameSettings; note?: string; error?: string }>("get_game_settings");
+export const apiSetGameSettings = callable<[index: number, values: GameSettings], { ok: boolean; output?: string; path?: string }>("set_game_settings");
 export const apiUninstallGames = callable<[indices: number[]], { ok: boolean; output: string; rc?: number }>("uninstall_games");
 export const apiStartBuild = callable<[rebuild: boolean], { ok: boolean; log?: string; error?: string }>("start_build");
 export const apiGetBuildStatus = callable<[], { running: boolean; log: string; log_path: string; network_built: boolean }>("get_build_status");

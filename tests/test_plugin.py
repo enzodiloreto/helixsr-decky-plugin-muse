@@ -299,6 +299,101 @@ class PluginCase(unittest.TestCase):
                 self.assertEqual(proc.returncode, -15)
         asyncio.run(go())
 
+    # --- routes + settings --------------------------------------------------
+
+    async def _game_index(self, p, name):
+        d = await p._active_dir()
+        gl, _ = await asyncio.to_thread(main.helixscan.games, d)
+        return next(i for i, g in enumerate(gl, 1) if g.name == name)
+
+    def test_install_with_explicit_route(self):
+        self._version_dir(tag="9.9.9")
+        home = make_steam_home(self.tmp)
+        os.environ["DECKY_USER_HOME"] = str(home)
+        p = self._plugin()
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            idx_b = await self._game_index(p, "GameB")
+            r = await p.install_games([idx_b], "dlss")
+            self.assertTrue(r["ok"], r["output"])
+            folder = home / ".local/share/lib/steamapps/common/GameB"
+            self.assertTrue((folder / "dxgi.dll").exists())
+            self.assertTrue((folder / "nvngx.dll").exists())
+            r = await p.uninstall_games([idx_b])
+            self.assertTrue(r["ok"], r["output"])
+            self.assertFalse((folder / "dxgi.dll").exists())
+            bad = await p.install_games([(await self._game_index(p, "GameA"))], "dlss")
+            self.assertFalse(bad["ok"])
+            self.assertIn("cannot use route", bad["output"])
+        asyncio.run(go())
+
+    def test_game_settings_roundtrip(self):
+        self._version_dir(tag="9.9.9")
+        home = make_steam_home(self.tmp)
+        os.environ["DECKY_USER_HOME"] = str(home)
+        p = self._plugin()
+        folder = home / ".local/share/lib/steamapps/common/GameB"
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            idx_b = await self._game_index(p, "GameB")
+            self.assertTrue((await p.install_games([idx_b], "optiscaler"))["ok"])
+            r = await p.get_game_settings(idx_b)
+            self.assertTrue(r["ok"], r.get("error"))
+            self.assertEqual(r["values"], {"Sharpener": "off", "Sharpness": "0.5",
+                                           "UseGameSlider": "false", "WaveSize": "default"})
+            w = await p.set_game_settings(idx_b, {"Sharpener": "nvidia", "Sharpness": "0.7",
+                                                  "UseGameSlider": True, "WaveSize": "64"})
+            self.assertTrue(w["ok"], w.get("output"))
+            r2 = await p.get_game_settings(idx_b)
+            self.assertEqual(r2["values"], {"Sharpener": "nvidia", "Sharpness": "0.7",
+                                            "UseGameSlider": "true", "WaveSize": "64"})
+            text = (folder / "HelixSR" / "helixsr.ini").read_text()
+            self.assertIn("Sharpener = nvidia", text)
+            self.assertIn("; HelixSR settings", text)
+            bad = await p.set_game_settings(idx_b, {"Sharpener": "wat"})
+            self.assertFalse(bad["ok"])
+            self.assertIn("bad Sharpener", bad["output"])
+            bad = await p.set_game_settings(idx_b, {"Sharpness": "2"})
+            self.assertFalse(bad["ok"])
+            bad = await p.set_game_settings(idx_b, {"Nope": "1"})
+            self.assertFalse(bad["ok"])
+        asyncio.run(go())
+
+    def test_game_settings_needs_install(self):
+        self._version_dir(tag="9.9.9")
+        home = make_steam_home(self.tmp)
+        os.environ["DECKY_USER_HOME"] = str(home)
+        p = self._plugin()
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            idx_b = await self._game_index(p, "GameB")
+            r = await p.get_game_settings(idx_b)
+            self.assertFalse(r["ok"])
+            self.assertIn("install", r["error"])
+        asyncio.run(go())
+
+    def test_set_ini_value(self):
+        template = ("; HelixSR settings.\n[Sharpening]\n;Sharpener = nvidia\n"
+                    ";Sharpness = 0.5\n\n[Compatibility]\n;WaveSize = default\n")
+        out = main._set_ini_value(template, "Sharpening", "Sharpener", "rcas")
+        self.assertIn("Sharpener = rcas", out)
+        self.assertIn("; HelixSR settings.", out)
+        self.assertNotIn(";Sharpener", out)
+        # duplicates collapse to one active line
+        dup = "[Sharpening]\nSharpener = off\nSharpener = nvidia\n"
+        out = main._set_ini_value(dup, "Sharpening", "Sharpener", "off")
+        self.assertEqual(out.count("Sharpener ="), 1)
+        # missing section is appended
+        out = main._set_ini_value("[Sharpening]\nSharpener = off\n", "Compatibility", "WaveSize", "64")
+        self.assertIn("[Compatibility]\nWaveSize = 64", out)
+        # CRLF stays CRLF
+        out = main._set_ini_value("[Sharpening]\r\n;Sharpness = 0.5\r\n", "Sharpening", "Sharpness", "0.7")
+        self.assertIn("Sharpness = 0.7", out)
+        self.assertNotIn("\n\n", out.replace("\r\n", "\n"))
+
     # --- helpers ------------------------------------------------------------
 
     def test_repair_exec_bits(self):
