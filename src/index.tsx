@@ -1076,6 +1076,15 @@ function Content() {
           </div>
         </Card>
       ) : null}
+      {output && (
+        <PanelSection title="Log">
+          <PanelSectionRow>
+            <Card tone="neutral" radius={M3.shape.md} style={{ background: M3.color.surfaceContainerLow, width: "100%" }}>
+              <PagedText text={output.slice(-4000)} pageSize={40} maxHeight={240} />
+            </Card>
+          </PanelSectionRow>
+        </PanelSection>
+      )}
       <PanelSection title="1 · Version">
         {updateAvailable && newestRelease && (
           <PanelSectionRow>
@@ -1642,15 +1651,6 @@ function Content() {
           </PanelSectionRow>
         )}
       </PanelSection>
-      {output && (
-        <PanelSection title="Log">
-          <PanelSectionRow>
-            <Card tone="neutral" radius={M3.shape.md} style={{ background: M3.color.surfaceContainerLow, width: "100%" }}>
-              <PagedText text={output.slice(-4000)} pageSize={40} maxHeight={240} />
-            </Card>
-          </PanelSectionRow>
-        </PanelSection>
-      )}
       {state?.plugin_version && (
         <PanelSectionRow>
           <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>plugin v{state.plugin_version}</div>
