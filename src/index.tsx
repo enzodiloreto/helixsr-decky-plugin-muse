@@ -16,7 +16,9 @@ import {
   toaster,
 } from "@decky/api"
 import { useEffect, useRef, useState } from "react";
-import { FaPlug } from "react-icons/fa";
+import { MdMemory } from "react-icons/md";
+import { Card, Chip, Stepper } from "./components";
+import { M3 } from "./theme";
 import {
   HelixGame,
   HelixRelease,
@@ -77,6 +79,12 @@ const ROUTE_LABELS: Record<string, string> = {
   direct: "FSR drop-in (select AMD FSR)",
   optiscaler: "OptiScaler (select DLSS)",
   dlss: "DLSS loader (experimental!)",
+};
+
+const ROUTE_SHORT: Record<string, string> = {
+  direct: "FSR drop-in",
+  optiscaler: "OptiScaler",
+  dlss: "DLSS loader",
 };
 
 function parseBuildProgress(log: string): { pct: number; label: string } | null {
@@ -714,12 +722,6 @@ function Content() {
   const notInstalledCount = games.length - installedCount;
   const downloadedVersions = (state?.versions || []).filter((v) => downloadedTags.has(v.tag));
   const totalMB = downloadedVersions.reduce((a, v) => a + (v.size_mb || 0), 0);
-  const summary = !state ? "Loading ..."
-    : !hasVersions ? "No version downloaded yet — start below"
-    : `Active ${state.active_tag || "none"}` +
-      (activeVersion ? (activeVersion.network_built ? " · network built" : " · network NOT built") : "") +
-      (games.length ? ` · ${installedCount}/${games.length} games${gamesTag ? ` (${gamesTag})` : ""}` : " · not scanned yet") +
-      ` · ${totalMB.toFixed(1)} MB`;
   const buildProg = building ? parseBuildProgress(output) : null;
   const newestRelease = releases.length ? releases[0] : null;
   const updateAvailable = newestRelease && ![...downloadedTags].some((t) => cmpTags(t, newestRelease.tag) >= 0);
@@ -731,36 +733,55 @@ function Content() {
 
   return (
     <div>
+      <Card
+        variant="elevated"
+        tone={hasVersions ? "primary" : "neutral"}
+        radius={M3.shape.xl}
+        style={{ marginBottom: M3.space.md }}
+      >
+        <div style={{ ...M3.type.headline, marginBottom: M3.space.sm }}>
+          {hasVersions ? `Active ${state?.active_tag || "none"}` : "Welcome to HelixSR"}
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: M3.space.md }}>
+          {activeVersion ? (
+            activeVersion.network_built
+              ? <Chip tone="success">Network built</Chip>
+              : <Chip tone="warning">Network NOT built</Chip>
+          ) : (
+            <Chip tone="neutral">No active version</Chip>
+          )}
+          {games.length > 0 ? (
+            <Chip tone="secondary">{installedCount}/{games.length} games{gamesTag ? ` · ${gamesTag}` : ""}</Chip>
+          ) : (
+            <Chip tone="neutral">Not scanned</Chip>
+          )}
+          {totalMB > 0 && <Chip tone="neutral">{totalMB.toFixed(1)} MB</Chip>}
+        </div>
+        <Stepper step={step} />
+        <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.sm }}>
+          Step {step}/4 — {STEP_TEXT[step]}
+        </div>
+      </Card>
       {state && state.update_pending ? (
-        <PanelSection title="Restart needed">
-          <PanelSectionRow>
-            <div style={{ fontSize: 12 }}>
-              v{state.update_pending} downloaded — restart Decky to apply it.
-            </div>
-          </PanelSectionRow>
-        </PanelSection>
+        <Card tone="primary" radius={M3.shape.md} style={{ marginBottom: M3.space.md }}>
+          <div style={{ ...M3.type.title, marginBottom: 2 }}>Restart needed</div>
+          <div style={M3.type.body}>v{state.update_pending} downloaded — restart Decky to apply it.</div>
+        </Card>
       ) : state && state.plugin_version !== PLUGIN_VERSION ? (
-        <PanelSection title="Warning">
-          <PanelSectionRow>
-            <div style={{ fontSize: 12 }}>
-              UI v{PLUGIN_VERSION} but backend v{state.plugin_version || "unknown"} — a partial update.
-              Reinstall the plugin zip and restart Decky.
-            </div>
-          </PanelSectionRow>
-        </PanelSection>
+        <Card tone="error" radius={M3.shape.md} style={{ marginBottom: M3.space.md }}>
+          <div style={{ ...M3.type.title, marginBottom: 2 }}>Partial update</div>
+          <div style={M3.type.body}>
+            UI v{PLUGIN_VERSION} but backend v{state.plugin_version || "unknown"}.
+            Reinstall the plugin zip and restart Decky.
+          </div>
+        </Card>
       ) : null}
-      <PanelSection title="Status">
-        <PanelSectionRow>
-          <div style={{ fontSize: 12 }}>{summary}</div>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <div style={{ fontSize: 12 }}>Step {step}/4 — {STEP_TEXT[step]}</div>
-        </PanelSectionRow>
-      </PanelSection>
       <PanelSection title="1 · Version">
         {updateAvailable && newestRelease && (
           <PanelSectionRow>
-            <div style={{ fontSize: 12 }}>Update available: {newestRelease.tag} — select it below to download.</div>
+            <Card tone="tertiary" radius={M3.shape.md}>
+              <div style={M3.type.label}>Update available: {newestRelease.tag} — select it below to download.</div>
+            </Card>
           </PanelSectionRow>
         )}
         <PanelSectionRow>
@@ -774,7 +795,9 @@ function Content() {
         </PanelSectionRow>
         {pickedRelease && !pickedDownloaded && pickedRelease.body && (
           <PanelSectionRow>
-            <div style={{ whiteSpace: "pre-wrap", fontSize: 12, maxHeight: 160, overflowY: "auto" }}>{pickedRelease.body.slice(0, 800)}</div>
+            <Card tone="neutral" radius={M3.shape.md}>
+              <div style={{ ...M3.type.body, whiteSpace: "pre-wrap", maxHeight: 160, overflowY: "auto" }}>{pickedRelease.body.slice(0, 800)}</div>
+            </Card>
           </PanelSectionRow>
         )}
         <PanelSectionRow>
@@ -795,8 +818,8 @@ function Content() {
         {downloading && (
           <PanelSectionRow>
             <div style={{ width: "100%" }}>
-              <ProgressBar nProgress={dl && dl.total > 0 ? Math.min(100, (100 * dl.downloaded) / dl.total) : 0} />
-              <div style={{ fontSize: 12, marginTop: 4 }}>
+              <ProgressBar nProgress={dl && dl.total > 0 ? Math.min(100, (100 * dl.downloaded) / dl.total) : 0} nTransitionSec={M3.motion.bar} />
+              <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.xs, fontVariantNumeric: M3.tabular }}>
                 {dl && dl.total > 0
                   ? `${fmtSize(dl.downloaded)} / ${fmtSize(dl.total)} (${Math.floor((100 * dl.downloaded) / dl.total)}%)${dlRate ? ` — ${dlRate}` : ""}`
                   : dl ? `${fmtSize(dl.downloaded)} downloaded ...${dlRate ? ` — ${dlRate}` : ""}` : "Starting download ..."}
@@ -832,8 +855,8 @@ function Content() {
         {building && buildProg && (
           <PanelSectionRow>
             <div style={{ width: "100%" }}>
-              <ProgressBar nProgress={buildProg.pct} />
-              <div style={{ fontSize: 12, marginTop: 4 }}>{buildProg.pct}% — {buildProg.label}</div>
+              <ProgressBar nProgress={buildProg.pct} nTransitionSec={M3.motion.bar} />
+              <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.xs, fontVariantNumeric: M3.tabular }}>{buildProg.pct}% — {buildProg.label}</div>
             </div>
           </PanelSectionRow>
         )}
@@ -881,8 +904,8 @@ function Content() {
         {migrating && (
           <PanelSectionRow>
             <div style={{ width: "100%" }}>
-              <ProgressBar nProgress={mig && mig.total > 0 ? Math.min(100, (100 * mig.current) / mig.total) : 0} />
-              <div style={{ fontSize: 12, marginTop: 4 }}>
+              <ProgressBar nProgress={mig && mig.total > 0 ? Math.min(100, (100 * mig.current) / mig.total) : 0} nTransitionSec={M3.motion.bar} />
+              <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.xs, fontVariantNumeric: M3.tabular }}>
                 {mig && mig.total > 0 ? `Migrating ${mig.current}/${mig.total}${mig.current_name ? `: ${mig.current_name}` : ""} ...` : "Starting migration ..."}
               </div>
             </div>
@@ -903,12 +926,20 @@ function Content() {
           </PanelSectionRow>
         )}
         {games.map((g) => (
-          <div key={g.index}>
+          <Card key={g.index} variant="outlined" style={{ width: "100%", marginBottom: M3.space.sm }}>
+            <PanelSectionRow>
+              <div style={{ display: "flex", alignItems: "center", gap: M3.space.sm, flexWrap: "wrap", width: "100%" }}>
+                <span style={{ ...M3.type.title, flex: 1 }}>{g.name}</span>
+                {g.installed
+                  ? <Chip tone="success">Installed</Chip>
+                  : <Chip tone="secondary">{ROUTE_SHORT[g.route] || g.route}</Chip>}
+              </div>
+            </PanelSectionRow>
             <PanelSectionRow>
               <ButtonItem
                 layout="below"
                 disabled={busy !== "" || scanning}
-                description={g.installed ? `✓ Installed — ${shortRoute(g.route)}` : `${g.name} — ${g.status}`}
+                description={g.installed ? shortRoute(g.route) : (ROUTE_LABELS[routes[g.index] || g.route] || g.status)}
                 onClick={() => (g.installed ? onUninstall(g) : onInstall(g))}
               >
                 {`${g.installed ? "Remove from" : "Install in"} ${g.name}`}
@@ -995,7 +1026,7 @@ function Content() {
                 </PanelSectionRow>
               </div>
             )}
-          </div>
+          </Card>
         ))}
       </PanelSection>
       )}
@@ -1026,11 +1057,11 @@ function Content() {
       {hasVersions && (
       <PanelSection title="Storage">
         <PanelSectionRow>
-          <div style={{ fontSize: 12 }}>Total {totalMB.toFixed(1)} MB in {downloadedVersions.length} version(s)</div>
+          <div style={{ ...M3.type.title }}>Total {totalMB.toFixed(1)} MB in {downloadedVersions.length} version(s)</div>
         </PanelSectionRow>
         {downloadedVersions.map((v) => (
           <PanelSectionRow key={v.tag}>
-            <div style={{ fontSize: 12 }}>{v.tag} — {v.size_mb} MB on disk{v.tag === state?.active_tag ? " (active)" : ""}</div>
+            <div style={{ ...M3.type.body, color: M3.color.onSurfaceVariant }}>{v.tag} — {v.size_mb} MB on disk{v.tag === state?.active_tag ? " (active)" : ""}</div>
           </PanelSectionRow>
         ))}
         <PanelSectionRow>
@@ -1067,8 +1098,8 @@ function Content() {
         {updating && (
           <PanelSectionRow>
             <div style={{ width: "100%" }}>
-              <ProgressBar nProgress={pu && pu.total > 0 ? Math.min(100, (100 * pu.downloaded) / pu.total) : 0} />
-              <div style={{ fontSize: 12, marginTop: 4 }}>
+              <ProgressBar nProgress={pu && pu.total > 0 ? Math.min(100, (100 * pu.downloaded) / pu.total) : 0} nTransitionSec={M3.motion.bar} />
+              <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.xs, fontVariantNumeric: M3.tabular }}>
                 {pu && pu.total > 0
                   ? `${fmtSize(pu.downloaded)} / ${fmtSize(pu.total)} (${Math.floor((100 * pu.downloaded) / pu.total)}%)`
                   : "Starting update ..."}
@@ -1088,13 +1119,15 @@ function Content() {
       {output && (
         <PanelSection title="Log">
           <PanelSectionRow>
-            <div ref={logRef} style={{ whiteSpace: "pre-wrap", fontSize: 12, maxHeight: 240, overflowY: "auto" }}>{output.slice(-4000)}</div>
+            <Card tone="neutral" radius={M3.shape.md} style={{ background: M3.color.surfaceContainerLow, width: "100%" }}>
+              <div ref={logRef} style={{ whiteSpace: "pre-wrap", fontSize: 12, maxHeight: 240, overflowY: "auto", fontFamily: M3.mono }}>{output.slice(-4000)}</div>
+            </Card>
           </PanelSectionRow>
         </PanelSection>
       )}
       {state?.plugin_version && (
         <PanelSectionRow>
-          <div style={{ fontSize: 11, opacity: 0.6 }}>plugin v{state.plugin_version}</div>
+          <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>plugin v{state.plugin_version}</div>
         </PanelSectionRow>
       )}
     </div>
@@ -1119,7 +1152,7 @@ export default definePlugin(() => {
     // The content of your plugin's menu
     content: <Content />,
     // The icon displayed in the plugin list
-    icon: <FaPlug />,
+    icon: <MdMemory />,
     // The function triggered when your plugin unloads
     onDismount() {
       console.log("Unloading HelixSR")
