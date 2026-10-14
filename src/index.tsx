@@ -872,7 +872,23 @@ function Content() {
     }
   };
 
+  // Decky's privileged installer bridge (same JS realm Decky itself runs in).
+  // Null when unreachable: callers fall back to the backend flows.
+  const getDeckyBridge = (): { call: (route: string, ...args: any[]) => Promise<any> } | null => {
+    const b = (window as any).DeckyBackend;
+    return b && typeof b.call === "function" ? b : null;
+  };
+
   const onStartPluginUpdate = async () => {
+    const bridge = getDeckyBridge();
+    if (bridge && puCheck?.latest && puCheck?.url) {
+      try {
+        await updateViaDecky(bridge, puCheck.latest, puCheck.url);
+        return;
+      } catch (e) {
+        console.error("[helixsr] decky install unavailable, falling back", e);
+      }
+    }
     try {
       const r = await apiStartPluginUpdate();
       if (!r.ok) {
@@ -886,6 +902,60 @@ function Content() {
     } catch (e) {
       console.error("[helixsr] start_plugin_update failed", e);
     }
+  };
+
+  // Update through Decky's own machinery: native consent modal, privileged
+  // install (works for root-owned installs too), hot-reload afterwards.
+  // Throws only before Decky's popup appears (caller falls back); once the
+  // install is triggered this owns the flow to success or timeout.
+  const updateViaDecky = async (
+    bridge: { call: (route: string, ...args: any[]) => Promise<any> },
+    tag: string,
+    url: string,
+  ) => {
+    if (downloading || scanning || migrating || building) {
+      setOutput("Finish the running download, scan, build or migration first.");
+      toaster.toast({ title: "Update not started", body: "another task is running" });
+      return;
+    }
+    // A legacy entry would install side-by-side instead of replacing: refuse
+    // (no silent auto-uninstall) and point at the old entry.
+    const plugins = await bridge.call("loader/get_plugins");
+    const names = (Array.isArray(plugins) ? plugins : []).map((p) => p && p.name).filter(Boolean);
+    if (names.includes("HelixSR-Decky-Plugin-Muse")) {
+      setOutput("Old 'HelixSR-Decky-Plugin-Muse' entry still installed: uninstall it first (Decky menu), then update.");
+      toaster.toast({ title: "Update blocked", body: "uninstall the old entry first" });
+      return;
+    }
+    // install_type 2 = UPDATE. Shows Decky's install popup for confirmation.
+    await bridge.call("utilities/install_plugin", url, "HelixSR Muse Plugin", tag, "", 2);
+    setUpdating(true);
+    setPu(null);
+    setOutput(`Confirm Decky's install popup for ${tag} ...`);
+    const deadline = Date.now() + 10 * 60 * 1000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 3000));
+      let s = null;
+      try {
+        s = await Promise.race([
+          apiGetState(),
+          new Promise<null>((r) => setTimeout(() => r(null), 8000)),
+        ]);
+      } catch { /* backend mid-replacement: keep waiting */ }
+      if (s && cmpTags(s.plugin_version, tag) === 0) {
+        setUpdating(false);
+        setOutput(`Updated to ${tag} — reopen this panel for the new UI.`);
+        toaster.toast({ title: `Plugin updated to ${tag}`, body: "Reopen this panel" });
+        try {
+          await refreshState();
+        } catch { /* ignore */ }
+        onCheckPluginUpdate(false);
+        return;
+      }
+    }
+    setUpdating(false);
+    setOutput("Still on the old version — confirm Decky's popup, or retry the update.");
+    toaster.toast({ title: "Update not detected", body: "confirm the popup or retry" });
   };
 
   const onMigrate = async () => {
