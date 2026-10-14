@@ -1,6 +1,6 @@
 // Display-only Material You primitives (cards, chips, stepper, divider).
 // No focusable elements: gamepad navigation stays entirely on Decky controls.
-import { CSSProperties, ReactNode, useState } from "react";
+import { CSSProperties, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Focusable } from "@decky/ui";
 import { M3, M3Tone } from "./theme";
 
@@ -113,6 +113,51 @@ export function Divider() {
         opacity: 0.7,
       }}
     />
+  );
+}
+
+/**
+ * Gamepad-readable long text: newest lines visible with auto-scroll, older
+ * lines revealed through a focusable button (inner scroll divs are unreachable
+ * by gamepad, which navigates focusables, not scroll offsets).
+ */
+export function PagedText(props: { text: string; pageSize?: number; maxHeight?: number }) {
+  const { text, pageSize = 40, maxHeight = 240 } = props;
+  const lines = useMemo(() => text.split("\n"), [text]);
+  const [shown, setShown] = useState(pageSize);
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const visible = lines.slice(-Math.min(shown, lines.length));
+  useEffect(() => {
+    const el = boxRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [text]);
+  return (
+    <div style={{ width: "100%", maxWidth: "100%" }}>
+      <div
+        ref={boxRef}
+        style={{
+          whiteSpace: "pre-wrap",
+          overflowWrap: "anywhere",
+          fontSize: 12,
+          fontFamily: M3.mono,
+          maxHeight,
+          overflowY: "auto",
+          overflowX: "hidden",
+        }}
+      >
+        {visible.join("\n")}
+      </div>
+      {lines.length > shown && (
+        <MButton variant="text" onClick={() => setShown((s) => s + pageSize)}>
+          {`Show older (${lines.length - shown} more lines)`}
+        </MButton>
+      )}
+      {lines.length > pageSize && (
+        <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
+          showing last {Math.min(shown, lines.length)} of {lines.length} lines
+        </div>
+      )}
+    </div>
   );
 }
 

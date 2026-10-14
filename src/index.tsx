@@ -16,7 +16,7 @@ import {
 } from "@decky/api"
 import { Fragment, useEffect, useRef, useState } from "react";
 import { MdMemory } from "react-icons/md";
-import { Card, Chip, MButton, Stepper } from "./components";
+import { Card, Chip, MButton, PagedText, Stepper } from "./components";
 import { M3 } from "./theme";
 import {
   HelixGame,
@@ -173,7 +173,6 @@ function Content() {
   const [pu, setPu] = useState<PluginUpdateStatus | null>(null);
   const [confirm, setConfirm] = useState<string>("");
   const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const logRef = useRef<HTMLDivElement | null>(null);
 
   // Two-tap confirmation for destructive actions: first tap arms (with an
   // expiry), second tap runs. Arming another action replaces the first.
@@ -189,11 +188,6 @@ function Content() {
     setConfirm("");
     await fn();
   };
-
-  useEffect(() => {
-    const el = logRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [output]);
 
   const refreshState = async () => {
     try {
@@ -1102,7 +1096,7 @@ function Content() {
         {pickedRelease && !pickedDownloaded && pickedRelease.body && (
           <PanelSectionRow>
             <Card tone="neutral" radius={M3.shape.md}>
-              <div style={{ ...M3.type.body, whiteSpace: "pre-wrap", maxHeight: 160, overflowY: "auto" }}>{pickedRelease.body.slice(0, 800)}</div>
+              <PagedText text={pickedRelease.body.slice(0, 800)} pageSize={12} maxHeight={160} />
             </Card>
           </PanelSectionRow>
         )}
@@ -1394,12 +1388,12 @@ function Content() {
               </PanelSectionRow>
             )}
             {g.installed && logFor === g.index && (
-              <div>
+              <div key={`log-${g.index}`}>
                 {gameLogs.map((l, i) => (
                   <PanelSectionRow key={i}>
                     <Card tone="neutral" radius={M3.shape.md} style={{ background: M3.color.surfaceContainerLow, width: "100%" }}>
                       <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs, overflowWrap: "anywhere" }}>{l.path}</div>
-                      <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 12, maxHeight: 200, overflowY: "auto", overflowX: "hidden", fontFamily: M3.mono }}>{l.tail.slice(-4000)}</div>
+                      <PagedText text={l.tail.slice(-4000)} pageSize={30} maxHeight={200} />
                     </Card>
                   </PanelSectionRow>
                 ))}
@@ -1599,7 +1593,7 @@ function Content() {
         )}
         {puCheck?.update_available && puCheck?.body && !updating && !(pu?.done && pu?.ok) && (
           <PanelSectionRow>
-            <div style={{ whiteSpace: "pre-wrap", fontSize: 12, maxHeight: 160, overflowY: "auto" }}>{puCheck.body.slice(0, 800)}</div>
+            <PagedText text={puCheck.body.slice(0, 800)} pageSize={12} maxHeight={160} />
           </PanelSectionRow>
         )}
         {puCheck?.update_available && !updating && !(pu?.done && pu?.ok) && (
@@ -1652,7 +1646,7 @@ function Content() {
         <PanelSection title="Log">
           <PanelSectionRow>
             <Card tone="neutral" radius={M3.shape.md} style={{ background: M3.color.surfaceContainerLow, width: "100%" }}>
-              <div ref={logRef} style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 12, maxHeight: 240, overflowY: "auto", overflowX: "hidden", fontFamily: M3.mono }}>{output.slice(-4000)}</div>
+              <PagedText text={output.slice(-4000)} pageSize={40} maxHeight={240} />
             </Card>
           </PanelSectionRow>
         </PanelSection>
