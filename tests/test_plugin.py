@@ -1136,5 +1136,54 @@ class PluginCase(unittest.TestCase):
         asyncio.run(go())
 
 
+    def test_dir_size_cached(self):
+        d = self.tmp / "sized"
+        d.mkdir()
+        (d / "a.bin").write_bytes(b"x" * 1000)
+        main._dir_size_cache.clear()
+        self.assertEqual(main._dir_size_cached(d), 1000)
+        # cached: same mtime hit returns without walking (poison the walk to prove it)
+        real_walk = main.os.walk
+        main.os.walk = lambda *a, **k: (_ for _ in ()).throw(AssertionError("walked"))
+        try:
+            self.assertEqual(main._dir_size_cached(d), 1000)
+        finally:
+            main.os.walk = real_walk
+        # new file bumps dir mtime -> fresh walk picks it up
+        (d / "b.bin").write_bytes(b"y" * 500)
+        self.assertEqual(main._dir_size_cached(d), 1500)
+
+    def test_get_releases_paths(self):
+        p = self._plugin()
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            good = [{"tag_name": "v9.9.9", "name": "N", "published_at": "2026-01-01T00:00:00Z",
+                     "assets": [{"name": "h.zip", "size": 12, "browser_download_url": "u"}],
+                     "body": "notes here"}]
+            with mock.patch.object(main, "_fetch_json", return_value=good):
+                r = await p.get_releases()
+            self.assertEqual(r["error"], "")
+            self.assertEqual(len(r["releases"]), 1)
+            self.assertEqual(r["releases"][0]["zip_name"], "h.zip")
+            self.assertIn("notes", r["releases"][0]["body"])
+            # releases without zips are skipped, HTTP errors surface
+            mixed = good + [{"tag_name": "v9.9.8", "assets": [{"name": "n.txt"}]}]
+            with mock.patch.object(main, "_fetch_json", return_value=mixed):
+                r = await p.get_releases()
+            self.assertEqual(len(r["releases"]), 1)
+            import urllib.error
+            err = urllib.error.HTTPError("u", 403, "rate", {}, None)
+            with mock.patch.object(main, "_fetch_json", side_effect=err):
+                r = await p.get_releases()
+            self.assertEqual(r["releases"], [])
+            self.assertIn("403", r["error"])
+            self.assertIn("rate limit", r["error"])
+            with mock.patch.object(main, "_fetch_json", side_effect=OSError("down")):
+                r = await p.get_releases()
+            self.assertIn("OSError", r["error"])
+        asyncio.run(go())
+
+
 if __name__ == "__main__":
     unittest.main()

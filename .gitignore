@@ -38,6 +38,9 @@ dist/
 # Generated frontend version stamp (pnpm prebuild)
 src/version.ts
 
+# Compiled frontend test helpers (pnpm test:ui)
+.uitest/
+
 __pycache__/
 
 /.yalc

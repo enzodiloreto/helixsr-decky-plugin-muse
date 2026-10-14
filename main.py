@@ -190,6 +190,27 @@ def _dir_size(d: Path) -> int:
     return total
 
 
+_dir_size_cache: dict = {}
+
+
+def _dir_size_cached(d: Path) -> int:
+    """Directory size, cached by keying on the dir's own mtime: every write
+    this plugin performs inside a version dir (download, extract, build,
+    cleanup) creates, removes or replaces a top-level entry, which bumps it.
+    Falls back to a fresh walk when the mtime is unreadable."""
+    key = str(d)
+    try:
+        mtime = d.stat().st_mtime_ns
+    except OSError:
+        return _dir_size(d)
+    hit = _dir_size_cache.get(key)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    size = _dir_size(d)
+    _dir_size_cache[key] = (mtime, size)
+    return size
+
+
 PLUGIN_REPO = "enzodiloreto/helixsr-decky-plugin-muse"
 PLUGIN_RELEASES_URL = f"https://api.github.com/repos/{PLUGIN_REPO}/releases?per_page=5"
 PLUGIN_PACKAGE_NAME = "helixsr-muse-plugin"
@@ -556,7 +577,7 @@ class Plugin:
                 versions.append({"tag": _tag_of_dir(d), "dir": d.name,
                                  "network_built": helixscan.network_ready(d),
                                  "dll_version": dll_version,
-                                 "size_mb": round(_dir_size(d) / 1e6, 1)})
+                                 "size_mb": round(_dir_size_cached(d) / 1e6, 1)})
             return {"active_tag": self.settings.getSetting("active_tag", ""),
                     "versions": versions, "root": str(_helixsr_root()),
                     "plugin_version": _plugin_version(),
@@ -819,7 +840,7 @@ class Plugin:
                 if users:
                     return {"ok": False, "error":
                             f"still used by {', '.join(users)}: remove HelixSR from those games first"}
-                freed = _dir_size(d)
+                freed = _dir_size_cached(d)
                 shutil.rmtree(d, ignore_errors=True)
                 if self.settings.getSetting("active_tag") == tag:
                     rest = _version_dirs()
@@ -861,7 +882,7 @@ class Plugin:
                     if users:
                         skipped.append(f"{tag} (used by {', '.join(users)})")
                         continue
-                    freed += _dir_size(d)
+                    freed += _dir_size_cached(d)
                     shutil.rmtree(d, ignore_errors=True)
                     removed.append(tag)
                 tags = [_tag_of_dir(x) for x in _version_dirs()]
@@ -1716,7 +1737,7 @@ class Plugin:
                     if users:
                         skipped.append(f"{tag} (still used by {', '.join(users)})")
                         continue
-                    freed += _dir_size(v)
+                    freed += _dir_size_cached(v)
                     shutil.rmtree(v, ignore_errors=True)
                     removed.append(tag)
                 try:

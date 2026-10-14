@@ -7,7 +7,8 @@
     "prebuild": "node scripts/gen-version.js",
     "build": "rollup -c",
     "watch": "rollup -c -w",
-    "test": "python3 -m unittest discover -s tests -v"
+    "test": "python3 -m unittest discover -s tests -v && pnpm run test:ui",
+    "test:ui": "tsc src/utils.ts --outDir .uitest --module es2020 --target es2020 --moduleResolution node && node --test tests_ui/"
   },
   "repository": {
     "type": "git",
