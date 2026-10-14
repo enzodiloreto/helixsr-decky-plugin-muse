@@ -84,6 +84,13 @@ function parseBuildProgress(log: string): { pct: number; label: string } | null 
   return { pct: Math.min(100, parseInt(last[2], 10)), label: `${last[3]} — ${last[4]}` };
 }
 
+function shortRoute(route: string): string {
+  if (route === "direct") return "drop-in, pick AMD FSR in-game";
+  if (route === "optiscaler") return "OptiScaler, pick DLSS in-game";
+  if (route === "dlss") return "DLSS loader, pick DLSS in-game";
+  return route;
+}
+
 function cmpTags(a: string, b: string): number {
   // Numeric dotted comparison ignoring a leading "v": v1.9.0 > v1.8.1.
   const pa = a.replace(/^v/i, "").split(".").map((x) => parseInt(x, 10) || 0);
@@ -119,6 +126,29 @@ function Content() {
   const [migrating, setMigrating] = useState<boolean>(false);
   const [mig, setMig] = useState<MigrationStatus | null>(null);
   const [folderInput, setFolderInput] = useState<string>("");
+  const [confirm, setConfirm] = useState<string>("");
+  const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const logRef = useRef<HTMLDivElement | null>(null);
+
+  // Two-tap confirmation for destructive actions: first tap arms (with an
+  // expiry), second tap runs. Arming another action replaces the first.
+  const armOrRun = async (key: string, prompt: string, fn: () => Promise<void>) => {
+    if (confirm !== key) {
+      setConfirm(key);
+      setOutput(prompt);
+      if (confirmTimer.current) clearTimeout(confirmTimer.current);
+      confirmTimer.current = setTimeout(() => setConfirm(""), 15000);
+      return;
+    }
+    if (confirmTimer.current) clearTimeout(confirmTimer.current);
+    setConfirm("");
+    await fn();
+  };
+
+  useEffect(() => {
+    const el = logRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [output]);
 
   const refreshState = async () => {
     try {
@@ -353,16 +383,20 @@ function Content() {
 
   const onRemove = async () => {
     if (!picked || !pickedDownloaded) return;
-    setBusy("version");
-    try {
-      await apiRemoveVersion(picked);
-      setOutput(`Removed ${picked}.`);
-      setGames([]);
-      setGamesTag("");
-    } finally {
-      setBusy("");
-      refreshState();
-    }
+    await armOrRun(`remove ${picked}`,
+      `Tap again to confirm removing ${picked} files.`,
+      async () => {
+        setBusy("version");
+        try {
+          await apiRemoveVersion(picked);
+          setOutput(`Removed ${picked}.`);
+          setGames([]);
+          setGamesTag("");
+        } finally {
+          setBusy("");
+          refreshState();
+        }
+      });
   };
 
   const runReadiness = async (): Promise<ReadinessCheck[] | null> => {
@@ -382,6 +416,16 @@ function Content() {
   };
 
   const onBuild = async (rebuild: boolean) => {
+    if (rebuild) {
+      await armOrRun("rebuild network",
+        "Tap again to confirm: rebuild the network from scratch (takes a while).",
+        () => doBuild(true));
+    } else {
+      await doBuild(false);
+    }
+  };
+
+  const doBuild = async (rebuild: boolean) => {
     setBusy("build");
     try {
       if (!(await runReadiness())) {
@@ -474,17 +518,22 @@ function Content() {
   };
 
   const onRemoveAll = async () => {
-    const targets = games.filter((g) => g.installed);
-    if (!targets.length) return;
-    setBusy("games-all");
-    try {
-      const r = await apiUninstallGames(targets.map((g) => g.index));
-      setOutput(r.output);
-      toaster.toast({ title: r.ok ? `Removed from ${targets.length} game(s)` : "Uninstall failed", body: r.ok ? "" : r.output.slice(-200) });
-      if (r.ok) onScan();
-    } finally {
-      setBusy("");
-    }
+    const n = games.filter((g) => g.installed).length;
+    await armOrRun("remove all games",
+      `Tap again to confirm removing HelixSR from ${n} game(s).`,
+      async () => {
+        const targets = games.filter((g) => g.installed);
+        if (!targets.length) return;
+        setBusy("games-all");
+        try {
+          const r = await apiUninstallGames(targets.map((g) => g.index));
+          setOutput(r.output);
+          toaster.toast({ title: r.ok ? `Removed from ${targets.length} game(s)` : "Uninstall failed", body: r.ok ? "" : r.output.slice(-200) });
+          if (r.ok) onScan();
+        } finally {
+          setBusy("");
+        }
+      });
   };
 
   const onAddFolder = async () => {
@@ -510,47 +559,60 @@ function Content() {
     try {
       await apiRemoveScanFolder(path);
       refreshState();
+      setOutput(`Removed scan folder. Rescan to update the list.`);
     } finally {
       setBusy("");
     }
   };
 
   const onRemoveOld = async () => {
-    setBusy("storage");
-    try {
-      const r = await apiRemoveOldVersions();
-      const lines = [...r.removed.map((t) => `removed ${t}`), ...r.skipped.map((t) => `kept ${t}`)];
-      setOutput(`Freed ${r.freed_mb} MB.\n${lines.join("\n")}`);
-      refreshState();
-    } finally {
-      setBusy("");
-    }
+    await armOrRun("remove old versions",
+      "Tap again to confirm removing all versions except the active one.",
+      async () => {
+        setBusy("storage");
+        try {
+          const r = await apiRemoveOldVersions();
+          const lines = [...r.removed.map((t) => `removed ${t}`), ...r.skipped.map((t) => `kept ${t}`)];
+          setOutput(`Freed ${r.freed_mb} MB.\n${lines.join("\n")}`);
+          refreshState();
+        } finally {
+          setBusy("");
+        }
+      });
   };
 
   const onClearDlss = async () => {
-    setBusy("storage");
-    try {
-      const r = await apiClearDlssCache();
-      setOutput(`Freed ${r.freed_mb} MB.\n${r.cleared.join("\n") || "nothing cached"}`);
-    } finally {
-      setBusy("");
-    }
+    await armOrRun("clear SDK cache",
+      "Tap again to confirm deleting cached NVIDIA DLLs (re-downloaded on next build).",
+      async () => {
+        setBusy("storage");
+        try {
+          const r = await apiClearDlssCache();
+          setOutput(`Freed ${r.freed_mb} MB.\n${r.cleared.join("\n") || "nothing cached"}`);
+        } finally {
+          setBusy("");
+        }
+      });
   };
 
   const onMigrate = async () => {
     if (!activeVersion) return;
-    try {
-      const r = await apiStartMigration(activeVersion.tag);
-      if (!r.ok) {
-        setOutput(r.error || "migration not started");
-        return;
-      }
-      setMigrating(true);
-      setMig(null);
-      setOutput(`Migrating games to ${activeVersion.tag} ...`);
-    } catch (e) {
-      console.error("[helixsr] start_migration failed", e);
-    }
+    await armOrRun(`migrate to ${activeVersion.tag}`,
+      `Tap again to confirm migrating ${migCandidates.length} game(s) to ${activeVersion.tag}.`,
+      async () => {
+        try {
+          const r = await apiStartMigration(activeVersion.tag);
+          if (!r.ok) {
+            setOutput(r.error || "migration not started");
+            return;
+          }
+          setMigrating(true);
+          setMig(null);
+          setOutput(`Migrating games to ${activeVersion.tag} ...`);
+        } catch (e) {
+          console.error("[helixsr] start_migration failed", e);
+        }
+      });
   };
 
   const onInstall = async (g: HelixGame) => {
@@ -578,10 +640,24 @@ function Content() {
     }
   };
 
-  const options = releases.map((r) => ({
-    data: r.tag,
-    label: `${r.tag} — ${r.published_at} — ${fmtSize(r.size)}${downloadedTags.has(r.tag) ? " ✓" : ""}`,
-  }));
+  const options = releases.map((r) => {
+    const dl = (state?.versions || []).find((v) => v.tag === r.tag);
+    return {
+      data: r.tag,
+      label: dl ? `${r.tag} ✓ (${dl.size_mb} MB on disk)` : `${r.tag} — ${r.published_at} — ${fmtSize(r.size)} download`,
+    };
+  });
+  const hasVersions = (state?.versions.length || 0) > 0;
+  const installedCount = games.filter((g) => g.installed).length;
+  const notInstalledCount = games.length - installedCount;
+  const downloadedVersions = (state?.versions || []).filter((v) => downloadedTags.has(v.tag));
+  const totalMB = downloadedVersions.reduce((a, v) => a + (v.size_mb || 0), 0);
+  const summary = !state ? "Loading ..."
+    : !hasVersions ? "No version downloaded yet — start below"
+    : `Active ${state.active_tag || "none"}` +
+      (activeVersion ? (activeVersion.network_built ? " · network built" : " · network NOT built") : "") +
+      (games.length ? ` · ${installedCount}/${games.length} games${gamesTag ? ` (${gamesTag})` : ""}` : " · not scanned yet") +
+      ` · ${totalMB.toFixed(1)} MB`;
   const buildProg = building ? parseBuildProgress(output) : null;
   const newestRelease = releases.length ? releases[0] : null;
   const updateAvailable = newestRelease && ![...downloadedTags].some((t) => cmpTags(t, newestRelease.tag) >= 0);
@@ -590,7 +666,6 @@ function Content() {
   const migCandidates = activeVersion && activeVersion.dll_version && activeVersion.dll_version !== "?"
     ? games.filter((g) => g.installed && !(g.installed_versions || []).includes(activeVersion.dll_version))
     : [];
-  const downloadedVersions = (state?.versions || []).filter((v) => downloadedTags.has(v.tag));
 
   return (
     <div>
@@ -604,10 +679,15 @@ function Content() {
           </PanelSectionRow>
         </PanelSection>
       )}
-      <PanelSection title="Version">
+      <PanelSection title="Status">
+        <PanelSectionRow>
+          <div style={{ fontSize: 12 }}>{summary}</div>
+        </PanelSectionRow>
         <PanelSectionRow>
           <div style={{ fontSize: 12 }}>Step {step}/4 — {STEP_TEXT[step]}</div>
         </PanelSectionRow>
+      </PanelSection>
+      <PanelSection title="1 · Version">
         {updateAvailable && newestRelease && (
           <PanelSectionRow>
             <div style={{ fontSize: 12 }}>Update available: {newestRelease.tag} — select it below to download.</div>
@@ -633,8 +713,13 @@ function Content() {
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
-          <ButtonItem layout="below" disabled={busy !== "" || downloading || !picked} onClick={onDownloadOrUse}>
-            {pickedDownloaded ? `Use ${picked}` : downloading ? "Downloading ..." : `Download ${picked}`}
+          <ButtonItem
+            layout="below"
+            disabled={busy !== "" || downloading || !picked}
+            description={!releases.length ? "No releases loaded — Reload above" : undefined}
+            onClick={onDownloadOrUse}
+          >
+            {pickedDownloaded ? `Switch to ${picked}` : downloading ? "Downloading ..." : `Download ${picked}`}
           </ButtonItem>
         </PanelSectionRow>
         {downloading && (
@@ -652,13 +737,21 @@ function Content() {
         {pickedDownloaded && (
           <PanelSectionRow>
             <ButtonItem layout="below" disabled={busy !== ""} onClick={onRemove}>
-              {`Remove ${picked} files`}
+              {confirm === `remove ${picked}` ? `Confirm remove ${picked}?` : `Remove ${picked} files`}
             </ButtonItem>
           </PanelSectionRow>
         )}
+      </PanelSection>
+      {hasVersions && (
+      <PanelSection title="2 · Network build">
         <PanelSectionRow>
-          <ButtonItem layout="below" disabled={busy !== "" || building || !activeVersion} onClick={() => onBuild(Boolean(activeVersion?.network_built))}>
-            {building ? "Building network ..." : activeVersion?.network_built ? "Rebuild network (setup.sh)" : "Build network (setup.sh)"}
+          <ButtonItem
+            layout="below"
+            disabled={busy !== "" || building || !activeVersion}
+            description={!activeVersion ? "Download a version first" : undefined}
+            onClick={() => onBuild(Boolean(activeVersion?.network_built))}
+          >
+            {building ? "Building network ..." : activeVersion?.network_built ? confirm === "rebuild network" ? "Confirm rebuild?" : "Rebuild network" : "Build network"}
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
@@ -675,9 +768,16 @@ function Content() {
           </PanelSectionRow>
         )}
       </PanelSection>
-      <PanelSection title="Games">
+      )}
+      {hasVersions && (
+      <PanelSection title="3 · Games">
         <PanelSectionRow>
-          <ButtonItem layout="below" disabled={scanning || busy !== "" || !activeVersion} onClick={onScan}>
+          <ButtonItem
+            layout="below"
+            disabled={scanning || busy !== "" || !activeVersion}
+            description={!activeVersion ? "Download and build a version first" : busy !== "" ? "Busy — wait for the current task" : undefined}
+            onClick={onScan}
+          >
             {scanning ? "Scanning ..." : `Scan games${gamesTag ? ` (${gamesTag})` : ""}`}
           </ButtonItem>
         </PanelSectionRow>
@@ -698,8 +798,13 @@ function Content() {
         )}
         {migCandidates.length > 0 && activeVersion && !migrating && (
           <PanelSectionRow>
-            <ButtonItem layout="below" disabled={busy !== "" || scanning} onClick={onMigrate}>
-              {`Migrate ${migCandidates.length} game(s) to ${activeVersion.tag}`}
+            <ButtonItem
+              layout="below"
+              disabled={busy !== "" || scanning}
+              description="Reinstalls them into the new build, keeping routes"
+              onClick={onMigrate}
+            >
+              {confirm === `migrate to ${activeVersion.tag}` ? "Confirm migrate?" : `Migrate ${migCandidates.length} game(s) to ${activeVersion.tag}`}
             </ButtonItem>
           </PanelSectionRow>
         )}
@@ -713,17 +818,17 @@ function Content() {
             </div>
           </PanelSectionRow>
         )}
-        {games.some((g) => !g.installed) && (
+        {notInstalledCount > 0 && (
           <PanelSectionRow>
             <ButtonItem layout="below" disabled={busy !== "" || scanning} onClick={onInstallAll}>
-              Install all listed
+              {`Install all ${notInstalledCount} game(s)`}
             </ButtonItem>
           </PanelSectionRow>
         )}
-        {games.some((g) => g.installed) && (
+        {installedCount > 0 && (
           <PanelSectionRow>
             <ButtonItem layout="below" disabled={busy !== "" || scanning} onClick={onRemoveAll}>
-              Remove all installed
+              {confirm === "remove all games" ? "Confirm remove all?" : `Remove from all ${installedCount} game(s)`}
             </ButtonItem>
           </PanelSectionRow>
         )}
@@ -733,7 +838,7 @@ function Content() {
               <ButtonItem
                 layout="below"
                 disabled={busy !== "" || scanning}
-                description={`${g.name} — ${g.status}`}
+                description={g.installed ? `✓ Installed — ${shortRoute(g.route)}` : `${g.name} — ${g.status}`}
                 onClick={() => (g.installed ? onUninstall(g) : onInstall(g))}
               >
                 {`${g.installed ? "Remove from" : "Install in"} ${g.name}`}
@@ -742,7 +847,7 @@ function Content() {
             {!g.installed && g.available.length > 1 && (
               <PanelSectionRow>
                 <DropdownItem
-                  label={`Way — ${g.name}`}
+                  label={`Install ${g.name} via:`}
                   rgOptions={g.available.map((a) => ({ data: a, label: ROUTE_LABELS[a] || a }))}
                   selectedOption={routes[g.index] || g.route}
                   onChange={(o) => setRoutes({ ...routes, [g.index]: String(o.data) })}
@@ -823,6 +928,8 @@ function Content() {
           </div>
         ))}
       </PanelSection>
+      )}
+      {hasVersions && (
       <PanelSection title="Folders">
         <PanelSectionRow>
           <TextField
@@ -845,27 +952,33 @@ function Content() {
           </PanelSectionRow>
         ))}
       </PanelSection>
+      )}
+      {hasVersions && (
       <PanelSection title="Storage">
-        {(state?.versions || []).filter((v) => downloadedTags.has(v.tag)).map((v) => (
+        <PanelSectionRow>
+          <div style={{ fontSize: 12 }}>Total {totalMB.toFixed(1)} MB in {downloadedVersions.length} version(s)</div>
+        </PanelSectionRow>
+        {downloadedVersions.map((v) => (
           <PanelSectionRow key={v.tag}>
             <div style={{ fontSize: 12 }}>{v.tag} — {v.size_mb} MB on disk{v.tag === state?.active_tag ? " (active)" : ""}</div>
           </PanelSectionRow>
         ))}
         <PanelSectionRow>
           <ButtonItem layout="below" disabled={busy !== "" || downloadedVersions.length < 2} onClick={onRemoveOld}>
-            Remove all except active
+            {confirm === "remove old versions" ? "Confirm remove all?" : "Remove all except active"}
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
           <ButtonItem layout="below" disabled={busy !== ""} onClick={onClearDlss}>
-            Clear cached SDK files
+            {confirm === "clear SDK cache" ? "Confirm clear cache?" : "Clear cached SDK files"}
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
+      )}
       {output && (
         <PanelSection title="Log">
           <PanelSectionRow>
-            <div style={{ whiteSpace: "pre-wrap", fontSize: 12, maxHeight: 240, overflowY: "auto" }}>{output.slice(-4000)}</div>
+            <div ref={logRef} style={{ whiteSpace: "pre-wrap", fontSize: 12, maxHeight: 240, overflowY: "auto" }}>{output.slice(-4000)}</div>
           </PanelSectionRow>
         </PanelSection>
       )}
