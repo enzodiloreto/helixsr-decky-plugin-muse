@@ -692,8 +692,9 @@ class Plugin:
             if not tag or asset is None:
                 continue
             if _compare_versions(tag, current) > 0 and \
-                    (best is None or _compare_versions(tag, best["latest"]) > 0):
-                best = {"latest": tag, "url": asset["browser_download_url"],
+                    (best is None or _compare_versions(tag, best["tag"]) > 0):
+                ver = tag[1:] if tag[:1].lower() == "v" else tag
+                best = {"tag": tag, "latest": ver, "url": asset["browser_download_url"],
                         "size": asset.get("size", 0) or 0,
                         "body": (r.get("body") or "")[:2000]}
         result = {"ok": True, "current": current, "update_available": best is not None}

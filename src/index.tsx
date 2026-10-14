@@ -873,6 +873,56 @@ function Content() {
     return b && typeof b.call === "function" ? b : null;
   };
 
+  const onReloadPlugin = async () => {
+    const bridge = getDeckyBridge();
+    if (!bridge) {
+      setOutput("Decky bridge unavailable — reinstall the plugin zip and restart Decky.");
+      return;
+    }
+    if (downloading || scanning || migrating || building || updating) {
+      setOutput("Finish the running task first, then reload.");
+      toaster.toast({ title: "Reload blocked", body: "another task is running" });
+      return;
+    }
+    setBusy("reload");
+    try {
+      let triggered = false;
+      for (const name of ["HelixSR Muse Plugin", "HelixSR-Decky-Plugin-Muse"]) {
+        try {
+          // Stops our backend and re-imports it (plus fresh frontend bundle):
+          // heals UI-newer mismatches immediately, no reinstall or restart.
+          await bridge.call("utilities/enable_plugin", name);
+          triggered = true;
+          break;
+        } catch { /* unknown name on this Decky: try the other */ }
+      }
+      if (!triggered) {
+        setOutput("Decky refused the reload — reinstall the plugin zip and restart Decky.");
+        return;
+      }
+    } finally {
+      setBusy("");
+    }
+    const deadline = Date.now() + 60000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 2000));
+      let s = null;
+      try {
+        s = await Promise.race([
+          apiGetState(),
+          new Promise<null>((r) => setTimeout(() => r(null), 8000)),
+        ]);
+      } catch { /* backend mid-replacement: keep waiting */ }
+      if (s && s.plugin_version === PLUGIN_VERSION) {
+        setOutput("Plugin reloaded — UI and backend match again.");
+        toaster.toast({ title: "Plugin reloaded", body: "versions match" });
+        refreshState();
+        return;
+      }
+    }
+    setOutput("Reloaded, but versions still differ — reopen this panel; if it persists, reinstall the zip and restart Decky.");
+  };
+
   const onStartPluginUpdate = async () => {
     const bridge = getDeckyBridge();
     if (bridge && puCheck?.latest && puCheck?.url) {
@@ -1070,9 +1120,14 @@ function Content() {
       ) : state && state.plugin_version !== PLUGIN_VERSION ? (
         <Card tone="error" radius={M3.shape.md} style={{ marginBottom: M3.space.md }}>
           <div style={{ ...M3.type.title, marginBottom: 2 }}>Partial update</div>
-          <div style={M3.type.body}>
+          <div style={{ ...M3.type.body, marginBottom: M3.space.sm }}>
             UI v{PLUGIN_VERSION} but backend v{state.plugin_version || "unknown"}.
-            Reinstall the plugin zip and restart Decky.
+          </div>
+          <MButton variant="tonal" disabled={busy !== ""} onClick={onReloadPlugin}>
+            Reload plugin
+          </MButton>
+          <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.xs }}>
+            If it still shows after reload, reopen this panel — then reinstall the zip and restart Decky.
           </div>
         </Card>
       ) : null}
@@ -1608,9 +1663,7 @@ function Content() {
         {puCheck?.update_available && !updating && !(pu?.done && pu?.ok) && (
           <PanelSectionRow>
             <MButton  disabled={busy !== ""} variant="filled" onClick={onStartPluginUpdate}>
-              {puCheck.can_install === false
-                ? `Download v${puCheck.latest} for manual install`
-                : `Download & install v${puCheck.latest}`}
+              {`Download & install v${puCheck.latest}`}
             </MButton>
           </PanelSectionRow>
         )}

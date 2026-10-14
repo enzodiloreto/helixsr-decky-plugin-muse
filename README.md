@@ -66,8 +66,9 @@ are kept as `*.original.dll` / `HelixSR/backup`).
 
 - **Empty release list**: the Log shows why (no network, GitHub rate limit, TLS
   error). **Reload releases** retries without reopening the panel.
-- **"UI vX but backend vY" warning**: a partial update — reinstall the zip and
-  restart Decky.
+- **"UI vX but backend vY" warning**: a partial update — tap **Reload plugin**
+  in the banner first (heals it without reinstalling in most cases); if it
+  persists, reinstall the zip and restart Decky.
 - **Build fails**: the Log names the step. Handled automatically so far: a system
   Python without SSL support (the plugin downloads NVIDIA's DLL itself and passes
   it via `--dlss`), missing executable bits on extracted files (repaired).

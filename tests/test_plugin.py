@@ -908,7 +908,7 @@ class PluginCase(unittest.TestCase):
                     r = await p.check_plugin_update()
             self.assertTrue(r["ok"])
             self.assertTrue(r["update_available"])
-            self.assertEqual(r["latest"], "v9.9.9")
+            self.assertEqual(r["latest"], "9.9.9")
             self.assertEqual(r["body"], "notes")
             with mock.patch.object(main, "_plugin_version", return_value="v9.9.9"):
                 r2 = await p.check_plugin_update(force=True)
@@ -960,7 +960,7 @@ class PluginCase(unittest.TestCase):
                     mock.patch.object(main.urllib.request, "urlopen", return_value=Resp(payload)):
                 r = await p.start_plugin_update()
                 self.assertTrue(r["ok"], r)
-                self.assertEqual(r["version"], "v9.9.9")
+                self.assertEqual(r["version"], "9.9.9")
                 for _ in range(400):
                     st = await p.get_plugin_update_status()
                     if st.get("done"):
