@@ -17,6 +17,9 @@ def install_decky_stub(emitted=None):
     decky = types.ModuleType("decky")
 
     class _Log:
+        def debug(self, *a):
+            pass
+
         def info(self, *a):
             pass
 
@@ -53,27 +56,37 @@ class StaticSettings:
         pass
 
 
-def make_helixsr_dir(base: Path, tag="1.8.1", network=True) -> Path:
-    """Fake HelixSR version folder with everything scan/install needs."""
+def make_helixsr_dir(base: Path, tag="1.8.1", network=True, modern=True) -> Path:
+    """Fake HelixSR version folder with everything scan/install needs.
+    modern=False mimics pre-1.7 layouts (e.g. 1.4.3): no optiscaler/amd-fsr/
+    dlss-loader folders, no uninstaller, network as separate files."""
     here = base / f"HelixSR-{tag}"
-    (here / "optiscaler").mkdir(parents=True)
-    (here / "amd-fsr").mkdir()
-    (here / "dlss-loader").mkdir()
     dll = b"MZ" + b"\x00" * 100 + f"\x00HelixSR {tag}\x00".encode() + b"\x00" * 100
-    if network:
-        dll += b"W" * 64 + b"P" * 64 + b"HXSRNET1" + struct.pack("<QQQ", 64, 64, 1)
-    (here / "amd_fidelityfx_dx12.dll").write_bytes(dll)
-    (here / "optiscaler" / "OptiScaler.dll").write_bytes(b"OptiScaler fake")
-    (here / "optiscaler" / "OptiScaler.ini").write_text(
-        "[Upscalers]\nDx12Upscaler = none\n[Libraries]\n"
-        "FfxDx12Path = x\nFfxDx12SRPath = y\nFfxDx12FGPath = z\n")
-    for n in ("fakenvapi.dll", "fakenvapi.ini"):
-        (here / "optiscaler" / n).write_bytes(b"fake")
-    (here / "amd-fsr" / "amd_fidelityfx_upscaler_dx12.dll").write_bytes(b"AMD FSR fake")
-    (here / "amd-fsr" / "amd_fidelityfx_framegeneration_dx12.dll").write_bytes(b"AMD FG fake")
-    (here / "dlss-loader" / "dxgi.dll").write_bytes(b"HelixSR DLSS loader fake")
-    (here / "helixsr-setup.sh").write_text("#!/bin/sh\n")
-    (here / "helixsr-uninstall.sh").write_text("#!/bin/sh\n")
+    if modern:
+        (here / "optiscaler").mkdir(parents=True)
+        (here / "amd-fsr").mkdir()
+        (here / "dlss-loader").mkdir()
+        if network:
+            dll += b"W" * 64 + b"P" * 64 + b"HXSRNET1" + struct.pack("<QQQ", 64, 64, 1)
+        (here / "amd_fidelityfx_dx12.dll").write_bytes(dll)
+        (here / "optiscaler" / "OptiScaler.dll").write_bytes(b"OptiScaler fake")
+        (here / "optiscaler" / "OptiScaler.ini").write_text(
+            "[Upscalers]\nDx12Upscaler = none\n[Libraries]\n"
+            "FfxDx12Path = x\nFfxDx12SRPath = y\nFfxDx12FGPath = z\n")
+        for n in ("fakenvapi.dll", "fakenvapi.ini"):
+            (here / "optiscaler" / n).write_bytes(b"fake")
+        (here / "amd-fsr" / "amd_fidelityfx_upscaler_dx12.dll").write_bytes(b"AMD FSR fake")
+        (here / "amd-fsr" / "amd_fidelityfx_framegeneration_dx12.dll").write_bytes(b"AMD FG fake")
+        (here / "dlss-loader" / "dxgi.dll").write_bytes(b"HelixSR DLSS loader fake")
+        (here / "helixsr-setup.sh").write_text("#!/bin/sh\n")
+        (here / "helixsr-uninstall.sh").write_text("#!/bin/sh\n")
+    else:
+        here.mkdir(parents=True)
+        (here / "amd_fidelityfx_dx12.dll").write_bytes(dll)
+        if network:
+            (here / "helixsr_weights.bin").write_bytes(b"weights")
+            (here / "helixsr_kernels.pak").write_bytes(b"kernels")
+        (here / "helixsr-setup.sh").write_text("#!/bin/sh\n")
     return here
 
 

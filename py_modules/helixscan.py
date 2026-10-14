@@ -488,14 +488,20 @@ def overlaps(a, b):
     return a == b or a in b.parents or b in a.parents
 
 
-def available_routes(g):
+def available_routes(g, here=None):
     """Install routes the reference setup offers for this game (its ask()).
     'direct' = FSR 3.1 drop-in, 'optiscaler' = through OptiScaler,
-    'dlss' = experimental DLSS loader."""
+    'dlss' = experimental DLSS loader. With `here` (the HelixSR version
+    folder), routes whose files the release does not ship are excluded:
+    offering OptiScaler for one would fail mid-install, after the game's
+    files were already moved aside."""
     ways = ['direct', 'optiscaler'] if g.can_opti else ['direct'] if g.fsr_targets \
         else ['optiscaler'] if g.inputs and g.target else []
     if g.can_dlss and 'dlss' not in ways:
         ways.append('dlss')
+    if here is not None and 'optiscaler' in ways \
+            and not ((here / 'optiscaler').is_dir() and (here / 'amd-fsr').is_dir()):
+        ways = [w for w in ways if w != 'optiscaler']
     if not ways and g.route:
         ways = [g.route]
     return ways

@@ -1,6 +1,6 @@
 # HelixSR Muse Plugin — Feature Catalog
 
-Every user-facing capability of the plugin (v0.0.30), grouped by panel section.
+Every user-facing capability of the plugin (v0.1.0), grouped by panel section.
 Backend: `main.py` + `py_modules/helixscan.py`. Frontend: `src/index.tsx` (+ api).
 
 ## Status hero
@@ -17,9 +17,12 @@ Backend: `main.py` + `py_modules/helixscan.py`. Frontend: `src/index.tsx` (+ api
 
 ## 1 · Version (HelixSR releases)
 
-- Release list from the HelixSR GitHub API (newest first, zip assets only);
+- Release list from the HelixSR GitHub API (newest first, zip assets only),
+  compacted to downloaded versions plus the newest few behind an expander;
   failures surface the actual reason (network, rate limit, TLS) instead of an
   empty list. **Reload releases** retries without reopening the panel.
+- Old releases (e.g. 1.4.x) download and work: missing scripts tolerated,
+  layouts validated, OptiScaler withheld where the release doesn't ship it.
 - **Update available** badge with numeric tag comparison; release notes preview
   before downloading.
 - **Download** with live progress bar (MB/MB, %, speed, ETA), cancellable;
@@ -43,8 +46,9 @@ Backend: `main.py` + `py_modules/helixscan.py`. Frontend: `src/index.tsx` (+ api
   folders) for DLSS / XeSS / FSR titles using HelixSR's own detection logic.
   Backgrounded with progress, cancellable, per-folder failure isolation, results
   persisted across panel opens (with age note), reused for installs for 5 min.
-- Collapsible Installed / Not-installed groups (both collapsed by default);
-  text filter; status filter (All / Installed / Not installed / Needs repair).
+- Text filter plus one-tap segmented status filter (All / Installed /
+  Not installed / Needs repair). Every selection control is a one-tap button
+  (release, route, settings, presets) — no dropdowns anywhere.
 - Per-game **install route choice**: FSR 3.1 drop-in, OptiScaler, or experimental
   DLSS loader (validated; route switching handled, OptiScaler preference kept).
 - **Install / Remove** per game, **Install/Remove all** (visible subset),

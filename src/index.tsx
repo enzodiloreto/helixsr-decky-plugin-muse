@@ -113,6 +113,7 @@ function Content() {
   const [logFixes, setLogFixes] = useState<LogFix[]>([]);
   const [verify, setVerify] = useState<VerifyResult[] | null>(null);
   const [filter, setFilter] = useState<string>("");
+  const [showAllReleases, setShowAllReleases] = useState<boolean>(false);
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
   const [showMode, setShowMode] = useState<string>("all");
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({ installed: false, not: false });
@@ -377,6 +378,11 @@ function Content() {
   }, [building]);
 
   const downloadedTags = new Set((state?.versions || []).map((v) => v.tag));
+  // Downloaded versions plus the newest few; the rest hide behind an expander
+  // so a long release history doesn't dominate the panel.
+  const listedReleases = showAllReleases
+    ? releases
+    : releases.filter((r, i) => downloadedTags.has(r.tag) || i < 3);
   const activeVersion = state?.versions.find((v) => v.tag === state.active_tag);
   const pickedRelease = releases.find((r) => r.tag === picked);
   const pickedDownloaded = picked ? downloadedTags.has(picked) : false;
@@ -1143,7 +1149,7 @@ function Content() {
             {activeVersion ? `Active: ${activeVersion.tag} (network ${activeVersion.network_built ? "built" : "NOT built"})` : "No version downloaded yet"}
           </div>
         </PanelSectionRow>
-        {releases.map((r) => {
+        {listedReleases.map((r) => {
           const dl = (state?.versions || []).find((v) => v.tag === r.tag);
           return (
             <PanelSectionRow key={r.tag}>
@@ -1157,6 +1163,20 @@ function Content() {
             </PanelSectionRow>
           );
         })}
+        {releases.length > listedReleases.length && (
+          <PanelSectionRow>
+            <MButton variant="text" onClick={() => setShowAllReleases(true)}>
+              {`Show all ${releases.length} releases`}
+            </MButton>
+          </PanelSectionRow>
+        )}
+        {showAllReleases && releases.length > 3 && (
+          <PanelSectionRow>
+            <MButton variant="text" onClick={() => setShowAllReleases(false)}>
+              Show fewer
+            </MButton>
+          </PanelSectionRow>
+        )}
         {pickedRelease && !pickedDownloaded && pickedRelease.body && (
           <PanelSectionRow>
             <Card tone="neutral" radius={M3.shape.md}>

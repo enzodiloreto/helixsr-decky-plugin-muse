@@ -1185,5 +1185,82 @@ class PluginCase(unittest.TestCase):
         asyncio.run(go())
 
 
+    def test_legacy_layout(self):
+        # Pre-1.7 layout (e.g. 1.4.3): no uninstaller, no optiscaler/amd-fsr/
+        # dlss-loader folders, network as separate files.
+        base = Path(tempfile.mkdtemp(prefix="hxlegacy-"))
+        self.addCleanup(shutil.rmtree, base, True)
+        home = make_steam_home(base)
+        os.environ["DECKY_USER_HOME"] = str(home)
+        here = make_helixsr_dir(base / "pkg", tag="1.4.3", modern=False)
+        self.assertFalse((here / "helixsr-uninstall.sh").exists())
+        self.assertFalse((here / "optiscaler").exists())
+        # FSR game that also has DLSS inputs (OptiScaler-capable on modern).
+        gd = home / ".local/share/lib/steamapps/common/GameD"
+        (gd / "bin").mkdir(parents=True)
+        (gd / "bin" / "amd_fidelityfx_upscaler_dx12.dll").write_bytes(b"FSR DLL")
+        (gd / "bin" / "nvngx_dlss.dll").write_bytes(b"DLSS DLL")
+        (gd / "bin" / "game.exe").write_bytes(b"\x00" * 100)
+        p = self._plugin()
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            gl, _ = await asyncio.to_thread(main.helixscan.games, here)
+            d = next(g for g in gl if g.name == "GameD")
+            # modern folder offers both ways, legacy folder only the drop-in
+            modern = make_helixsr_dir(base / "pkg2", tag="9.9.9")
+            gm, _ = await asyncio.to_thread(main.helixscan.games, modern)
+            dm = next(g for g in gm if g.name == "GameD")
+            self.assertIn("optiscaler", main.helixscan.available_routes(dm, modern))
+            self.assertEqual(main.helixscan.available_routes(d, here), ["direct"])
+            # download of an old-layout zip completes (used to crash chmod)
+            zp = base / "old.zip"
+            with zipfile.ZipFile(zp, "w") as z:
+                z.writestr("HelixSR-1.4.3/helixsr-setup.sh", "#!/bin/sh\n")
+                z.writestr("HelixSR-1.4.3/amd_fidelityfx_dx12.dll", b"fake")
+            os.environ["DECKY_PLUGIN_RUNTIME_DIR"] = str(base / "rt")
+            self.assertEqual(await p.start_download("v1.4.3", zp.as_uri()), {"ok": True})
+            st = await self._wait_done(p.get_download_status)
+            self.assertTrue(st["ok"], st["error"])
+            self.assertEqual(st["dir"], "HelixSR-1.4.3")
+        asyncio.run(go())
+
+    def test_legacy_install_and_reject(self):
+        base = Path(tempfile.mkdtemp(prefix="hxlegacy2-"))
+        self.addCleanup(shutil.rmtree, base, True)
+        home = make_steam_home(base)
+        os.environ["DECKY_USER_HOME"] = str(home)
+        here = make_helixsr_dir(base / "rt" / "helixsr", tag="1.4.3", modern=False)
+        gd = home / ".local/share/lib/steamapps/common/GameD"
+        (gd / "bin").mkdir(parents=True)
+        (gd / "bin" / "amd_fidelityfx_upscaler_dx12.dll").write_bytes(b"FSR DLL")
+        (gd / "bin" / "nvngx_dlss.dll").write_bytes(b"DLSS DLL")
+        (gd / "bin" / "game.exe").write_bytes(b"\x00" * 100)
+        os.environ["DECKY_PLUGIN_RUNTIME_DIR"] = str(base / "rt")
+        p = self._plugin()
+        target = gd / "bin" / "amd_fidelityfx_upscaler_dx12.dll"
+        original = target.read_bytes()
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            idx = await self._game_index(p, "GameD")
+            bad = await p.install_games([idx], "optiscaler")
+            self.assertFalse(bad["ok"])
+            self.assertIn("cannot use route", bad["output"])
+            # game's files untouched by the refused install
+            self.assertEqual(target.read_bytes(), original)
+            self.assertFalse((gd / "bin" / "amd_fidelityfx_upscaler_dx12.original.dll").exists())
+            r = await p.install_games([idx])
+            self.assertTrue(r["ok"], r["output"])
+            self.assertTrue(main.helixscan.is_helixsr(target))
+            self.assertEqual((gd / "bin" / "amd_fidelityfx_upscaler_dx12.original.dll").read_bytes(),
+                             original)
+            self.assertTrue((gd / "bin" / "helixsr_weights.bin").is_file())
+            self.assertTrue((gd / "bin" / "helixsr_kernels.pak").is_file())
+            self.assertTrue((await p.uninstall_games([idx]))["ok"])
+            self.assertEqual(target.read_bytes(), original)
+        asyncio.run(go())
+
+
 if __name__ == "__main__":
     unittest.main()

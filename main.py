@@ -670,8 +670,15 @@ class Plugin:
                 _restore_zip_modes(z, root)
             tmp.unlink(missing_ok=True)
             d = root / top
-            (d / "helixsr-setup.sh").chmod(0o755)
-            (d / "helixsr-uninstall.sh").chmod(0o755)
+            if not d.is_dir() or not (d / "amd_fidelityfx_dx12.dll").is_file():
+                raise OSError(f"not a HelixSR release layout (no {top}/amd_fidelityfx_dx12.dll)")
+            for name in ("helixsr-setup.sh", "helixsr-uninstall.sh"):
+                p = d / name
+                if p.is_file():
+                    p.chmod(0o755)
+                else:
+                    # Older releases (e.g. 1.4.3) ship no uninstaller.
+                    decky.logger.debug(f"HelixSR {tag}: no {name} in this release")
             st["dir"] = top
             st["network_built"] = helixscan.network_ready(d)
         except Exception as e:  # noqa: BLE001
@@ -1121,7 +1128,7 @@ class Plugin:
                 except Exception:  # noqa: BLE001
                     status = g.route or "compatible"
                 try:
-                    routes = helixscan.available_routes(g)
+                    routes = helixscan.available_routes(g, d)
                 except Exception:  # noqa: BLE001
                     routes = [g.route] if g.route else []
                 out.append({"index": i, "name": g.name, "folder": str(g.folder),
@@ -1277,7 +1284,7 @@ class Plugin:
                 if op == "install" and route is not None:
                     picked = []
                     for g in targets:
-                        if route not in helixscan.available_routes(g):
+                        if route not in helixscan.available_routes(g, d):
                             return {"ok": False, "output":
                                     f"{g.name} cannot use route '{route}'"}
                         # Same as the reference's per-game question: switch
