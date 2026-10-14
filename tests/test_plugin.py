@@ -1048,5 +1048,93 @@ class PluginCase(unittest.TestCase):
             plug.chmod(0o755)
 
 
+    def test_scan_game_detail_fields(self):
+        self._version_dir(tag="9.9.9")
+        home = make_steam_home(self.tmp)
+        os.environ["DECKY_USER_HOME"] = str(home)
+        p = self._plugin()
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            self.assertEqual(await p.start_scan(), {"ok": True})
+            st = await self._wait_done(p.get_scan_status)
+            by_name = {g["name"]: g for g in st["games"]}
+            self.assertTrue(by_name["GameA"]["exe"].endswith("GameA/bin"))
+            self.assertTrue(any(x.endswith("amd_fidelityfx_upscaler_dx12.dll")
+                                for x in by_name["GameA"]["fsr"]))
+            self.assertNotIn("GameC", by_name)
+            # old cache files without the fields still load with defaults
+            cache = p._scan_cache_path()
+            payload = json.loads(cache.read_text(encoding="utf-8"))
+            for g in payload["games"]:
+                g.pop("exe", None)
+                g.pop("fsr", None)
+                g.pop("installed_versions", None)
+            cache.write_text(json.dumps(payload), encoding="utf-8")
+            cached = await p.get_last_scan()
+            entry = next(g for g in cached["games"] if g["name"] == "GameA")
+            self.assertEqual(entry["exe"], "")
+            self.assertEqual(entry["fsr"], [])
+            self.assertEqual(entry["installed_versions"], [])
+        asyncio.run(go())
+
+    def test_health_check(self):
+        self._version_dir(tag="9.9.9")
+        home = make_steam_home(self.tmp)
+        os.environ["DECKY_USER_HOME"] = str(home)
+        p = self._plugin()
+        listing = [{"tag_name": "v9.9.9", "draft": False, "assets": []}]
+
+        class FakeSock:
+            def close(self):
+                pass
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            with mock.patch.object(main, "_fetch_json", return_value=listing), \
+                    mock.patch("socket.create_connection", return_value=FakeSock()):
+                h = await p.health_check()
+                names = {c["name"]: c for c in h["checks"]}
+                self.assertEqual(set(names), {"GitHub reachable", "Versions", "Games",
+                                              "Disk space", "Plugin update"})
+                for c in h["checks"]:
+                    self.assertIn("detail", c)
+                self.assertTrue(names["GitHub reachable"]["ok"])
+                self.assertIn("none installed", names["Games"]["detail"])
+                idx = await self._game_index(p, "GameA")
+                self.assertTrue((await p.install_games([idx]))["ok"])
+                h = await p.health_check()
+                self.assertTrue(h["ok"], h["checks"])
+                by_name = {c["name"]: c for c in h["checks"]}
+                self.assertIn("1 installed, all verified", by_name["Games"]["detail"])
+                # break the install: game row reports, version row stays healthy
+                ga = home / ".local/share/lib/steamapps/common/GameA/bin/amd_fidelityfx_upscaler_dx12.dll"
+                ga.write_bytes(b"new game dll")
+                h = await p.health_check()
+                self.assertFalse(h["ok"])
+                by_name = {c["name"]: c for c in h["checks"]}
+                self.assertIn("GameA", by_name["Games"]["detail"])
+                self.assertTrue(by_name["Versions"]["ok"])
+        asyncio.run(go())
+
+    def test_health_no_versions(self):
+        p = self._plugin()
+
+        class FakeSock:
+            def close(self):
+                pass
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            with mock.patch.object(main, "_fetch_json", side_effect=OSError("down")), \
+                    mock.patch("socket.create_connection", return_value=FakeSock()):
+                h = await p.health_check()
+            by_name = {c["name"]: c for c in h["checks"]}
+            self.assertFalse(by_name["Versions"]["ok"])
+            self.assertFalse(by_name["Games"]["ok"])
+            self.assertFalse(h["ok"])
+        asyncio.run(go())
+
+
 if __name__ == "__main__":
     unittest.main()

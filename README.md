@@ -45,10 +45,13 @@ The panel follows four steps, with a status line and current step shown on top:
    build in one go. Per-game **Settings** edit `helixsr.ini` inline (sharpening,
    sharpness, game slider, WaveSize), with named **presets** and a per-game **Log**
    viewer offering one-tap fixes for known patterns. **Verify installs** detects
-   games a Steam update broke, with one-tap **Repair**. Extra non-Steam folders
-   can be added by path.
+   games a Steam update broke, with one-tap **Repair**. A filter narrows big
+   libraries; per-game **Details** show folder, detected inputs, FSR DLLs, exe
+   folder and installed builds. Extra non-Steam folders can be added by path.
 4. **Storage** — per-version disk use, remove-all-except-active (refuses versions
    games still use), clear cached SDK files, and full **Reset everything**.
+5. **Health** — one screen for releases reachable, versions healthy, games
+   verified, disk space and plugin update state.
 5. **Log** — every failure surfaces its actual reason here instead of failing
    silently; destructive actions ask for a second tap to confirm.
 

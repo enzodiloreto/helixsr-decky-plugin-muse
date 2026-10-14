@@ -26,6 +26,7 @@ import {
   DownloadStatus,
   GameLog,
   GameSettings,
+  HealthCheck,
   LogFix,
   MigrationStatus,
   PluginUpdateInfo,
@@ -55,6 +56,7 @@ import {
   apiGetReleases,
   apiGetScanStatus,
   apiGetState,
+  apiHealthCheck,
   apiInstallGames,
   apiRemoveOldVersions,
   apiRemoveScanFolder,
@@ -76,6 +78,8 @@ import { PLUGIN_VERSION } from "./version";
 function fmtSize(n: number) {
   return `${(n / 1e6).toFixed(1)} MB`;
 }
+
+const base = (p: string) => p.split(/[/\\]/).pop() || p;
 
 function fmtAge(epochSec: number) {
   if (!epochSec) return "some time ago";
@@ -156,6 +160,9 @@ function Content() {
   const [gameLogs, setGameLogs] = useState<GameLog[]>([]);
   const [logFixes, setLogFixes] = useState<LogFix[]>([]);
   const [verify, setVerify] = useState<VerifyResult[] | null>(null);
+  const [filter, setFilter] = useState<string>("");
+  const [expanded, setExpanded] = useState<Record<number, boolean>>({});
+  const [health, setHealth] = useState<HealthCheck[] | null>(null);
   const [migrating, setMigrating] = useState<boolean>(false);
   const [mig, setMig] = useState<MigrationStatus | null>(null);
   const [folderInput, setFolderInput] = useState<string>("");
@@ -589,6 +596,27 @@ function Content() {
     }
   };
 
+  const onHealth = async () => {
+    setBusy("health");
+    try {
+      const r = await apiHealthCheck();
+      if (!r.checks) {
+        setOutput(r.error || "health check failed");
+        return;
+      }
+      setHealth(r.checks);
+      const bad = r.checks.filter((c) => !c.ok);
+      setOutput(bad.length
+        ? `Health: ${bad.length} issue(s):\n${bad.map((c) => `✗ ${c.name}: ${c.detail}`).join("\n")}`
+        : "Health: all checks pass.");
+    } catch (e) {
+      console.error("[helixsr] health_check failed", e);
+      setOutput("health check failed");
+    } finally {
+      setBusy("");
+    }
+  };
+
   const onVerify = async () => {
     setBusy("verify");
     try {
@@ -737,7 +765,7 @@ function Content() {
   };
 
   const onInstallAll = async () => {
-    const targets = games.filter((g) => !g.installed);
+    const targets = visibleGames.filter((g) => !g.installed);
     if (!targets.length) return;
     setBusy("games-all");
     try {
@@ -754,11 +782,11 @@ function Content() {
   };
 
   const onRemoveAll = async () => {
-    const n = games.filter((g) => g.installed).length;
+    const n = visibleGames.filter((g) => g.installed).length;
     await armOrRun("remove all games",
       `Tap again to confirm removing HelixSR from ${n} game(s).`,
       async () => {
-        const targets = games.filter((g) => g.installed);
+        const targets = visibleGames.filter((g) => g.installed);
         if (!targets.length) return;
         setBusy("games-all");
         try {
@@ -912,8 +940,12 @@ function Content() {
     };
   });
   const hasVersions = (state?.versions.length || 0) > 0;
+  const visibleGames = filter.trim()
+    ? games.filter((g) => g.name.toLowerCase().includes(filter.trim().toLowerCase()))
+    : games;
   const installedCount = games.filter((g) => g.installed).length;
-  const notInstalledCount = games.length - installedCount;
+  const visNotInstalled = visibleGames.filter((g) => !g.installed).length;
+  const visInstalled = visibleGames.filter((g) => g.installed).length;
   const downloadedVersions = (state?.versions || []).filter((v) => downloadedTags.has(v.tag));
   const totalMB = downloadedVersions.reduce((a, v) => a + (v.size_mb || 0), 0);
   const buildProg = building ? parseBuildProgress(output) : null;
@@ -1112,17 +1144,17 @@ function Content() {
             </div>
           </PanelSectionRow>
         )}
-        {notInstalledCount > 0 && (
+        {visNotInstalled > 0 && (
           <PanelSectionRow>
             <ButtonItem layout="below" disabled={busy !== "" || scanning} onClick={onInstallAll}>
-              {`Install all ${notInstalledCount} game(s)`}
+              {`Install all ${visNotInstalled} game(s)`}
             </ButtonItem>
           </PanelSectionRow>
         )}
-        {installedCount > 0 && (
+        {visInstalled > 0 && (
           <PanelSectionRow>
             <ButtonItem layout="below" disabled={busy !== "" || scanning} onClick={onRemoveAll}>
-              {confirm === "remove all games" ? "Confirm remove all?" : `Remove from all ${installedCount} game(s)`}
+              {confirm === "remove all games" ? "Confirm remove all?" : `Remove from all ${visInstalled} game(s)`}
             </ButtonItem>
           </PanelSectionRow>
         )}
@@ -1156,7 +1188,24 @@ function Content() {
             </ButtonItem>
           </PanelSectionRow>
         ))}
-        {games.map((g) => (
+        {games.length > 0 && (
+          <PanelSectionRow>
+            <TextField
+              label="Filter games"
+              value={filter}
+              bShowClearAction
+              onChange={(e) => setFilter((e.target as HTMLInputElement).value)}
+            />
+          </PanelSectionRow>
+        )}
+        {filter.trim() && (
+          <PanelSectionRow>
+            <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
+              {visibleGames.length}/{games.length} shown
+            </div>
+          </PanelSectionRow>
+        )}
+        {visibleGames.map((g) => (
           <Card key={g.index} variant="outlined" style={{ width: "100%", marginBottom: M3.space.sm }}>
             <PanelSectionRow>
               <div style={{ display: "flex", alignItems: "center", gap: M3.space.sm, flexWrap: "wrap", width: "100%", boxSizing: "border-box", minWidth: 0 }}>
@@ -1184,6 +1233,22 @@ function Content() {
                   selectedOption={routes[g.index] || g.route}
                   onChange={(o) => setRoutes({ ...routes, [g.index]: String(o.data) })}
                 />
+              </PanelSectionRow>
+            )}
+            <PanelSectionRow>
+              <ButtonItem layout="below" disabled={busy !== ""} onClick={() => setExpanded({ ...expanded, [g.index]: !expanded[g.index] })}>
+                {expanded[g.index] ? "Hide details" : "Details"}
+              </ButtonItem>
+            </PanelSectionRow>
+            {expanded[g.index] && (
+              <PanelSectionRow>
+                <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, overflowWrap: "anywhere" }}>
+                  <div>Folder: {g.folder}</div>
+                  <div>Detected: {g.inputs.length ? g.inputs.join(" / ") : "none"}</div>
+                  <div>FSR: {(g.fsr || []).length ? g.fsr.map(base).join(", ") : "none"}</div>
+                  <div>Exe: {g.exe ? base(g.exe) : "not found"}</div>
+                  <div>Installed builds: {(g.installed_versions || []).length ? (g.installed_versions || []).join(", ") : "—"}</div>
+                </div>
               </PanelSectionRow>
             )}
             {g.installed && iniFor !== g.index && (
@@ -1381,6 +1446,21 @@ function Content() {
         </PanelSectionRow>
       </PanelSection>
       )}
+      <PanelSection title="Health">
+        <PanelSectionRow>
+          <ButtonItem layout="below" disabled={busy !== ""} onClick={onHealth}>
+            Run health check
+          </ButtonItem>
+        </PanelSectionRow>
+        {(health || []).map((c) => (
+          <PanelSectionRow key={c.name}>
+            <div style={{ display: "flex", gap: M3.space.sm, alignItems: "baseline", ...M3.type.body }}>
+              <Chip tone={c.ok ? "success" : "error"}>{c.ok ? "OK" : "FAIL"}</Chip>
+              <span style={{ overflowWrap: "anywhere" }}>{c.name} — {c.detail}</span>
+            </div>
+          </PanelSectionRow>
+        ))}
+      </PanelSection>
       <PanelSection title="Plugin update">
         {puCheck?.update_available && !updating && !(pu?.done && pu?.ok) && (
           <PanelSectionRow>

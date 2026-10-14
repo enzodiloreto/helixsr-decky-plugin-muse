@@ -671,13 +671,16 @@ class Plugin:
         return dict(self._dl)
 
     async def check_plugin_update(self, force: bool = False) -> dict:
+        return await asyncio.to_thread(self._check_plugin_update_sync, force)
+
+    def _check_plugin_update_sync(self, force: bool = False) -> dict:
         """Is there a newer HelixSR Muse Plugin release? Cached for 6h."""
         now = time.monotonic()
         if not force and self._update_check["at"] and now - self._update_check["at"] < PLUGIN_UPDATE_TTL:
             return dict(self._update_check["result"])
         current = _plugin_version()
         try:
-            data = await asyncio.to_thread(_fetch_json, PLUGIN_RELEASES_URL)
+            data = _fetch_json(PLUGIN_RELEASES_URL)
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
         best = None
@@ -1102,7 +1105,9 @@ class Plugin:
                 out.append({"index": i, "name": g.name, "folder": str(g.folder),
                             "route": g.route, "available": routes, "inputs": list(g.inputs),
                             "installed": inst, "status": status,
-                            "installed_versions": sorted(_marker_versions(g)) if inst else []})
+                            "installed_versions": sorted(_marker_versions(g)) if inst else [],
+                            "exe": str(g.target) if g.target else "",
+                            "fsr": [str(p) for p in g.fsr_targets]})
             st["games"] = out
             st["tag"] = tag
             st["skipped"] = skipped
@@ -1150,6 +1155,9 @@ class Plugin:
                     g["available"] = [g["route"]] if g.get("route") else []
                 if not isinstance(g.get("installed_versions"), list):
                     g["installed_versions"] = []
+                g.setdefault("exe", "")
+                if not isinstance(g.get("fsr"), list):
+                    g["fsr"] = []
                 g.setdefault("status", _status_for(g.get("route"), g.get("inputs") or []))
                 g.setdefault("installed", False)
                 games.append(g)
@@ -1497,6 +1505,88 @@ class Plugin:
             return {"ok": False, "error": "no HelixSR version downloaded"}
         extra = self._extra_folders()
         return await asyncio.to_thread(self._verify_run, d, extra)
+
+    async def health_check(self) -> dict:
+        """One-screen health: releases reachable, versions healthy, games
+        verified, disk OK, plugin update state. Slow parts reuse caches."""
+        d = await self._active_dir()
+        extra = self._extra_folders()
+        return await asyncio.to_thread(self._health_run, d, extra)
+
+    def _health_run(self, d: Path | None, extra: list) -> dict:
+        import socket
+        checks = []
+        # 1. GitHub reachable (TCP only: costs no API rate limit).
+        try:
+            socket.create_connection(("api.github.com", 443), timeout=5).close()
+            checks.append({"name": "GitHub reachable", "ok": True,
+                           "detail": "api.github.com:443 connects"})
+        except OSError as e:
+            checks.append({"name": "GitHub reachable", "ok": False,
+                           "detail": f"api.github.com:443 failed: {e}"})
+        # 2. Downloaded versions healthy.
+        versions = _version_dirs()
+        if not versions:
+            checks.append({"name": "Versions", "ok": False,
+                           "detail": "nothing downloaded yet"})
+        else:
+            bad = []
+            for v in versions:
+                tag = _tag_of_dir(v)
+                if not (v / "amd_fidelityfx_dx12.dll").is_file():
+                    bad.append(f"{tag}: HelixSR DLL missing")
+                elif not helixscan.network_ready(v):
+                    bad.append(f"{tag}: network not built")
+            checks.append({"name": "Versions",
+                           "ok": not bad,
+                           "detail": f"{len(versions)} downloaded, all healthy" if not bad
+                                     else "; ".join(bad)})
+        # 3. Installed games verified (cache-aware: fast when fresh).
+        if d is None:
+            checks.append({"name": "Games", "ok": False, "detail": "no version downloaded"})
+        else:
+            try:
+                with self._ops_lock:
+                    gl = self._resolve_games(d, extra)
+                    broken, total = [], 0
+                    for g in gl:
+                        try:
+                            installed = g.installed()
+                        except Exception:  # noqa: BLE001
+                            installed = False
+                        if not installed and not self._install_traces(g):
+                            continue
+                        total += 1
+                        if self._verify_game(g):
+                            broken.append(g.name)
+                checks.append({"name": "Games", "ok": not broken,
+                               "detail": f"{total} installed, all verified" if not broken and total
+                                         else ("none installed" if not total
+                                               else f"broken: {', '.join(broken)}")})
+            except Exception as e:  # noqa: BLE001
+                checks.append({"name": "Games", "ok": False, "detail": f"scan failed: {e}"})
+        # 4. Disk space.
+        free_rt = _free_bytes(_helixsr_root())
+        home = Path(os.environ.get("DECKY_USER_HOME") or Path.home())
+        free_home = _free_bytes(home)
+        checks.append({"name": "Disk space",
+                       "ok": free_rt > 500_000_000 and free_home > 500_000_000,
+                       "detail": f"runtime {free_rt / 1e9:.1f} GB free, home {free_home / 1e9:.1f} GB free"})
+        # 5. Plugin update state (cached check, no extra API cost when fresh).
+        try:
+            info = self._check_plugin_update_sync(False)
+        except Exception:  # noqa: BLE001
+            info = {"ok": False, "error": "check failed"}
+        if not info.get("ok"):
+            checks.append({"name": "Plugin update", "ok": False,
+                           "detail": info.get("error", "check failed")})
+        elif info.get("update_available"):
+            checks.append({"name": "Plugin update", "ok": True,
+                           "detail": f"{info.get('latest')} available (you run {info.get('current')})"})
+        else:
+            checks.append({"name": "Plugin update", "ok": True,
+                           "detail": f"v{info.get('current')} up to date"})
+        return {"ok": all(c["ok"] for c in checks), "checks": checks}
 
     def _install_traces(self, g) -> bool:
         """Marker/backup files proving HelixSR was installed here, even if the

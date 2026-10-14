@@ -64,6 +64,14 @@ export interface HelixGame {
   installed: boolean;
   status: string;
   installed_versions: string[];
+  exe: string;
+  fsr: string[];
+}
+
+export interface HealthCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
 }
 
 export interface GameSettings {
@@ -162,6 +170,7 @@ export const apiGetLastScan = callable<[], ScanCache>("get_last_scan");
 export const apiInstallGames = callable<[indices: number[], route: string], { ok: boolean; output: string; rc?: number }>("install_games");
 export const apiRepairGames = callable<[indices: number[]], { ok: boolean; output: string }>("repair_games");
 export const apiVerifyInstalls = callable<[], { ok: boolean; games: VerifyResult[]; error?: string }>("verify_installs");
+export const apiHealthCheck = callable<[], { ok: boolean; checks: HealthCheck[]; error?: string }>("health_check");
 export const apiGetGameLog = callable<[index: number], { ok: boolean; name?: string; logs?: GameLog[]; fixes?: LogFix[]; error?: string }>("get_game_log");
 export const apiApplyLogFix = callable<[index: number, fix_id: string], { ok: boolean; output?: string }>("apply_log_fix");
 export const apiGetIniPresets = callable<[], { ok: boolean; presets: Record<string, GameSettings> }>("get_ini_presets");
