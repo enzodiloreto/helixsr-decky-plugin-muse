@@ -1,6 +1,7 @@
 // Display-only Material You primitives (cards, chips, stepper, divider).
 // No focusable elements: gamepad navigation stays entirely on Decky controls.
 import { CSSProperties, ReactNode } from "react";
+import { Focusable } from "@decky/ui";
 import { M3, M3Tone } from "./theme";
 
 const tonePair: Record<M3Tone, [string, string]> = {
@@ -112,5 +113,116 @@ export function Divider() {
         opacity: 0.7,
       }}
     />
+  );
+}
+
+export type MButtonVariant =
+  | "filled"
+  | "tonal"
+  | "outlined"
+  | "text"
+  | "danger"
+  | "danger-outline";
+
+const variantStyle: Record<MButtonVariant, CSSProperties> = {
+  filled: { background: M3.color.primary, color: M3.color.onPrimary },
+  tonal: {
+    background: M3.color.secondaryContainer,
+    color: M3.color.onSecondaryContainer,
+  },
+  outlined: {
+    background: "transparent",
+    border: `1px solid ${M3.color.outline}`,
+    color: M3.color.primary,
+  },
+  text: { background: "transparent", color: M3.color.primary },
+  danger: {
+    background: M3.color.errorContainer,
+    color: M3.color.onErrorContainer,
+  },
+  "danger-outline": {
+    background: "transparent",
+    border: `1px solid ${M3.color.errorContainer}`,
+    color: M3.color.onErrorContainer,
+  },
+};
+
+const disabledStyle: CSSProperties = {
+  background: "rgba(230, 224, 233, 0.12)",
+  color: "rgba(230, 224, 233, 0.38)",
+  border: "none",
+  cursor: "default",
+};
+
+/**
+ * Material You button with full gamepad support: Focusable participates in
+ * Steam's spatial navigation, onActivate fires on gamepad OK, onClick covers
+ * mouse/touch. Disabled buttons render non-focusable so gamepad skips them.
+ */
+export function MButton(props: {
+  variant?: MButtonVariant;
+  disabled?: boolean;
+  onClick: () => void;
+  description?: ReactNode;
+  children: ReactNode;
+  style?: CSSProperties;
+}) {
+  const { variant = "tonal", disabled, onClick, description, children, style } = props;
+  const body = (
+    <>
+      <div style={{ ...M3.type.label, fontSize: 14, textAlign: "center" }}>{children}</div>
+      {description ? (
+        <div
+          style={{
+            ...M3.type.caption,
+            textAlign: "center",
+            opacity: 0.8,
+            overflowWrap: "anywhere",
+          }}
+        >
+          {description}
+        </div>
+      ) : null}
+    </>
+  );
+  const box: CSSProperties = {
+    width: "100%",
+    maxWidth: "100%",
+    boxSizing: "border-box",
+    minHeight: 44,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 2,
+    padding: "10px 16px",
+    borderRadius: M3.shape.full,
+    cursor: disabled ? "default" : "pointer",
+    userSelect: "none",
+    ...variantStyle[variant],
+    ...(disabled ? disabledStyle : {}),
+    ...style,
+  };
+  if (disabled) {
+    return (
+      <div aria-disabled style={box}>
+        {body}
+      </div>
+    );
+  }
+  const fire = () => {
+    onClick();
+  };
+  return (
+    <Focusable
+      style={box}
+      onActivate={() => fire()}
+      onClick={() => fire()}
+      onKeyDown={(e: any) => {
+        if (e.key === "Enter") fire();
+      }}
+    >
+      {body}
+    </Focusable>
   );
 }

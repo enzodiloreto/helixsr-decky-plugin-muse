@@ -1,5 +1,4 @@
 import {
-  ButtonItem,
   DropdownItem,
   PanelSection,
   PanelSectionRow,
@@ -17,7 +16,7 @@ import {
 } from "@decky/api"
 import { Fragment, useEffect, useRef, useState } from "react";
 import { MdMemory } from "react-icons/md";
-import { Card, Chip, Stepper } from "./components";
+import { Card, Chip, MButton, Stepper } from "./components";
 import { M3 } from "./theme";
 import {
   HelixGame,
@@ -163,7 +162,7 @@ function Content() {
   const [filter, setFilter] = useState<string>("");
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
   const [showMode, setShowMode] = useState<string>("all");
-  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({ installed: true, not: false });
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({ installed: false, not: false });
   const [health, setHealth] = useState<HealthCheck[] | null>(null);
   const [migrating, setMigrating] = useState<boolean>(false);
   const [mig, setMig] = useState<MigrationStatus | null>(null);
@@ -1038,19 +1037,19 @@ function Content() {
           </PanelSectionRow>
         )}
         <PanelSectionRow>
-          <ButtonItem layout="below" disabled={busy !== "" || !releases.length} onClick={() => refreshReleases()}>
+          <MButton  disabled={busy !== "" || !releases.length} variant="tonal" onClick={() => refreshReleases()}>
             Reload releases
-          </ButtonItem>
+          </MButton>
         </PanelSectionRow>
         <PanelSectionRow>
-          <ButtonItem
-            layout="below"
+          <MButton
+            
             disabled={busy !== "" || downloading || !picked}
             description={!releases.length ? "No releases loaded — Reload above" : undefined}
-            onClick={onDownloadOrUse}
+            variant="filled" onClick={onDownloadOrUse}
           >
             {pickedDownloaded ? `Switch to ${picked}` : downloading ? "Downloading ..." : `Download ${picked}`}
-          </ButtonItem>
+          </MButton>
         </PanelSectionRow>
         {downloading && (
           <PanelSectionRow>
@@ -1066,35 +1065,35 @@ function Content() {
         )}
         {downloading && (
           <PanelSectionRow>
-            <ButtonItem layout="below" onClick={onCancelDownload}>
+            <MButton  variant="text" onClick={onCancelDownload}>
               Cancel download
-            </ButtonItem>
+            </MButton>
           </PanelSectionRow>
         )}
         {pickedDownloaded && (
           <PanelSectionRow>
-            <ButtonItem layout="below" disabled={busy !== ""} onClick={onRemove}>
+            <MButton  disabled={busy !== ""} variant={confirm === `remove ${picked}` ? "danger" : "danger-outline"} onClick={onRemove}>
               {confirm === `remove ${picked}` ? `Confirm remove ${picked}?` : `Remove ${picked} files`}
-            </ButtonItem>
+            </MButton>
           </PanelSectionRow>
         )}
       </PanelSection>
       {hasVersions && (
       <PanelSection title="2 · Network build">
         <PanelSectionRow>
-          <ButtonItem
-            layout="below"
+          <MButton
+            
             disabled={busy !== "" || building || !activeVersion}
             description={!activeVersion ? "Download a version first" : undefined}
-            onClick={() => onBuild(Boolean(activeVersion?.network_built))}
+            variant={confirm === "rebuild network" ? "danger" : "filled"} onClick={() => onBuild(Boolean(activeVersion?.network_built))}
           >
             {building ? "Building network ..." : activeVersion?.network_built ? confirm === "rebuild network" ? "Confirm rebuild?" : "Rebuild network" : "Build network"}
-          </ButtonItem>
+          </MButton>
         </PanelSectionRow>
         <PanelSectionRow>
-          <ButtonItem layout="below" disabled={busy !== "" || building || !activeVersion} onClick={onCheckBuild}>
+          <MButton  disabled={busy !== "" || building || !activeVersion} variant="tonal" onClick={onCheckBuild}>
             Check build readiness
-          </ButtonItem>
+          </MButton>
         </PanelSectionRow>
         {building && buildProg && (
           <PanelSectionRow>
@@ -1109,20 +1108,20 @@ function Content() {
       {hasVersions && (
       <PanelSection title="3 · Games">
         <PanelSectionRow>
-          <ButtonItem
-            layout="below"
+          <MButton
+            
             disabled={scanning || busy !== "" || !activeVersion}
             description={!activeVersion ? "Download and build a version first" : busy !== "" ? "Busy — wait for the current task" : undefined}
-            onClick={onScan}
+            variant="filled" onClick={onScan}
           >
             {scanning ? "Scanning ..." : `Scan games${gamesTag ? ` (${gamesTag})` : ""}`}
-          </ButtonItem>
+          </MButton>
         </PanelSectionRow>
         {scanning && (
           <PanelSectionRow>
-            <ButtonItem layout="below" onClick={onCancelScan}>
+            <MButton  variant="text" onClick={onCancelScan}>
               Cancel scan
-            </ButtonItem>
+            </MButton>
           </PanelSectionRow>
         )}
         {scanning && (
@@ -1135,14 +1134,14 @@ function Content() {
         )}
         {migCandidates.length > 0 && activeVersion && !migrating && (
           <PanelSectionRow>
-            <ButtonItem
-              layout="below"
+            <MButton
+              
               disabled={busy !== "" || scanning}
               description="Reinstalls them into the new build, keeping routes"
-              onClick={onMigrate}
+              variant="filled" onClick={onMigrate}
             >
               {confirm === `migrate to ${activeVersion.tag}` ? "Confirm migrate?" : `Migrate ${migCandidates.length} game(s) to ${activeVersion.tag}`}
-            </ButtonItem>
+            </MButton>
           </PanelSectionRow>
         )}
         {migrating && (
@@ -1157,46 +1156,46 @@ function Content() {
         )}
         {visNotInstalled > 0 && (
           <PanelSectionRow>
-            <ButtonItem layout="below" disabled={busy !== "" || scanning} onClick={onInstallAll}>
+            <MButton  disabled={busy !== "" || scanning} variant="filled" onClick={onInstallAll}>
               {`Install all ${visNotInstalled} game(s)`}
-            </ButtonItem>
+            </MButton>
           </PanelSectionRow>
         )}
         {visInstalled > 0 && (
           <PanelSectionRow>
-            <ButtonItem layout="below" disabled={busy !== "" || scanning} onClick={onRemoveAll}>
+            <MButton  disabled={busy !== "" || scanning} variant={confirm === "remove all games" ? "danger" : "danger-outline"} onClick={onRemoveAll}>
               {confirm === "remove all games" ? "Confirm remove all?" : `Remove from all ${visInstalled} game(s)`}
-            </ButtonItem>
+            </MButton>
           </PanelSectionRow>
         )}
         {installedCount > 0 && (
           <PanelSectionRow>
-            <ButtonItem layout="below" disabled={busy !== "" || scanning} onClick={onVerify}>
+            <MButton  disabled={busy !== "" || scanning} variant="tonal" onClick={onVerify}>
               Verify installs
-            </ButtonItem>
+            </MButton>
           </PanelSectionRow>
         )}
         {verify && verify.some((v) => !v.ok) && (
           <PanelSectionRow>
-            <ButtonItem
-              layout="below"
+            <MButton
+              
               disabled={busy !== ""}
-              onClick={() => onRepair(verify.filter((v) => !v.ok).map((v) => v.index))}
+              variant="filled" onClick={() => onRepair(verify.filter((v) => !v.ok).map((v) => v.index))}
             >
               {`Repair all ${verify.filter((v) => !v.ok).length} broken game(s)`}
-            </ButtonItem>
+            </MButton>
           </PanelSectionRow>
         )}
         {verify && verify.filter((v) => !v.ok).map((v) => (
           <PanelSectionRow key={`verify-${v.index}`}>
-            <ButtonItem
-              layout="below"
+            <MButton
+              
               disabled={busy !== ""}
               description={v.problems.join("; ")}
-              onClick={() => onRepair([v.index])}
+              variant="filled" onClick={() => onRepair([v.index])}
             >
               {`Repair ${v.name}`}
-            </ButtonItem>
+            </MButton>
           </PanelSectionRow>
         ))}
         {games.length > 0 && (
@@ -1236,12 +1235,17 @@ function Content() {
             </div>
           </PanelSectionRow>
         )}
+        <PanelSectionRow>
+          <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
+            Showing {({ all: "All games", installed: "Installed only", available: "Not installed only", repair: "Needs repair" } as Record<string, string>)[showMode] || showMode} — {visibleGames.length}/{games.length}
+          </div>
+        </PanelSectionRow>
         {sortedGames.map((g, si) => (
           <Fragment key={g.index}>
             {(si === 0 || sortedGames[si - 1].installed !== g.installed) && (
               <PanelSectionRow>
-                <ButtonItem
-                  layout="below"
+                <MButton
+                  variant="text"
                   onClick={() => setOpenGroups({
                     ...openGroups,
                     [g.installed ? "installed" : "not"]: !(g.installed ? openGroups.installed : openGroups.not),
@@ -1250,7 +1254,7 @@ function Content() {
                   {g.installed
                     ? `Installed (${installedGroup.length}) — ${openGroups.installed ? "collapse" : "expand"}`
                     : `Not installed (${availGroup.length}) — ${openGroups.not ? "collapse" : "expand"}`}
-                </ButtonItem>
+                </MButton>
               </PanelSectionRow>
             )}
             {(g.installed ? openGroups.installed : openGroups.not) && (
@@ -1264,14 +1268,14 @@ function Content() {
               </div>
             </PanelSectionRow>
             <PanelSectionRow>
-              <ButtonItem
-                layout="below"
+              <MButton
+                
                 disabled={busy !== "" || scanning}
                 description={g.installed ? shortRoute(g.route) : (ROUTE_LABELS[routes[g.index] || g.route] || g.status)}
-                onClick={() => (g.installed ? onUninstall(g) : onInstall(g))}
+                variant={g.installed ? "outlined" : "filled"} onClick={() => (g.installed ? onUninstall(g) : onInstall(g))}
               >
                 {`${g.installed ? "Remove from" : "Install in"} ${g.name}`}
-              </ButtonItem>
+              </MButton>
             </PanelSectionRow>
             {!g.installed && g.available.length > 1 && (
               <PanelSectionRow>
@@ -1284,9 +1288,9 @@ function Content() {
               </PanelSectionRow>
             )}
             <PanelSectionRow>
-              <ButtonItem layout="below" disabled={busy !== ""} onClick={() => setExpanded({ ...expanded, [g.index]: !expanded[g.index] })}>
+              <MButton  disabled={busy !== ""} variant="text" onClick={() => setExpanded({ ...expanded, [g.index]: !expanded[g.index] })}>
                 {expanded[g.index] ? "Hide details" : "Details"}
-              </ButtonItem>
+              </MButton>
             </PanelSectionRow>
             {expanded[g.index] && (
               <PanelSectionRow>
@@ -1301,16 +1305,16 @@ function Content() {
             )}
             {g.installed && iniFor !== g.index && (
               <PanelSectionRow>
-                <ButtonItem layout="below" disabled={busy !== "" || scanning} onClick={() => onOpenIni(g)}>
+                <MButton  disabled={busy !== "" || scanning} variant="text" onClick={() => onOpenIni(g)}>
                   {`Settings — ${g.name}`}
-                </ButtonItem>
+                </MButton>
               </PanelSectionRow>
             )}
             {g.installed && logFor !== g.index && (
               <PanelSectionRow>
-                <ButtonItem layout="below" disabled={busy !== "" || scanning} onClick={() => onOpenLog(g)}>
+                <MButton  disabled={busy !== "" || scanning} variant="text" onClick={() => onOpenLog(g)}>
                   {`Log — ${g.name}`}
-                </ButtonItem>
+                </MButton>
               </PanelSectionRow>
             )}
             {g.installed && logFor === g.index && (
@@ -1325,15 +1329,15 @@ function Content() {
                 ))}
                 {logFixes.map((f) => (
                   <PanelSectionRow key={f.id}>
-                    <ButtonItem layout="below" disabled={busy !== ""} description={f.label} onClick={() => onApplyFix(f.id)}>
+                    <MButton  disabled={busy !== ""} description={f.label} variant="filled" onClick={() => onApplyFix(f.id)}>
                       Apply fix
-                    </ButtonItem>
+                    </MButton>
                   </PanelSectionRow>
                 ))}
                 <PanelSectionRow>
-                  <ButtonItem layout="below" onClick={() => { setLogFor(null); setGameLogs([]); setLogFixes([]); }}>
+                  <MButton  variant="text" onClick={() => { setLogFor(null); setGameLogs([]); setLogFixes([]); }}>
                     Close log
-                  </ButtonItem>
+                  </MButton>
                 </PanelSectionRow>
               </div>
             )}
@@ -1402,16 +1406,16 @@ function Content() {
                 )}
                 {presetPick && presets[presetPick] && (
                   <PanelSectionRow>
-                    <ButtonItem layout="below" disabled={busy !== ""} onClick={onApplyPreset}>
+                    <MButton  disabled={busy !== ""} variant="filled" onClick={onApplyPreset}>
                       {`Apply "${presetPick}"`}
-                    </ButtonItem>
+                    </MButton>
                   </PanelSectionRow>
                 )}
                 {presetPick && (
                   <PanelSectionRow>
-                    <ButtonItem layout="below" disabled={busy !== ""} onClick={onDeletePreset}>
+                    <MButton  disabled={busy !== ""} variant="text" onClick={onDeletePreset}>
                       {`Delete "${presetPick}"`}
-                    </ButtonItem>
+                    </MButton>
                   </PanelSectionRow>
                 )}
                 <PanelSectionRow>
@@ -1423,19 +1427,19 @@ function Content() {
                   />
                 </PanelSectionRow>
                 <PanelSectionRow>
-                  <ButtonItem layout="below" disabled={busy !== "" || !presetName.trim()} onClick={onSavePreset}>
+                  <MButton  disabled={busy !== "" || !presetName.trim()} variant="tonal" onClick={onSavePreset}>
                     Save preset
-                  </ButtonItem>
+                  </MButton>
                 </PanelSectionRow>
                 <PanelSectionRow>
-                  <ButtonItem layout="below" disabled={busy !== ""} onClick={onSaveIni}>
+                  <MButton  disabled={busy !== ""} variant="filled" onClick={onSaveIni}>
                     Save settings
-                  </ButtonItem>
+                  </MButton>
                 </PanelSectionRow>
                 <PanelSectionRow>
-                  <ButtonItem layout="below" onClick={() => { setIniFor(null); setIni(null); setPresetPick(""); setPresetName(""); }}>
+                  <MButton  variant="text" onClick={() => { setIniFor(null); setIni(null); setPresetPick(""); setPresetName(""); }}>
                     Close settings
-                  </ButtonItem>
+                  </MButton>
                 </PanelSectionRow>
               </div>
             )}
@@ -1456,15 +1460,15 @@ function Content() {
           />
         </PanelSectionRow>
         <PanelSectionRow>
-          <ButtonItem layout="below" disabled={busy !== "" || !folderInput.trim()} onClick={onAddFolder}>
+          <MButton  disabled={busy !== "" || !folderInput.trim()} variant="tonal" onClick={onAddFolder}>
             Add folder
-          </ButtonItem>
+          </MButton>
         </PanelSectionRow>
         {(state?.extra_folders || []).map((f) => (
           <PanelSectionRow key={f}>
-            <ButtonItem layout="below" disabled={busy !== ""} description={f} onClick={() => onRemoveFolder(f)}>
+            <MButton  disabled={busy !== ""} variant="text" description={f} onClick={() => onRemoveFolder(f)}>
               Remove folder
-            </ButtonItem>
+            </MButton>
           </PanelSectionRow>
         ))}
       </PanelSection>
@@ -1480,27 +1484,27 @@ function Content() {
           </PanelSectionRow>
         ))}
         <PanelSectionRow>
-          <ButtonItem layout="below" disabled={busy !== "" || downloadedVersions.length < 2} onClick={onRemoveOld}>
+          <MButton  disabled={busy !== "" || downloadedVersions.length < 2} variant={confirm === "remove old versions" ? "danger" : "danger-outline"} onClick={onRemoveOld}>
             {confirm === "remove old versions" ? "Confirm remove all?" : "Remove all except active"}
-          </ButtonItem>
+          </MButton>
         </PanelSectionRow>
         <PanelSectionRow>
-          <ButtonItem layout="below" disabled={busy !== ""} onClick={onClearDlss}>
+          <MButton  disabled={busy !== ""} variant={confirm === "clear SDK cache" ? "danger" : "danger-outline"} onClick={onClearDlss}>
             {confirm === "clear SDK cache" ? "Confirm clear cache?" : "Clear cached SDK files"}
-          </ButtonItem>
+          </MButton>
         </PanelSectionRow>
         <PanelSectionRow>
-          <ButtonItem layout="below" disabled={busy !== ""} onClick={onResetAll}>
+          <MButton  disabled={busy !== ""} variant={confirm === "reset everything" ? "danger" : "danger-outline"} onClick={onResetAll}>
             {confirm === "reset everything" ? "Confirm reset all?" : "Reset everything"}
-          </ButtonItem>
+          </MButton>
         </PanelSectionRow>
       </PanelSection>
       )}
       <PanelSection title="Health">
         <PanelSectionRow>
-          <ButtonItem layout="below" disabled={busy !== ""} onClick={onHealth}>
+          <MButton  disabled={busy !== ""} variant="tonal" onClick={onHealth}>
             Run health check
-          </ButtonItem>
+          </MButton>
         </PanelSectionRow>
         {(health || []).map((c) => (
           <PanelSectionRow key={c.name}>
@@ -1524,11 +1528,11 @@ function Content() {
         )}
         {puCheck?.update_available && !updating && !(pu?.done && pu?.ok) && (
           <PanelSectionRow>
-            <ButtonItem layout="below" disabled={busy !== ""} onClick={onStartPluginUpdate}>
+            <MButton  disabled={busy !== ""} variant="filled" onClick={onStartPluginUpdate}>
               {puCheck.can_install === false
                 ? `Download v${puCheck.latest} for manual install`
                 : `Download & install v${puCheck.latest}`}
-            </ButtonItem>
+            </MButton>
           </PanelSectionRow>
         )}
         {puCheck?.update_available && puCheck.can_install === false && !updating && !(pu?.done && pu?.ok) && (
@@ -1562,9 +1566,9 @@ function Content() {
         )}
         {!updating && (
           <PanelSectionRow>
-            <ButtonItem layout="below" disabled={busy !== "" || checkingUpdate} onClick={() => onCheckPluginUpdate(true)}>
+            <MButton  disabled={busy !== "" || checkingUpdate} variant="tonal" onClick={() => onCheckPluginUpdate(true)}>
               {checkingUpdate ? "Checking ..." : puCheck ? "Check again" : "Check for updates"}
-            </ButtonItem>
+            </MButton>
           </PanelSectionRow>
         )}
       </PanelSection>

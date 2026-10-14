@@ -58,3 +58,6 @@ out/*
 cli/
 cli/*
 cli/decky
+
+# Agent instructions kept locally, never published
+AGENTS.md
