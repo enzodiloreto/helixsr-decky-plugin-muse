@@ -362,8 +362,13 @@ function Content() {
         if (st.done) {
           setUpdating(false);
           if (st.ok) {
-            setOutput(`Plugin update to v${st.version} installed — restart Decky to apply it.`);
-            toaster.toast({ title: `Plugin updated to v${st.version}`, body: "Restart Decky to apply" });
+            if (st.mode === "manual") {
+              setOutput(`Update v${st.version} downloaded to:\n${st.path}\n\nInstall it via Decky > Settings > Developer > Install Plugin from ZIP File, then restart Decky.`);
+              toaster.toast({ title: `Update downloaded`, body: "Install it from Decky settings" });
+            } else {
+              setOutput(`Plugin update to v${st.version} installed — restart Decky to apply it.`);
+              toaster.toast({ title: `Plugin updated to v${st.version}`, body: "Restart Decky to apply" });
+            }
             refreshState();
             onCheckPluginUpdate(false);
           } else {
@@ -1390,8 +1395,18 @@ function Content() {
         {puCheck?.update_available && !updating && !(pu?.done && pu?.ok) && (
           <PanelSectionRow>
             <ButtonItem layout="below" disabled={busy !== ""} onClick={onStartPluginUpdate}>
-              {`Download & install v${puCheck.latest}`}
+              {puCheck.can_install === false
+                ? `Download v${puCheck.latest} for manual install`
+                : `Download & install v${puCheck.latest}`}
             </ButtonItem>
+          </PanelSectionRow>
+        )}
+        {puCheck?.update_available && puCheck.can_install === false && !updating && !(pu?.done && pu?.ok) && (
+          <PanelSectionRow>
+            <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
+              Decky runs this plugin without write access to its own folder, so the update
+              is downloaded for Decky's manual Install-from-ZIP flow instead.
+            </div>
           </PanelSectionRow>
         )}
         {puCheck && !puCheck.update_available && !updating && (

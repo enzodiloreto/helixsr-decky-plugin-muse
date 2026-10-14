@@ -58,7 +58,8 @@ class PluginCase(unittest.TestCase):
         p._mig = main._new_mig_state()
         p._update_check = {"at": 0.0, "result": {"ok": True, "update_available": False}}
         p._pu = {"running": False, "done": False, "ok": False, "error": "",
-                 "version": "", "url": "", "downloaded": 0, "total": 0}
+                 "version": "", "url": "", "downloaded": 0, "total": 0,
+                 "mode": "", "path": ""}
         p._update_pending = ""
         p._scan_stop = threading.Event()
         p._scan_cache = main._empty_scan_cache()
@@ -971,6 +972,80 @@ class PluginCase(unittest.TestCase):
             st = await p.get_state()
             self.assertEqual(st["update_pending"], "9.9.9")
         asyncio.run(go())
+
+    def test_dir_writable_probe(self):
+        d = self.tmp / "w"
+        d.mkdir()
+        self.assertTrue(main._dir_writable(d))
+        ro = self.tmp / "ro"
+        ro.mkdir()
+        ro.chmod(0o555)
+        try:
+            self.assertFalse(main._dir_writable(ro))
+        finally:
+            ro.chmod(0o755)
+
+    def test_plugin_update_manual_mode(self):
+        # Plugin dir not writable (e.g. root-owned install): the zip is staged
+        # for Decky's manual Install-from-ZIP flow instead of crashing.
+        plug = self._plug_dir("0.0.1")
+        plug.chmod(0o555)
+        home = self.tmp / "home"
+        (home / "Downloads").mkdir(parents=True)
+        os.environ["DECKY_USER_HOME"] = str(home)
+        os.environ["DECKY_PLUGIN_DIR"] = str(plug)
+        self.addCleanup(os.environ.pop, "DECKY_PLUGIN_DIR", None)
+        payload = self._update_zip_bytes(version="9.9.9")
+        p = self._plugin()
+        listing = [{"tag_name": "v9.9.9", "draft": False,
+                    "assets": [{"name": "p.zip", "size": len(payload),
+                                "browser_download_url": "https://example.invalid/u.zip"}]}]
+
+        class Resp:
+            headers = {"Content-Length": str(len(payload))}
+
+            def __init__(self, data):
+                self._data = data
+
+            def read(self, n):
+                chunk, self._data = self._data[:n], self._data[n:]
+                return chunk
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            with mock.patch.object(main, "_fetch_json", return_value=listing):
+                c = await p.check_plugin_update()
+            self.assertTrue(c["ok"])
+            self.assertFalse(c["can_install"])
+            with mock.patch.object(main, "_fetch_json", return_value=listing), \
+                    mock.patch.object(main.urllib.request, "urlopen", return_value=Resp(payload)):
+                r = await p.start_plugin_update()
+                self.assertTrue(r["ok"], r)
+                for _ in range(400):
+                    st = await p.get_plugin_update_status()
+                    if st.get("done"):
+                        break
+                    await asyncio.sleep(0.05)
+            self.assertTrue(st["ok"], st["error"])
+            self.assertEqual(st["mode"], "manual")
+            self.assertTrue(st["path"].endswith("helixsr-muse-plugin-v9.9.9.zip"))
+            self.assertTrue(st["path"].startswith(str(home / "Downloads")))
+            # original install untouched, no pending restart
+            self.assertEqual((plug / "dist" / "index.js").read_text(), "old")
+            self.assertEqual(p._update_pending, "")
+            import zipfile
+            with zipfile.ZipFile(st["path"]) as z:
+                self.assertIn("plug/package.json", z.namelist())
+        try:
+            asyncio.run(go())
+        finally:
+            plug.chmod(0o755)
 
 
 if __name__ == "__main__":

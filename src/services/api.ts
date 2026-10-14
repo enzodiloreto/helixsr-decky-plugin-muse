@@ -37,6 +37,7 @@ export interface PluginUpdateInfo {
   url?: string;
   size?: number;
   body?: string;
+  can_install?: boolean;
   error?: string;
 }
 
@@ -49,6 +50,8 @@ export interface PluginUpdateStatus {
   url: string;
   downloaded: number;
   total: number;
+  mode: string;
+  path: string;
 }
 
 export interface HelixGame {

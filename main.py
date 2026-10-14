@@ -278,6 +278,17 @@ def _install_plugin_zip(zip_path: Path, plug: Path, current: str) -> str:
         shutil.rmtree(stage, ignore_errors=True)
 
 
+def _dir_writable(d: Path) -> bool:
+    """Probe whether we can create entries in d (sandbox/ownership-safe)."""
+    try:
+        probe = d / ".write-probe"
+        probe.mkdir(exist_ok=False)
+        probe.rmdir()
+        return True
+    except OSError:
+        return False
+
+
 def _plugin_version() -> str:
     try:
         base = os.environ.get("DECKY_PLUGIN_DIR", "")
@@ -685,6 +696,11 @@ class Plugin:
         result = {"ok": True, "current": current, "update_available": best is not None}
         if best:
             result.update(best)
+        try:
+            plug = Path(os.environ.get("DECKY_PLUGIN_DIR") or "")
+            result["can_install"] = plug.is_dir() and _dir_writable(plug)
+        except OSError:
+            result["can_install"] = False
         self._update_check = {"at": now, "result": result}
         return dict(result)
 
@@ -705,7 +721,8 @@ class Plugin:
             return {"ok": False, "error": "already on the newest version"}
         self._pu = {"running": True, "done": False, "ok": False, "error": "",
                     "version": check["latest"], "url": check["url"],
-                    "downloaded": 0, "total": check.get("size", 0) or 0}
+                    "downloaded": 0, "total": check.get("size", 0) or 0,
+                    "mode": "", "path": ""}
         threading.Thread(target=self._plugin_update_run, daemon=True).start()
         return {"ok": True, "version": check["latest"]}
 
@@ -718,6 +735,9 @@ class Plugin:
         try:
             if not self._alive:
                 return
+            plug = Path(os.environ.get("DECKY_PLUGIN_DIR") or "")
+            inplace = plug.is_dir() and _dir_writable(plug)
+            st["mode"] = "inplace" if inplace else "manual"
             root = _helixsr_root()
             root.mkdir(parents=True, exist_ok=True)
             tmp = root / ".plugin-update.zip"
@@ -740,13 +760,14 @@ class Plugin:
                         st["downloaded"] += len(chunk)
             if st["total"] and st["downloaded"] != st["total"]:
                 raise OSError(f"incomplete download: got {st['downloaded']} of {st['total']} bytes")
-            plug = Path(os.environ.get("DECKY_PLUGIN_DIR") or "")
-            if not plug.is_dir():
-                raise OSError("DECKY_PLUGIN_DIR unknown: install the zip manually")
-            new_version = _install_plugin_zip(tmp, plug, _plugin_version())
-            st["ok"] = True
-            self._update_pending = new_version
-            self._update_check = {"at": 0.0, "result": {"ok": True, "update_available": False}}
+            if inplace:
+                new_version = _install_plugin_zip(tmp, plug, _plugin_version())
+                st["ok"] = True
+                self._update_pending = new_version
+                self._update_check = {"at": 0.0, "result": {"ok": True, "update_available": False}}
+            else:
+                st["path"] = self._stage_manual_zip(tmp, st["version"])
+                st["ok"] = True
         except Exception as e:  # noqa: BLE001
             decky.logger.error(f"plugin self-update failed: {e}")
             st["error"] = str(e)
@@ -758,6 +779,31 @@ class Plugin:
                 pass
             st["running"] = False
             st["done"] = True
+
+    def _stage_manual_zip(self, tmp: Path, version: str) -> str:
+        """Validate the release zip and copy it somewhere the user can reach
+        for Decky's manual Install-from-ZIP flow. Returns the destination path."""
+        ver = version[1:] if version[:1].lower() == "v" else version
+        name = f"helixsr-muse-plugin-v{ver}.zip"
+        home = Path(os.environ.get("DECKY_USER_HOME") or Path.home())
+        downloads = home / "Downloads"
+        dest_dir = downloads if _dir_writable(downloads) else _helixsr_root()
+        with zipfile.ZipFile(tmp) as z:
+            names = [i.filename for i in z.infolist()
+                     if not i.filename.startswith("/") and ".." not in Path(i.filename).parts]
+            tops = {n.split("/")[0] for n in names if "/" in n}
+            if len(tops) != 1:
+                raise OSError("unexpected plugin zip layout")
+            top = tops.pop()
+            meta = json.loads(z.read(f"{top}/plugin.json").decode("utf-8"))
+            pkg = json.loads(z.read(f"{top}/package.json").decode("utf-8"))
+            if meta.get("name") != PLUGIN_DISPLAY_NAME:
+                raise OSError(f"zip is not {PLUGIN_DISPLAY_NAME}")
+            if _compare_versions(str(pkg.get("version") or ""), _plugin_version()) <= 0:
+                raise OSError("zip is not newer than the running plugin")
+        dest = dest_dir / name
+        shutil.copyfile(tmp, dest)
+        return str(dest)
 
     async def remove_version(self, tag: str) -> dict:
         def _rm():
@@ -1835,7 +1881,8 @@ class Plugin:
         self._mig = _new_mig_state()
         self._update_check = {"at": 0.0, "result": {"ok": True, "update_available": False}}
         self._pu = {"running": False, "done": False, "ok": False, "error": "",
-                    "version": "", "url": "", "downloaded": 0, "total": 0}
+                    "version": "", "url": "", "downloaded": 0, "total": 0,
+                    "mode": "", "path": ""}
         self._update_pending = ""
         self._scan_stop = threading.Event()
         self._scan_cache = _empty_scan_cache()
