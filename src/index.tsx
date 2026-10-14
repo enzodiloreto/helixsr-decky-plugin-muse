@@ -1,5 +1,4 @@
 import {
-  DropdownItem,
   PanelSection,
   PanelSectionRow,
   ProgressBar,
@@ -117,21 +116,6 @@ function Content() {
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
   const [showMode, setShowMode] = useState<string>("all");
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({ installed: false, not: false });
-  // Collapsible panel sections: explicit user choice sticks; otherwise the
-  // section for the current guided step is open (plus update alerts).
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
-  const isOpen = (key: string, auto: boolean) =>
-    collapsed[key] === true ? false : collapsed[key] === false ? true : auto;
-  const sectionToggle = (key: string, auto: boolean) => (
-    <PanelSectionRow>
-      <MButton
-        variant="text"
-        onClick={() => setCollapsed({ ...collapsed, [key]: isOpen(key, auto) })}
-      >
-        {isOpen(key, auto) ? "Collapse section" : "Expand section"}
-      </MButton>
-    </PanelSectionRow>
-  );
   const [health, setHealth] = useState<HealthCheck[] | null>(null);
   const [migrating, setMigrating] = useState<boolean>(false);
   const [mig, setMig] = useState<MigrationStatus | null>(null);
@@ -406,7 +390,10 @@ function Content() {
   };
 
   const onDownloadOrUse = async () => {
-    if (!picked) return;
+    if (!picked) {
+      setOutput("No release selected.");
+      return;
+    }
     if (pickedDownloaded) {
       setBusy("version");
       try {
@@ -420,10 +407,15 @@ function Content() {
       }
       return;
     }
-    if (!pickedRelease) return;
+    if (!pickedRelease) {
+      toaster.toast({ title: "Release not found", body: `No download for ${picked} — reload releases.` });
+      setOutput(`No download found for ${picked}. Tap Reload releases and try again.`);
+      return;
+    }
     setDl(null);
     setDlRate("");
     dlPrev.current = null;
+    setOutput(`Starting download of ${picked} ...`);
     try {
       const r = await apiStartDownload(picked, pickedRelease.zip_url);
       if (!r.ok) {
@@ -434,6 +426,9 @@ function Content() {
       setDownloading(true);
       setOutput(`Downloading ${pickedRelease.zip_name} (${fmtSize(pickedRelease.size)}) ...`);
     } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toaster.toast({ title: "Download failed to start", body: msg });
+      setOutput(`Could not start download: ${msg}`);
       console.error("[helixsr] start_download failed", e);
     }
   };
@@ -1016,13 +1011,6 @@ function Content() {
     }
   };
 
-  const options = releases.map((r) => {
-    const dl = (state?.versions || []).find((v) => v.tag === r.tag);
-    return {
-      data: r.tag,
-      label: dl ? `${r.tag} ✓ (${dl.size_mb} MB on disk)` : `${r.tag} — ${r.published_at} — ${fmtSize(r.size)} download`,
-    };
-  });
   const hasVersions = (state?.versions.length || 0) > 0;
   const brokenSet = verify ? new Set(verify.filter((v) => !v.ok).map((v) => v.index)) : new Set<number>();
   const statusGames = showMode === "installed" ? games.filter((g) => g.installed)
@@ -1142,8 +1130,7 @@ function Content() {
         </PanelSection>
       )}
       <PanelSection title="1 · Version">
-        {sectionToggle("version", step === 1)}
-        {isOpen("version", step === 1) && (<>
+        <>
         {updateAvailable && newestRelease && (
           <PanelSectionRow>
             <Card tone="tertiary" radius={M3.shape.md}>
@@ -1152,14 +1139,24 @@ function Content() {
           </PanelSectionRow>
         )}
         <PanelSectionRow>
-          <DropdownItem
-            label="HelixSR release"
-            description={activeVersion ? `Active: ${activeVersion.tag} (network ${activeVersion.network_built ? "built" : "NOT built"})` : "No version downloaded yet"}
-            rgOptions={options}
-            selectedOption={picked}
-            onChange={(o) => setPicked(String(o.data))}
-          />
+          <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
+            {activeVersion ? `Active: ${activeVersion.tag} (network ${activeVersion.network_built ? "built" : "NOT built"})` : "No version downloaded yet"}
+          </div>
         </PanelSectionRow>
+        {releases.map((r) => {
+          const dl = (state?.versions || []).find((v) => v.tag === r.tag);
+          return (
+            <PanelSectionRow key={r.tag}>
+              <MButton
+                variant={picked === r.tag ? "filled" : "outlined"}
+                description={dl ? `${dl.size_mb} MB on disk` : `${r.published_at} · ${fmtSize(r.size)} download`}
+                onClick={() => setPicked(r.tag)}
+              >
+                {`${r.tag}${dl ? " ✓" : ""}`}
+              </MButton>
+            </PanelSectionRow>
+          );
+        })}
         {pickedRelease && !pickedDownloaded && pickedRelease.body && (
           <PanelSectionRow>
             <Card tone="neutral" radius={M3.shape.md}>
@@ -1208,12 +1205,11 @@ function Content() {
             </MButton>
           </PanelSectionRow>
         )}
-        </>)}
+        </>
       </PanelSection>
       {hasVersions && (
       <PanelSection title="2 · Network build">
-        {sectionToggle("network", step === 2)}
-        {isOpen("network", step === 2) && (<>
+        <>
         <PanelSectionRow>
           <MButton
             
@@ -1237,13 +1233,12 @@ function Content() {
             </div>
           </PanelSectionRow>
         )}
-        </>)}
+        </>
       </PanelSection>
       )}
       {hasVersions && (
       <PanelSection title="3 · Games">
-        {sectionToggle("games", step >= 3)}
-        {isOpen("games", step >= 3) && (<>
+        <>
         <PanelSectionRow>
           <MButton
             
@@ -1422,12 +1417,23 @@ function Content() {
             </PanelSectionRow>
             {!g.installed && g.available.length > 1 && (
               <PanelSectionRow>
-                <DropdownItem
-                  label={`Install ${g.name} via:`}
-                  rgOptions={g.available.map((a) => ({ data: a, label: ROUTE_LABELS[a] || a }))}
-                  selectedOption={routes[g.index] || g.route}
-                  onChange={(o) => setRoutes({ ...routes, [g.index]: String(o.data) })}
-                />
+                <div style={{ width: "100%" }}>
+                  <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
+                    Install via:
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
+                    {g.available.map((a) => (
+                      <MButton
+                        key={a}
+                        variant={(routes[g.index] || g.route) === a ? "filled" : "outlined"}
+                        onClick={() => setRoutes({ ...routes, [g.index]: a })}
+                        style={{ flex: "1 1 40%", minWidth: 0 }}
+                      >
+                        {ROUTE_LABELS[a] || a}
+                      </MButton>
+                    ))}
+                  </div>
+                </div>
               </PanelSectionRow>
             )}
             <PanelSectionRow>
@@ -1490,17 +1496,27 @@ function Content() {
                   <div style={{ fontSize: 12 }}>{iniPath}</div>
                 </PanelSectionRow>
                 <PanelSectionRow>
-                  <DropdownItem
-                    label="Sharpener"
-                    description="NVIDIA's filter, AMD FSR's RCAS, or off (as DLSS)"
-                    rgOptions={[
-                      { data: "off", label: "Off" },
-                      { data: "nvidia", label: "NVIDIA" },
-                      { data: "rcas", label: "RCAS (AMD)" },
-                    ]}
-                    selectedOption={ini.Sharpener}
-                    onChange={(o) => setIni({ ...ini, Sharpener: String(o.data) })}
-                  />
+                  <div style={{ width: "100%" }}>
+                    <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
+                      Sharpener — NVIDIA's filter, AMD FSR's RCAS, or off (as DLSS)
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
+                      {([
+                        ["off", "Off"],
+                        ["nvidia", "NVIDIA"],
+                        ["rcas", "RCAS (AMD)"],
+                      ] as const).map(([v, label]) => (
+                        <MButton
+                          key={v}
+                          variant={ini.Sharpener === v ? "filled" : "outlined"}
+                          onClick={() => setIni({ ...ini, Sharpener: v })}
+                          style={{ flex: "1 1 40%", minWidth: 0 }}
+                        >
+                          {label}
+                        </MButton>
+                      ))}
+                    </div>
+                  </div>
                 </PanelSectionRow>
                 <PanelSectionRow>
                   <SliderField
@@ -1524,27 +1540,47 @@ function Content() {
                   />
                 </PanelSectionRow>
                 <PanelSectionRow>
-                  <DropdownItem
-                    label="WaveSize"
-                    description="64 for RX 7000 / 9000 in OptiScaler games if the log says wave32"
-                    rgOptions={[
-                      { data: "default", label: "Default" },
-                      { data: "64", label: "64" },
-                      { data: "32", label: "32" },
-                    ]}
-                    selectedOption={ini.WaveSize}
-                    onChange={(o) => setIni({ ...ini, WaveSize: String(o.data) })}
-                  />
+                  <div style={{ width: "100%" }}>
+                    <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
+                      WaveSize — 64 for RX 7000 / 9000 in OptiScaler games if the log says wave32
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
+                      {([
+                        ["default", "Default"],
+                        ["64", "64"],
+                        ["32", "32"],
+                      ] as const).map(([v, label]) => (
+                        <MButton
+                          key={v}
+                          variant={ini.WaveSize === v ? "filled" : "outlined"}
+                          onClick={() => setIni({ ...ini, WaveSize: v })}
+                          style={{ flex: "1 1 40%", minWidth: 0 }}
+                        >
+                          {label}
+                        </MButton>
+                      ))}
+                    </div>
+                  </div>
                 </PanelSectionRow>
                 {Object.keys(presets).length > 0 && (
                   <PanelSectionRow>
-                    <DropdownItem
-                      label="Preset"
-                      description="Apply a saved set of values"
-                      rgOptions={Object.keys(presets).map((n) => ({ data: n, label: n }))}
-                      selectedOption={presetPick}
-                      onChange={(o) => setPresetPick(String(o.data))}
-                    />
+                    <div style={{ width: "100%" }}>
+                      <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
+                        Preset — apply a saved set of values
+                      </div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
+                        {Object.keys(presets).map((n) => (
+                          <MButton
+                            key={n}
+                            variant={presetPick === n ? "filled" : "outlined"}
+                            onClick={() => setPresetPick(n)}
+                            style={{ flex: "1 1 40%", minWidth: 0 }}
+                          >
+                            {n}
+                          </MButton>
+                        ))}
+                      </div>
+                    </div>
                   </PanelSectionRow>
                 )}
                 {presetPick && presets[presetPick] && (
@@ -1590,13 +1626,12 @@ function Content() {
             )}
           </Fragment>
         ))}
-        </>)}
+        </>
       </PanelSection>
       )}
       {hasVersions && (
       <PanelSection title="Folders">
-        {sectionToggle("folders", false)}
-        {isOpen("folders", false) && (<>
+        <>
         <PanelSectionRow>
           <TextField
             label="Extra game folder"
@@ -1617,13 +1652,12 @@ function Content() {
             </MButton>
           </PanelSectionRow>
         ))}
-        </>)}
+        </>
       </PanelSection>
       )}
       {hasVersions && (
       <PanelSection title="Storage">
-        {sectionToggle("storage", false)}
-        {isOpen("storage", false) && (<>
+        <>
         <PanelSectionRow>
           <div style={{ ...M3.type.title }}>Total {totalMB.toFixed(1)} MB in {downloadedVersions.length} version(s)</div>
         </PanelSectionRow>
@@ -1647,12 +1681,11 @@ function Content() {
             {confirm === "reset everything" ? "Confirm reset all?" : "Reset everything"}
           </MButton>
         </PanelSectionRow>
-        </>)}
+        </>
       </PanelSection>
       )}
       <PanelSection title="Health">
-        {sectionToggle("health", false)}
-        {isOpen("health", false) && (<>
+        <>
         <PanelSectionRow>
           <MButton  disabled={busy !== ""} variant="tonal" onClick={onHealth}>
             Run health check
@@ -1666,11 +1699,10 @@ function Content() {
             </div>
           </PanelSectionRow>
         ))}
-        </>)}
+        </>
       </PanelSection>
       <PanelSection title="Plugin update">
-        {sectionToggle("pluginupdate", !!(puCheck?.update_available || updating))}
-        {isOpen("pluginupdate", !!(puCheck?.update_available || updating)) && (<>
+        <>
         {puCheck?.update_available && !updating && !(pu?.done && pu?.ok) && (
           <PanelSectionRow>
             <div style={{ fontSize: 12 }}>v{puCheck.latest} available (you run v{puCheck.current}).</div>
@@ -1724,7 +1756,7 @@ function Content() {
             </MButton>
           </PanelSectionRow>
         )}
-        </>)}
+        </>
       </PanelSection>
       {state?.plugin_version && (
         <PanelSectionRow>
