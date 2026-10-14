@@ -140,6 +140,7 @@ function Content() {
   const [mig, setMig] = useState<MigrationStatus | null>(null);
   const [folderInput, setFolderInput] = useState<string>("");
   const [puCheck, setPuCheck] = useState<PluginUpdateInfo | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState<boolean>(false);
   const [updating, setUpdating] = useState<boolean>(false);
   const [pu, setPu] = useState<PluginUpdateStatus | null>(null);
   const [confirm, setConfirm] = useState<string>("");
@@ -230,7 +231,7 @@ function Content() {
           if (pu0.running) { setPu(pu0); setUpdating(true); }
         } catch { /* nothing running */ }
         try {
-          setPuCheck(await apiCheckPluginUpdate(false));
+          await onCheckPluginUpdate(false);
         } catch { /* update check is best-effort */ }
       } catch (e) {
         console.error("[helixsr] init failed", e);
@@ -642,10 +643,14 @@ function Content() {
   };
 
   const onCheckPluginUpdate = async (force: boolean) => {
+    setCheckingUpdate(true);
     try {
       setPuCheck(await apiCheckPluginUpdate(force));
     } catch (e) {
       console.error("[helixsr] check_plugin_update failed", e);
+      setPuCheck({ ok: false, error: "update check failed" });
+    } finally {
+      setCheckingUpdate(false);
     }
   };
 
@@ -1076,7 +1081,6 @@ function Content() {
         </PanelSectionRow>
       </PanelSection>
       )}
-      {(puCheck?.update_available || updating || pu?.done) && (
       <PanelSection title="Plugin update">
         {puCheck?.update_available && !updating && !(pu?.done && pu?.ok) && (
           <PanelSectionRow>
@@ -1095,6 +1099,15 @@ function Content() {
             </ButtonItem>
           </PanelSectionRow>
         )}
+        {puCheck && !puCheck.update_available && !updating && (
+          <PanelSectionRow>
+            <div style={{ ...M3.type.body, color: M3.color.onSurfaceVariant }}>
+              {puCheck.ok
+                ? `Plugin v${puCheck.current || PLUGIN_VERSION} — up to date.`
+                : `Update check failed${puCheck.error ? `: ${puCheck.error}` : ""}.`}
+            </div>
+          </PanelSectionRow>
+        )}
         {updating && (
           <PanelSectionRow>
             <div style={{ width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
@@ -1109,13 +1122,12 @@ function Content() {
         )}
         {!updating && (
           <PanelSectionRow>
-            <ButtonItem layout="below" disabled={busy !== ""} onClick={() => onCheckPluginUpdate(true)}>
-              Check again
+            <ButtonItem layout="below" disabled={busy !== "" || checkingUpdate} onClick={() => onCheckPluginUpdate(true)}>
+              {checkingUpdate ? "Checking ..." : puCheck ? "Check again" : "Check for updates"}
             </ButtonItem>
           </PanelSectionRow>
         )}
       </PanelSection>
-      )}
       {output && (
         <PanelSection title="Log">
           <PanelSectionRow>
