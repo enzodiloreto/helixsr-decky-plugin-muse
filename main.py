@@ -365,6 +365,7 @@ INI_SECTIONS = {"Sharpener": "Sharpening", "Sharpness": "Sharpening",
                 "UseGameSlider": "Sharpening", "WaveSize": "Compatibility"}
 INI_DEFAULTS = {"Sharpener": "off", "Sharpness": "0.5",
                 "UseGameSlider": "false", "WaveSize": "default"}
+MAX_INI_PRESETS = 20
 
 
 def _find_ini(g, create=False):
@@ -1468,14 +1469,23 @@ class Plugin:
             return {"ok": False, "output": "pattern no longer present in the log"}
         return await asyncio.to_thread(self._game_settings_run, "set", d, idx, dict(fix["settings"]))
 
-    async def get_ini_presets(self) -> dict:
+    def _load_presets(self) -> dict:
+        """ini_presets from settings, stripped of corrupt entries."""
         try:
             presets = self.settings.getSetting("ini_presets", {})
         except Exception:  # noqa: BLE001
-            presets = {}
+            return {}
         if not isinstance(presets, dict):
-            presets = {}
-        return {"ok": True, "presets": {str(k): v for k, v in presets.items() if isinstance(v, dict)}}
+            return {}
+        return {str(k): v for k, v in presets.items() if isinstance(v, dict)}
+
+    @staticmethod
+    def _sorted_presets(presets: dict) -> dict:
+        return {k: presets[k] for k in sorted(presets, key=str.lower)}
+
+    async def get_ini_presets(self) -> dict:
+        return {"ok": True, "presets": self._sorted_presets(self._load_presets()),
+                "defaults": dict(INI_DEFAULTS)}
 
     async def save_ini_preset(self, name: str, values: dict) -> dict:
         name = str(name or "").strip()
@@ -1488,28 +1498,31 @@ class Plugin:
             return {"ok": False, "error": err}
         full = dict(INI_DEFAULTS)
         full.update(norm)
-        try:
-            presets = self.settings.getSetting("ini_presets", {})
-        except Exception:  # noqa: BLE001
-            presets = {}
-        if not isinstance(presets, dict):
-            presets = {}
+        presets = self._load_presets()
+        existing = next((k for k in presets if k.lower() == name.lower()), None)
+        overwrote = existing is not None
+        if not overwrote and len(presets) >= MAX_INI_PRESETS:
+            return {"ok": False,
+                    "error": f"too many presets (max {MAX_INI_PRESETS}): delete one first"}
+        if existing is not None and existing != name:
+            del presets[existing]
         presets[name] = full
         self.settings.setSetting("ini_presets", presets)
         self.settings.commit()
-        return {"ok": True, "presets": presets}
+        return {"ok": True, "presets": self._sorted_presets(presets), "overwrote": overwrote}
 
     async def delete_ini_preset(self, name: str) -> dict:
-        try:
-            presets = self.settings.getSetting("ini_presets", {})
-        except Exception:  # noqa: BLE001
-            presets = {}
-        if not isinstance(presets, dict):
-            presets = {}
-        presets.pop(str(name), None)
+        presets = self._load_presets()
+        key = str(name)
+        if key in presets:
+            del presets[key]
+        else:
+            match = next((k for k in presets if k.lower() == key.lower()), None)
+            if match is not None:
+                del presets[match]
         self.settings.setSetting("ini_presets", presets)
         self.settings.commit()
-        return {"ok": True, "presets": presets}
+        return {"ok": True, "presets": self._sorted_presets(presets)}
 
     async def apply_ini_preset(self, index: int, name: str) -> dict:
         d = await self._active_dir()
@@ -1519,14 +1532,18 @@ class Plugin:
             idx = int(index)
         except (TypeError, ValueError):
             return {"ok": False, "output": f"bad game number: {index}"}
-        try:
-            presets = self.settings.getSetting("ini_presets", {})
-        except Exception:  # noqa: BLE001
-            presets = {}
-        if not isinstance(presets, dict) or str(name) not in presets:
+        presets = self._load_presets()
+        actual = str(name) if str(name) in presets else next(
+            (k for k in presets if k.lower() == str(name).lower()), None)
+        if actual is None:
             return {"ok": False, "output": f"no preset named {name}"}
-        return await asyncio.to_thread(self._game_settings_run, "set", d, idx,
-                                       dict(presets[str(name)]))
+        stored = presets[actual]
+        if not isinstance(stored, dict):
+            return {"ok": False, "output": f"preset '{actual}' is corrupt: bad settings"}
+        norm, err = _normalize_ini_values(stored)
+        if err:
+            return {"ok": False, "output": f"preset '{actual}' is corrupt: {err}"}
+        return await asyncio.to_thread(self._game_settings_run, "set", d, idx, norm)
 
     async def verify_installs(self) -> dict:
         d = await self._active_dir()

@@ -87,6 +87,20 @@ import {
 // toasts when it isn't, so completions are announced exactly once.
 let panelOpen = false;
 
+function presetsEqual(a: GameSettings, b: GameSettings): boolean {
+  return a.Sharpener === b.Sharpener && a.Sharpness === b.Sharpness
+    && a.UseGameSlider === b.UseGameSlider && a.WaveSize === b.WaveSize;
+}
+
+function formatPresetSummary(v: GameSettings): string {
+  const slider = v.UseGameSlider === "true" ? "game-slider" : "manual";
+  return `${v.Sharpener} · ${v.Sharpness} · ${slider} · wave ${v.WaveSize}`;
+}
+
+// Built-in preset shown first in the picker unless the user saved their own
+// preset with the same name (case-insensitive), which then takes over.
+const DEFAULT_PRESET_NAME = "Default";
+
 function Content() {
   const [releases, setReleases] = useState<HelixRelease[]>([]);
   const [state, setState] = useState<HelixState | null>(null);
@@ -106,6 +120,7 @@ function Content() {
   const [ini, setIni] = useState<GameSettings | null>(null);
   const [iniPath, setIniPath] = useState<string>("");
   const [presets, setPresets] = useState<Record<string, GameSettings>>({});
+  const [presetDefaults, setPresetDefaults] = useState<GameSettings | null>(null);
   const [presetPick, setPresetPick] = useState<string>("");
   const [presetName, setPresetName] = useState<string>("");
   const [logFor, setLogFor] = useState<number | null>(null);
@@ -645,27 +660,30 @@ function Content() {
   const onLoadPresets = async () => {
     try {
       const r = await apiGetIniPresets();
-      if (r.ok) setPresets(r.presets || {});
+      if (r.ok) {
+        setPresets(r.presets || {});
+        if (r.defaults) setPresetDefaults(r.defaults);
+      }
     } catch (e) {
       console.error("[helixsr] get_ini_presets failed", e);
     }
   };
 
   const onSavePreset = async () => {
-    if (!presetName.trim()) return;
+    if (!ini) return;
+    const trimmed = presetName.trim();
+    if (!trimmed) return;
     setBusy("preset");
     try {
-      const r = await apiSaveIniPreset(presetName.trim(), {
-        Sharpener: "off", Sharpness: "0.5", UseGameSlider: "false", WaveSize: "default",
-        ...(ini || {}),
-      });
+      const r = await apiSaveIniPreset(trimmed, { ...ini });
       if (!r.ok) {
         setOutput(r.error || "cannot save preset");
         return;
       }
       setPresets(r.presets || {});
+      setPresetPick(trimmed);
       setPresetName("");
-      setOutput(`Preset "${presetName.trim()}" saved.`);
+      setOutput(r.overwrote ? `Preset "${trimmed}" updated.` : `Preset "${trimmed}" saved.`);
     } finally {
       setBusy("");
     }
@@ -673,26 +691,36 @@ function Content() {
 
   const onDeletePreset = async () => {
     if (!presetPick) return;
-    setBusy("preset");
-    try {
-      const r = await apiDeleteIniPreset(presetPick);
-      if (r.ok) setPresets(r.presets || {});
-      setPresetPick("");
-    } finally {
-      setBusy("");
-    }
+    await armOrRun(`delete preset ${presetPick}`,
+      `Tap again to confirm deleting preset "${presetPick}".`,
+      async () => {
+        setBusy("preset");
+        try {
+          const r = await apiDeleteIniPreset(presetPick);
+          if (r.ok) setPresets(r.presets || {});
+          setPresetPick("");
+        } finally {
+          setBusy("");
+        }
+      });
   };
 
   const onApplyPreset = async () => {
     if (iniFor === null || !presetPick) return;
+    const applied = presetPick;
+    const isBuiltin = presetDefaults !== null && applied === DEFAULT_PRESET_NAME
+      && !Object.keys(presets).some((n) => n.toLowerCase() === applied.toLowerCase());
     setBusy("preset");
     try {
-      const r = await apiApplyIniPreset(iniFor, presetPick);
+      const r = isBuiltin
+        ? await apiSetGameSettings(iniFor, { ...presetDefaults })
+        : await apiApplyIniPreset(iniFor, applied);
       setOutput(r.output || "");
-      toaster.toast({ title: r.ok ? `Preset "${presetPick}" applied` : "Apply failed", body: r.ok ? "" : (r.output || "").slice(-200) });
+      toaster.toast({ title: r.ok ? `Preset "${applied}" applied` : "Apply failed", body: r.ok ? "" : (r.output || "").slice(-200) });
       if (r.ok) {
         const g = games.find((x) => x.index === iniFor);
-        if (g) onOpenIni(g);
+        if (g) await onOpenIni(g);
+        setPresetPick(applied);
       }
     } finally {
       setBusy("");
@@ -1067,6 +1095,25 @@ function Content() {
   const migCandidates = activeVersion && activeVersion.dll_version && activeVersion.dll_version !== "?"
     ? games.filter((g) => g.installed && !(g.installed_versions || []).includes(activeVersion.dll_version))
     : [];
+  const presetNames = Object.keys(presets).sort((a, b) => a.localeCompare(b));
+  const showBuiltinDefault = presetDefaults !== null
+    && !presetNames.some((n) => n.toLowerCase() === DEFAULT_PRESET_NAME.toLowerCase());
+  const allPresetNames = showBuiltinDefault ? [DEFAULT_PRESET_NAME, ...presetNames] : presetNames;
+  const presetValues = (n: string): GameSettings | undefined => {
+    if (n === DEFAULT_PRESET_NAME && showBuiltinDefault && presetDefaults !== null) return presetDefaults;
+    return presets[n];
+  };
+  const pickedPresetValues = presetPick ? presetValues(presetPick) : undefined;
+  const presetMatch = ini ? allPresetNames.find((n) => {
+    const v = presetValues(n);
+    return v !== undefined && presetsEqual(v, ini);
+  }) : undefined;
+  const trimmedPresetName = presetName.trim();
+  const overwriteTarget = trimmedPresetName
+    ? (presetNames.find((n) => n.toLowerCase() === trimmedPresetName.toLowerCase())
+      ?? (showBuiltinDefault && trimmedPresetName.toLowerCase() === DEFAULT_PRESET_NAME.toLowerCase()
+        ? DEFAULT_PRESET_NAME : undefined))
+    : undefined;
 
   return (
     <div>
@@ -1582,52 +1629,75 @@ function Content() {
                     </div>
                   </div>
                 </PanelSectionRow>
-                {Object.keys(presets).length > 0 && (
+                {allPresetNames.length === 0 && (
+                  <PanelSectionRow>
+                    <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
+                      No presets yet — tune above, name it, save.
+                    </div>
+                  </PanelSectionRow>
+                )}
+                {allPresetNames.length > 0 && (
                   <PanelSectionRow>
                     <div style={{ width: "100%" }}>
                       <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
                         Preset — apply a saved set of values
                       </div>
                       <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
-                        {Object.keys(presets).map((n) => (
+                        {allPresetNames.map((n) => (
                           <MButton
                             key={n}
+                            disabled={busy !== ""}
                             variant={presetPick === n ? "filled" : "outlined"}
                             onClick={() => setPresetPick(n)}
                             style={{ flex: "1 1 40%", minWidth: 0 }}
                           >
-                            {n}
+                            {`${n}${presetMatch === n ? " ✓" : ""}`}
                           </MButton>
                         ))}
                       </div>
                     </div>
                   </PanelSectionRow>
                 )}
-                {presetPick && presets[presetPick] && (
+                {pickedPresetValues && (
                   <PanelSectionRow>
-                    <MButton  disabled={busy !== ""} variant="filled" onClick={onApplyPreset}>
-                      {`Apply "${presetPick}"`}
-                    </MButton>
+                    <div style={{ width: "100%" }}>
+                      <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
+                        {formatPresetSummary(pickedPresetValues)}
+                        {presetPick === DEFAULT_PRESET_NAME && showBuiltinDefault
+                          ? " — built-in HelixSR defaults"
+                          : presetMatch === presetPick ? " — matches current settings" : ""}
+                      </div>
+                      <MButton disabled={busy !== ""} variant="filled" onClick={onApplyPreset}>
+                        {`Apply "${presetPick}"`}
+                      </MButton>
+                    </div>
                   </PanelSectionRow>
                 )}
-                {presetPick && (
+                {presetPick && presets[presetPick] && (
                   <PanelSectionRow>
-                    <MButton  disabled={busy !== ""} variant="text" onClick={onDeletePreset}>
-                      {`Delete "${presetPick}"`}
+                    <MButton disabled={busy !== ""} variant={confirm === `delete preset ${presetPick}` ? "danger" : "text"} onClick={onDeletePreset}>
+                      {confirm === `delete preset ${presetPick}` ? `Tap again to delete "${presetPick}"` : `Delete "${presetPick}"`}
                     </MButton>
                   </PanelSectionRow>
                 )}
                 <PanelSectionRow>
                   <TextField
                     label="Preset name"
-                    description="Save the current editor values as a preset"
+                    description={`Save the current editor values as a preset (${trimmedPresetName.length}/40)`}
                     value={presetName}
-                    onChange={(e) => setPresetName((e.target as HTMLInputElement).value)}
+                    onChange={(e) => setPresetName((e.target as HTMLInputElement).value.slice(0, 40))}
                   />
                 </PanelSectionRow>
+                {overwriteTarget && (
+                  <PanelSectionRow>
+                    <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
+                      {`Will overwrite "${overwriteTarget}".`}
+                    </div>
+                  </PanelSectionRow>
+                )}
                 <PanelSectionRow>
-                  <MButton  disabled={busy !== "" || !presetName.trim()} variant="tonal" onClick={onSavePreset}>
-                    Save preset
+                  <MButton disabled={busy !== "" || !trimmedPresetName} variant="tonal" onClick={onSavePreset}>
+                    {overwriteTarget ? `Overwrite "${overwriteTarget}"` : "Save preset"}
                   </MButton>
                 </PanelSectionRow>
                 <PanelSectionRow>

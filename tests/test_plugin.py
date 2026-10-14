@@ -700,6 +700,64 @@ class PluginCase(unittest.TestCase):
             self.assertFalse(missing["ok"])
         asyncio.run(go())
 
+    def test_preset_case_insensitive_sorted_capped(self):
+        p = self._plugin()
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            d1 = (await p.get_ini_presets())["defaults"]
+            self.assertEqual(d1, main.INI_DEFAULTS)
+            d1["Sharpener"] = "nvidia"
+            self.assertEqual(main.INI_DEFAULTS["Sharpener"], "off")
+            self.assertEqual((await p.get_ini_presets())["defaults"], main.INI_DEFAULTS)
+            vals = {"Sharpener": "off", "Sharpness": "0.5",
+                    "UseGameSlider": False, "WaveSize": "default"}
+            first = await p.save_ini_preset("zebra", vals)
+            self.assertTrue(first["ok"])
+            self.assertFalse(first.get("overwrote"))
+            second = await p.save_ini_preset("apple", vals)
+            self.assertTrue(second["ok"])
+            self.assertEqual(list(second["presets"].keys()), ["apple", "zebra"])
+            # case-insensitive overwrite keeps one entry under the new spelling
+            third = await p.save_ini_preset("APPLE", vals)
+            self.assertTrue(third["ok"])
+            self.assertTrue(third.get("overwrote"))
+            self.assertEqual(list((await p.get_ini_presets())["presets"].keys()),
+                             ["APPLE", "zebra"])
+            # case-insensitive delete
+            rm = await p.delete_ini_preset("apple")
+            self.assertNotIn("APPLE", rm["presets"])
+            # cap: fresh plugin to avoid interference
+            q = self._plugin()
+            q.loop = asyncio.get_event_loop()
+            for i in range(main.MAX_INI_PRESETS):
+                r = await q.save_ini_preset(f"p{i}", vals)
+                self.assertTrue(r["ok"], r)
+            over = await q.save_ini_preset("one-more", vals)
+            self.assertFalse(over["ok"])
+            self.assertIn("max", over["error"])
+            # overwriting at cap is still allowed
+            r = await q.save_ini_preset("P0", vals)
+            self.assertTrue(r["ok"], r)
+            self.assertTrue(r.get("overwrote"))
+        asyncio.run(go())
+
+    def test_preset_apply_corrupt(self):
+        self._version_dir(tag="9.9.9")
+        home = make_steam_home(self.tmp)
+        os.environ["DECKY_USER_HOME"] = str(home)
+        p = self._plugin()
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            idx = await self._game_index(p, "GameB")
+            self.assertTrue((await p.install_games([idx], "optiscaler"))["ok"])
+            p.settings.setSetting("ini_presets", {"bad": {"Sharpener": "bogus"}})
+            w = await p.apply_ini_preset(idx, "bad")
+            self.assertFalse(w["ok"])
+            self.assertIn("corrupt", w["output"])
+        asyncio.run(go())
+
     def test_verify_and_repair(self):
         self._version_dir(tag="9.9.9")
         home = make_steam_home(self.tmp)
