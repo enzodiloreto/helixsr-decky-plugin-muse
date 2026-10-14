@@ -15,7 +15,7 @@ import {
   definePlugin,
   toaster,
 } from "@decky/api"
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { MdMemory } from "react-icons/md";
 import { Card, Chip, Stepper } from "./components";
 import { M3 } from "./theme";
@@ -162,6 +162,8 @@ function Content() {
   const [verify, setVerify] = useState<VerifyResult[] | null>(null);
   const [filter, setFilter] = useState<string>("");
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
+  const [showMode, setShowMode] = useState<string>("all");
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({ installed: true, not: false });
   const [health, setHealth] = useState<HealthCheck[] | null>(null);
   const [migrating, setMigrating] = useState<boolean>(false);
   const [mig, setMig] = useState<MigrationStatus | null>(null);
@@ -940,9 +942,18 @@ function Content() {
     };
   });
   const hasVersions = (state?.versions.length || 0) > 0;
-  const visibleGames = filter.trim()
-    ? games.filter((g) => g.name.toLowerCase().includes(filter.trim().toLowerCase()))
+  const brokenSet = verify ? new Set(verify.filter((v) => !v.ok).map((v) => v.index)) : new Set<number>();
+  const statusGames = showMode === "installed" ? games.filter((g) => g.installed)
+    : showMode === "available" ? games.filter((g) => !g.installed)
+    : showMode === "repair" ? games.filter((g) => brokenSet.has(g.index))
     : games;
+  const visibleGames = filter.trim()
+    ? statusGames.filter((g) => g.name.toLowerCase().includes(filter.trim().toLowerCase()))
+    : statusGames;
+  const sortedGames = [...visibleGames].sort((a, b) =>
+    Number(b.installed) - Number(a.installed) || a.index - b.index);
+  const installedGroup = visibleGames.filter((g) => g.installed);
+  const availGroup = visibleGames.filter((g) => !g.installed);
   const installedCount = games.filter((g) => g.installed).length;
   const visNotInstalled = visibleGames.filter((g) => !g.installed).length;
   const visInstalled = visibleGames.filter((g) => g.installed).length;
@@ -1205,8 +1216,45 @@ function Content() {
             </div>
           </PanelSectionRow>
         )}
-        {visibleGames.map((g) => (
-          <Card key={g.index} variant="outlined" style={{ width: "100%", marginBottom: M3.space.sm }}>
+        <PanelSectionRow>
+          <DropdownItem
+            label="Show"
+            rgOptions={[
+              { data: "all", label: "All games" },
+              { data: "installed", label: "Installed only" },
+              { data: "available", label: "Not installed only" },
+              { data: "repair", label: "Needs repair" },
+            ]}
+            selectedOption={showMode}
+            onChange={(o) => setShowMode(String(o.data))}
+          />
+        </PanelSectionRow>
+        {showMode === "repair" && !verify && (
+          <PanelSectionRow>
+            <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
+              Run Verify installs first to find broken games.
+            </div>
+          </PanelSectionRow>
+        )}
+        {sortedGames.map((g, si) => (
+          <Fragment key={g.index}>
+            {(si === 0 || sortedGames[si - 1].installed !== g.installed) && (
+              <PanelSectionRow>
+                <ButtonItem
+                  layout="below"
+                  onClick={() => setOpenGroups({
+                    ...openGroups,
+                    [g.installed ? "installed" : "not"]: !(g.installed ? openGroups.installed : openGroups.not),
+                  })}
+                >
+                  {g.installed
+                    ? `Installed (${installedGroup.length}) — ${openGroups.installed ? "collapse" : "expand"}`
+                    : `Not installed (${availGroup.length}) — ${openGroups.not ? "collapse" : "expand"}`}
+                </ButtonItem>
+              </PanelSectionRow>
+            )}
+            {(g.installed ? openGroups.installed : openGroups.not) && (
+          <Card variant="outlined" style={{ width: "100%", marginBottom: M3.space.sm }}>
             <PanelSectionRow>
               <div style={{ display: "flex", alignItems: "center", gap: M3.space.sm, flexWrap: "wrap", width: "100%", boxSizing: "border-box", minWidth: 0 }}>
                 <span style={{ ...M3.type.title, flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>{g.name}</span>
@@ -1392,6 +1440,8 @@ function Content() {
               </div>
             )}
           </Card>
+            )}
+          </Fragment>
         ))}
       </PanelSection>
       )}
