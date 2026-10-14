@@ -135,6 +135,17 @@ def _repair_exec_bits(d: Path) -> list[str]:
     return fixed
 
 
+def _status_for(route, inputs):
+    """Status text mirroring helixscan.Game.label (kept in sync by hand)."""
+    if route == "dlss":
+        return "DLSS (HelixSR as the game's DLSS, experimental: select DLSS in the game)"
+    if route == "direct":
+        return "FSR 3.1 (HelixSR replaces the game's FSR DLL: select AMD FSR in the game)"
+    if route == "optiscaler":
+        return " / ".join(inputs) + " (through OptiScaler: select DLSS in the game)"
+    return route or "compatible"
+
+
 def _plugin_version() -> str:
     try:
         base = os.environ.get("DECKY_PLUGIN_DIR", "")
@@ -509,6 +520,10 @@ class Plugin:
             st["tag"] = tag
             st["skipped"] = skipped
             st["ok"] = True
+            try:
+                self._write_scan_file(tag, out, skipped)
+            except OSError as e:
+                decky.logger.warning(f"helixsr scan cache write failed: {e}")
         except Exception as e:  # noqa: BLE001
             decky.logger.error(f"game scan failed: {e}")
             st["error"] = f"{type(e).__name__}: {e}"
@@ -522,6 +537,63 @@ class Plugin:
             return {"ok": False, "error": "no scan running"}
         self._scan_stop.set()
         return {"ok": True}
+
+    def _scan_cache_path(self) -> Path:
+        return _helixsr_root() / "scan-cache.json"
+
+    def _write_scan_file(self, tag: str, games: list, skipped: int):
+        payload = {"v": 1, "tag": tag, "scanned_at": time.time(),
+                   "skipped": skipped, "games": games}
+        tmp = self._scan_cache_path().with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(tmp, self._scan_cache_path())
+
+    async def get_last_scan(self) -> dict:
+        """The persisted last scan so reopening the panel doesn't rescan."""
+        try:
+            payload = json.loads(self._scan_cache_path().read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or not isinstance(payload.get("games"), list):
+                raise ValueError("bad cache")
+            games = []
+            for g in payload["games"]:
+                if not isinstance(g, dict) or not g.get("name"):
+                    continue
+                g.setdefault("inputs", [])
+                if not isinstance(g.get("available"), list) or not g["available"]:
+                    g["available"] = [g["route"]] if g.get("route") else []
+                g.setdefault("status", _status_for(g.get("route"), g.get("inputs") or []))
+                g.setdefault("installed", False)
+                games.append(g)
+            return {"ok": True, "games": games, "tag": payload.get("tag", "") or "",
+                    "skipped": int(payload.get("skipped", 0) or 0),
+                    "scanned_at": float(payload.get("scanned_at", 0) or 0)}
+        except (OSError, ValueError):
+            return {"ok": True, "games": [], "tag": "", "skipped": 0, "scanned_at": 0}
+
+    def _update_scan_file(self, targets: list[tuple], installed: bool):
+        """Optimistically refresh install flags in the persisted scan, matched
+        by folder (indices may shift between scans)."""
+        try:
+            p = self._scan_cache_path()
+            payload = json.loads(p.read_text(encoding="utf-8"))
+            games = payload.get("games")
+            if not isinstance(games, list):
+                return
+            by_folder = {g.get("folder"): g for g in games if isinstance(g, dict)}
+            by_name = {g.get("name"): g for g in games if isinstance(g, dict)}
+            changed = False
+            for name, folder in targets:
+                g = by_folder.get(folder) or by_name.get(name)
+                if g is None:
+                    continue
+                g["installed"] = installed
+                g["status"] = "HelixSR installed" if installed else _status_for(
+                    g.get("route"), g.get("inputs") or [])
+                changed = True
+            if changed:
+                p.write_text(json.dumps(payload), encoding="utf-8")
+        except (OSError, ValueError):
+            pass
 
     async def get_scan_status(self) -> dict:
         st = dict(self._scan)
@@ -597,6 +669,8 @@ class Plugin:
                 # Game objects only resolve index -> folder; installed() and
                 # route-relevant markers are re-read live wherever they matter,
                 # and mutating game A never changes game B's detection.
+                self._update_scan_file([(g.name, str(g.folder)) for g in targets],
+                                       op == "install")
                 return {"ok": True, "output": "\n".join(helixscan.take_log())[-8000:]}
         except SystemExit as e:
             return {"ok": False, "output": str(e) or "aborted"}

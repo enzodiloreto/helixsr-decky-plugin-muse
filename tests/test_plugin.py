@@ -207,6 +207,45 @@ class PluginCase(unittest.TestCase):
             self.assertEqual(len(calls), 1)
         asyncio.run(go())
 
+    def test_last_scan_persisted(self):
+        self._version_dir(tag="9.9.9")
+        home = make_steam_home(self.tmp)
+        os.environ["DECKY_USER_HOME"] = str(home)
+        p = self._plugin()
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            self.assertEqual((await p.get_last_scan())["games"], [])
+            self.assertEqual(await p.start_scan(), {"ok": True})
+            st = await self._wait_done(p.get_scan_status)
+            self.assertTrue(st["ok"])
+            cached = await p.get_last_scan()
+            self.assertEqual([g["name"] for g in cached["games"]], ["GameA", "GameB"])
+            self.assertEqual(cached["tag"], "v9.9.9")
+            self.assertGreater(cached["scanned_at"], 0)
+            self.assertIn("available", cached["games"][0])
+            # install flips the persisted flag; uninstall flips it back
+            idx = next(g["index"] for g in cached["games"] if g["name"] == "GameA")
+            self.assertTrue((await p.install_games([idx]))["ok"])
+            self.assertTrue((await p.get_last_scan())["games"][idx - 1]["installed"])
+            self.assertTrue((await p.uninstall_games([idx]))["ok"])
+            after = await p.get_last_scan()
+            self.assertFalse(after["games"][idx - 1]["installed"])
+            self.assertIn("FSR", after["games"][idx - 1]["status"])
+        asyncio.run(go())
+
+    def test_last_scan_corrupt_is_empty(self):
+        p = self._plugin()
+        cache = p._scan_cache_path()
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text("{not json", encoding="utf-8")
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            st = await p.get_last_scan()
+            self.assertEqual(st["games"], [])
+        asyncio.run(go())
+
     def test_cancel_scan(self):
         self._version_dir()
         home = make_steam_home(self.tmp)

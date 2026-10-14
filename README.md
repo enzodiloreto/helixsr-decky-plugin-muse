@@ -25,6 +25,10 @@ On your Deck (or desktop Steam with Decky), Decky > Settings > Developer >
 2. **Games**: **Scan games** walks your Steam libraries for DLSS / XeSS / FSR titles.
    Pick the install way per game (FSR 3.1 drop-in, OptiScaler, or the experimental
    DLSS loader) instead of the default where it matters.
+   **Install in / Remove from** each game as needed. Per-game **Settings** edit
+   `helixsr.ini` inline (no separate page to go back from).
+   The last scan is remembered between panel opens (with its age),
+   including install/remove changes; rescan after adding games or switching versions.
    **Install in / Remove from** each game as needed.
 3. **Settings** (installed games): sharpening (off / NVIDIA / RCAS + strength),
    game-slider following, and WaveSize (64 for RX 7000 / 9000 in OptiScaler games

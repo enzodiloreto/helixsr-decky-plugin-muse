@@ -66,6 +66,14 @@ export interface ScanStatus {
   skipped: number;
 }
 
+export interface ScanCache {
+  ok: boolean;
+  games: HelixGame[];
+  tag: string;
+  skipped: number;
+  scanned_at: number;
+}
+
 export const apiGetReleases = callable<[], { releases: HelixRelease[]; error: string }>("get_releases");
 export const apiGetState = callable<[], HelixState>("get_state");
 export const apiSetActiveVersion = callable<[tag: string], HelixState>("set_active_version");
@@ -75,6 +83,7 @@ export const apiGetDownloadStatus = callable<[], DownloadStatus>("get_download_s
 export const apiStartScan = callable<[], { ok: boolean; error?: string }>("start_scan");
 export const apiCancelScan = callable<[], { ok: boolean; error?: string }>("cancel_scan");
 export const apiGetScanStatus = callable<[], ScanStatus>("get_scan_status");
+export const apiGetLastScan = callable<[], ScanCache>("get_last_scan");
 export const apiInstallGames = callable<[indices: number[], route: string], { ok: boolean; output: string; rc?: number }>("install_games");
 export const apiGetGameSettings = callable<[index: number], { ok: boolean; path?: string; values?: GameSettings; note?: string; error?: string }>("get_game_settings");
 export const apiSetGameSettings = callable<[index: number, values: GameSettings], { ok: boolean; output?: string; path?: string }>("set_game_settings");

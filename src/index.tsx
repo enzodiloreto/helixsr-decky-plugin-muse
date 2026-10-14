@@ -22,11 +22,13 @@ import {
   HelixState,
   DownloadStatus,
   GameSettings,
+  ScanCache,
   ScanStatus,
   apiCancelScan,
   apiGetBuildStatus,
   apiGetDownloadStatus,
   apiGetGameSettings,
+  apiGetLastScan,
   apiGetReleases,
   apiGetScanStatus,
   apiGetState,
@@ -43,6 +45,17 @@ import { PLUGIN_VERSION } from "./version";
 
 function fmtSize(n: number) {
   return `${(n / 1e6).toFixed(1)} MB`;
+}
+
+function fmtAge(epochSec: number) {
+  if (!epochSec) return "some time ago";
+  const s = Math.max(0, Date.now() / 1000 - epochSec);
+  if (s < 90) return "just now";
+  const m = Math.floor(s / 60);
+  if (m < 90) return `${m} min ago`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h} h ago`;
+  return `${Math.floor(h / 24)} d ago`;
 }
 
 const ROUTE_LABELS: Record<string, string> = {
@@ -117,6 +130,21 @@ function Content() {
         setState(s);
         setPicked(s.active_tag || s.versions[0]?.tag || relsRes.releases[0]?.tag || "");
         if (relsRes.error) setOutput(`Failed to load HelixSR releases: ${relsRes.error}`);
+        try {
+          const cached: ScanCache = await apiGetLastScan();
+          if (cached.games.length) {
+            setGames(cached.games);
+            setGamesTag(cached.tag || "");
+            const rm: Record<number, string> = {};
+            cached.games.forEach((g) => { rm[g.index] = g.route; });
+            setRoutes(rm);
+            if (!relsRes.error) {
+              const tagNote = s.active_tag && cached.tag && cached.tag !== s.active_tag
+                ? ` (scanned with ${cached.tag})` : "";
+              setOutput(`Showing games scanned ${fmtAge(cached.scanned_at)}${tagNote} — Scan to refresh.`);
+            }
+          }
+        } catch { /* no cached scan yet */ }
       } catch (e) {
         console.error("[helixsr] init failed", e);
       }
@@ -190,6 +218,8 @@ function Content() {
           if (st.ok) {
             setGames(st.games);
             setGamesTag(st.tag || "");
+            setIniFor(null);
+            setIni(null);
             const rm: Record<number, string> = {};
             st.games.forEach((g) => { rm[g.index] = g.route; });
             setRoutes(rm);
@@ -377,7 +407,6 @@ function Content() {
     label: `${r.tag} — ${r.published_at} — ${fmtSize(r.size)}${downloadedTags.has(r.tag) ? " ✓" : ""}`,
   }));
   const buildProg = building ? parseBuildProgress(output) : null;
-  const iniGame = iniFor !== null ? games.find((g) => g.index === iniFor) : undefined;
 
   return (
     <div>
@@ -465,7 +494,7 @@ function Content() {
             </div>
           </PanelSectionRow>
         )}
-        {iniFor === null ? games.map((g) => (
+        {games.map((g) => (
           <div key={g.index}>
             <PanelSectionRow>
               <ButtonItem
@@ -487,78 +516,79 @@ function Content() {
                 />
               </PanelSectionRow>
             )}
-            {g.installed && (
+            {g.installed && iniFor !== g.index && (
               <PanelSectionRow>
                 <ButtonItem layout="below" disabled={busy !== "" || scanning} onClick={() => onOpenIni(g)}>
                   {`Settings — ${g.name}`}
                 </ButtonItem>
               </PanelSectionRow>
             )}
+            {g.installed && iniFor === g.index && ini && (
+              <div>
+                <PanelSectionRow>
+                  <div style={{ fontSize: 12 }}>{iniPath}</div>
+                </PanelSectionRow>
+                <PanelSectionRow>
+                  <DropdownItem
+                    label="Sharpener"
+                    description="NVIDIA's filter, AMD FSR's RCAS, or off (as DLSS)"
+                    rgOptions={[
+                      { data: "off", label: "Off" },
+                      { data: "nvidia", label: "NVIDIA" },
+                      { data: "rcas", label: "RCAS (AMD)" },
+                    ]}
+                    selectedOption={ini.Sharpener}
+                    onChange={(o) => setIni({ ...ini, Sharpener: String(o.data) })}
+                  />
+                </PanelSectionRow>
+                <PanelSectionRow>
+                  <SliderField
+                    label="Sharpness"
+                    description="Used when a sharpener is on (0.5 is NVIDIA's default)"
+                    value={parseFloat(ini.Sharpness)}
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    showValue
+                    disabled={ini.Sharpener === "off"}
+                    onChange={(v: number) => setIni({ ...ini, Sharpness: String(Math.round(v * 100) / 100) })}
+                  />
+                </PanelSectionRow>
+                <PanelSectionRow>
+                  <ToggleField
+                    label="Use game slider"
+                    description="Follow the game's sharpness slider, if it has one"
+                    checked={ini.UseGameSlider === "true"}
+                    onChange={(c: boolean) => setIni({ ...ini, UseGameSlider: c ? "true" : "false" })}
+                  />
+                </PanelSectionRow>
+                <PanelSectionRow>
+                  <DropdownItem
+                    label="WaveSize"
+                    description="64 for RX 7000 / 9000 in OptiScaler games if the log says wave32"
+                    rgOptions={[
+                      { data: "default", label: "Default" },
+                      { data: "64", label: "64" },
+                      { data: "32", label: "32" },
+                    ]}
+                    selectedOption={ini.WaveSize}
+                    onChange={(o) => setIni({ ...ini, WaveSize: String(o.data) })}
+                  />
+                </PanelSectionRow>
+                <PanelSectionRow>
+                  <ButtonItem layout="below" disabled={busy !== ""} onClick={onSaveIni}>
+                    Save settings
+                  </ButtonItem>
+                </PanelSectionRow>
+                <PanelSectionRow>
+                  <ButtonItem layout="below" onClick={() => { setIniFor(null); setIni(null); }}>
+                    Close settings
+                  </ButtonItem>
+                </PanelSectionRow>
+              </div>
+            )}
           </div>
-        )) : (
-          <div>
-            <PanelSectionRow>
-              <div style={{ fontSize: 12 }}>{iniPath}</div>
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <DropdownItem
-                label="Sharpener"
-                description="NVIDIA's filter, AMD FSR's RCAS, or off (as DLSS)"
-                rgOptions={[
-                  { data: "off", label: "Off" },
-                  { data: "nvidia", label: "NVIDIA" },
-                  { data: "rcas", label: "RCAS (AMD)" },
-                ]}
-                selectedOption={ini?.Sharpener || "off"}
-                onChange={(o) => setIni({ ...(ini as GameSettings), Sharpener: String(o.data) })}
-              />
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <SliderField
-                label="Sharpness"
-                description="Used when a sharpener is on (0.5 is NVIDIA's default)"
-                value={parseFloat(ini?.Sharpness || "0.5")}
-                min={0}
-                max={1}
-                step={0.05}
-                showValue
-                disabled={(ini?.Sharpener || "off") === "off"}
-                onChange={(v: number) => setIni({ ...(ini as GameSettings), Sharpness: String(Math.round(v * 100) / 100) })}
-              />
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <ToggleField
-                label="Use game slider"
-                description="Follow the game's sharpness slider, if it has one"
-                checked={(ini?.UseGameSlider || "false") === "true"}
-                onChange={(c: boolean) => setIni({ ...(ini as GameSettings), UseGameSlider: c ? "true" : "false" })}
-              />
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <DropdownItem
-                label="WaveSize"
-                description="64 for RX 7000 / 9000 in OptiScaler games if the log says wave32"
-                rgOptions={[
-                  { data: "default", label: "Default" },
-                  { data: "64", label: "64" },
-                  { data: "32", label: "32" },
-                ]}
-                selectedOption={ini?.WaveSize || "default"}
-                onChange={(o) => setIni({ ...(ini as GameSettings), WaveSize: String(o.data) })}
-              />
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <ButtonItem layout="below" disabled={busy !== "" || !ini} onClick={onSaveIni}>
-                Save settings
-              </ButtonItem>
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <ButtonItem layout="below" onClick={() => { setIniFor(null); setIni(null); }}>
-                {`Back to games${iniGame ? ` (${iniGame.name})` : ""}`}
-              </ButtonItem>
-            </PanelSectionRow>
-          </div>
-        )}
+        ))}
       </PanelSection>
       {output && (
         <PanelSection title="Log">
