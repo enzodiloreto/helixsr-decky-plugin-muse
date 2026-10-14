@@ -117,6 +117,21 @@ function Content() {
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
   const [showMode, setShowMode] = useState<string>("all");
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({ installed: false, not: false });
+  // Collapsible panel sections: explicit user choice sticks; otherwise the
+  // section for the current guided step is open (plus update alerts).
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const isOpen = (key: string, auto: boolean) =>
+    collapsed[key] === true ? false : collapsed[key] === false ? true : auto;
+  const sectionToggle = (key: string, auto: boolean) => (
+    <PanelSectionRow>
+      <MButton
+        variant="text"
+        onClick={() => setCollapsed({ ...collapsed, [key]: isOpen(key, auto) })}
+      >
+        {isOpen(key, auto) ? "Collapse section" : "Expand section"}
+      </MButton>
+    </PanelSectionRow>
+  );
   const [health, setHealth] = useState<HealthCheck[] | null>(null);
   const [migrating, setMigrating] = useState<boolean>(false);
   const [mig, setMig] = useState<MigrationStatus | null>(null);
@@ -1027,6 +1042,30 @@ function Content() {
   const downloadedVersions = (state?.versions || []).filter((v) => downloadedTags.has(v.tag));
   const totalMB = downloadedVersions.reduce((a, v) => a + (v.size_mb || 0), 0);
   const buildProg = building ? parseBuildProgress(output) : null;
+  // Live operation reflected in the hero so deep-scrolled users see state.
+  const heroOp = downloading
+    ? {
+        text: `Downloading ${dl?.tag || ""} — ${dl && dl.total > 0 ? `${Math.floor((100 * dl.downloaded) / dl.total)}%${dlRate ? ` · ${dlRate}` : ""}` : "starting…"}`,
+        pct: dl && dl.total > 0 ? Math.min(100, (100 * dl.downloaded) / dl.total) : null,
+      }
+    : building
+    ? {
+        text: buildProg ? `Building — ${buildProg.pct}% · ${buildProg.label}` : "Building network…",
+        pct: buildProg?.pct ?? null,
+      }
+    : scanning
+    ? { text: "Scanning games…", pct: null }
+    : migrating
+    ? {
+        text: mig && mig.total > 0 ? `Migrating ${mig.current}/${mig.total}${mig.current_name ? ` · ${mig.current_name}` : ""}…` : "Starting migration…",
+        pct: mig && mig.total > 0 ? Math.min(100, (100 * mig.current) / mig.total) : null,
+      }
+    : updating
+    ? {
+        text: `Updating plugin${pu && pu.total > 0 ? ` — ${Math.floor((100 * pu.downloaded) / pu.total)}%` : "…"}`,
+        pct: pu && pu.total > 0 ? Math.min(100, (100 * pu.downloaded) / pu.total) : null,
+      }
+    : null;
   const newestRelease = releases.length ? releases[0] : null;
   const updateAvailable = newestRelease && ![...downloadedTags].some((t) => cmpTags(t, newestRelease.tag) >= 0);
   const step = !state || !state.versions.length ? 1 : !activeVersion?.network_built ? 2 : !games.length ? 3 : 4;
@@ -1065,6 +1104,14 @@ function Content() {
         <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.sm }}>
           Step {step}/4 — {STEP_TEXT[step]}
         </div>
+        {heroOp && (
+          <div style={{ marginTop: M3.space.sm }}>
+            {heroOp.pct === null
+              ? <ProgressBar indeterminate nTransitionSec={M3.motion.bar} />
+              : <ProgressBar nProgress={heroOp.pct} nTransitionSec={M3.motion.bar} />}
+            <div style={{ ...M3.type.caption, marginTop: M3.space.xs, fontVariantNumeric: M3.tabular }}>{heroOp.text}</div>
+          </div>
+        )}
       </Card>
       {state && state.update_pending ? (
         <Card tone="primary" radius={M3.shape.md} style={{ marginBottom: M3.space.md }}>
@@ -1095,6 +1142,8 @@ function Content() {
         </PanelSection>
       )}
       <PanelSection title="1 · Version">
+        {sectionToggle("version", step === 1)}
+        {isOpen("version", step === 1) && (<>
         {updateAvailable && newestRelease && (
           <PanelSectionRow>
             <Card tone="tertiary" radius={M3.shape.md}>
@@ -1159,9 +1208,12 @@ function Content() {
             </MButton>
           </PanelSectionRow>
         )}
+        </>)}
       </PanelSection>
       {hasVersions && (
       <PanelSection title="2 · Network build">
+        {sectionToggle("network", step === 2)}
+        {isOpen("network", step === 2) && (<>
         <PanelSectionRow>
           <MButton
             
@@ -1185,10 +1237,13 @@ function Content() {
             </div>
           </PanelSectionRow>
         )}
+        </>)}
       </PanelSection>
       )}
       {hasVersions && (
       <PanelSection title="3 · Games">
+        {sectionToggle("games", step >= 3)}
+        {isOpen("games", step >= 3) && (<>
         <PanelSectionRow>
           <MButton
             
@@ -1535,10 +1590,13 @@ function Content() {
             )}
           </Fragment>
         ))}
+        </>)}
       </PanelSection>
       )}
       {hasVersions && (
       <PanelSection title="Folders">
+        {sectionToggle("folders", false)}
+        {isOpen("folders", false) && (<>
         <PanelSectionRow>
           <TextField
             label="Extra game folder"
@@ -1559,10 +1617,13 @@ function Content() {
             </MButton>
           </PanelSectionRow>
         ))}
+        </>)}
       </PanelSection>
       )}
       {hasVersions && (
       <PanelSection title="Storage">
+        {sectionToggle("storage", false)}
+        {isOpen("storage", false) && (<>
         <PanelSectionRow>
           <div style={{ ...M3.type.title }}>Total {totalMB.toFixed(1)} MB in {downloadedVersions.length} version(s)</div>
         </PanelSectionRow>
@@ -1586,9 +1647,12 @@ function Content() {
             {confirm === "reset everything" ? "Confirm reset all?" : "Reset everything"}
           </MButton>
         </PanelSectionRow>
+        </>)}
       </PanelSection>
       )}
       <PanelSection title="Health">
+        {sectionToggle("health", false)}
+        {isOpen("health", false) && (<>
         <PanelSectionRow>
           <MButton  disabled={busy !== ""} variant="tonal" onClick={onHealth}>
             Run health check
@@ -1602,8 +1666,11 @@ function Content() {
             </div>
           </PanelSectionRow>
         ))}
+        </>)}
       </PanelSection>
       <PanelSection title="Plugin update">
+        {sectionToggle("pluginupdate", !!(puCheck?.update_available || updating))}
+        {isOpen("pluginupdate", !!(puCheck?.update_available || updating)) && (<>
         {puCheck?.update_available && !updating && !(pu?.done && pu?.ok) && (
           <PanelSectionRow>
             <div style={{ fontSize: 12 }}>v{puCheck.latest} available (you run v{puCheck.current}).</div>
@@ -1657,6 +1724,7 @@ function Content() {
             </MButton>
           </PanelSectionRow>
         )}
+        </>)}
       </PanelSection>
       {state?.plugin_version && (
         <PanelSectionRow>
