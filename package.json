@@ -1,6 +1,6 @@
 {
   "name": "helixsr-decky-plugin-muse",
-  "version": "0.0.12",
+  "version": "0.0.13",
   "description": "HelixSR Decky plugin.",
   "type": "module",
   "scripts": {

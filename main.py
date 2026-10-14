@@ -135,6 +135,18 @@ def _repair_exec_bits(d: Path) -> list[str]:
     return fixed
 
 
+def _free_bytes(p: Path) -> int:
+    q = p
+    while not q.exists():
+        if q.parent == q:
+            return 0
+        q = q.parent
+    try:
+        return shutil.disk_usage(q).free
+    except OSError:
+        return 0
+
+
 def _status_for(route, inputs):
     """Status text mirroring helixscan.Game.label (kept in sync by hand)."""
     if route == "dlss":
@@ -144,6 +156,38 @@ def _status_for(route, inputs):
     if route == "optiscaler":
         return " / ".join(inputs) + " (through OptiScaler: select DLSS in the game)"
     return route or "compatible"
+
+
+def _marker_versions(g) -> set:
+    """HelixSR versions recorded in a game's install markers (per route)."""
+    out = set()
+    paths = []
+    if g.target is not None:
+        paths.append(g.target / helixscan.FOLDER / helixscan.MARKER)
+    for t in g.fsr_targets:
+        paths.append(t.parent / helixscan.MARKER)
+    for p in paths:
+        try:
+            rec = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict) and rec.get("helixsr"):
+            out.add(str(rec["helixsr"]))
+    return out
+
+
+def _dir_size(d: Path) -> int:
+    total = 0
+    try:
+        for root, _dirs, files in os.walk(d):
+            for n in files:
+                try:
+                    total += (Path(root) / n).stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
 
 
 def _plugin_version() -> str:
@@ -185,7 +229,7 @@ def _new_scan_state() -> dict:
 
 
 def _empty_scan_cache() -> dict:
-    return {"dir": "", "games": [], "tag": "", "time": 0.0}
+    return {"dir": "", "games": [], "tag": "", "extra": [], "time": 0.0}
 
 
 # Reuse a scan for install/uninstall while it is fresh (a full library walk
@@ -329,6 +373,12 @@ def _set_ini_value(text: str, section: str, key: str, value: str) -> str:
     return text2
 
 
+def _new_mig_state() -> dict:
+    return {"running": False, "done": False, "ok": False, "error": "",
+            "tag": "", "total": 0, "current": 0, "current_name": "",
+            "results": []}
+
+
 class Plugin:
     async def get_releases(self) -> dict:
         def _fetch():
@@ -358,7 +408,8 @@ class Plugin:
                 out.append({"tag": tag, "name": r.get("name", tag),
                             "published_at": r.get("published_at", "")[:10],
                             "zip_name": a["name"], "zip_url": a["browser_download_url"],
-                            "size": a.get("size", 0)})
+                            "size": a.get("size", 0),
+                            "body": (r.get("body") or "")[:2000]})
             return {"releases": out, "error": ""}
         return await asyncio.to_thread(_fetch)
 
@@ -372,11 +423,35 @@ class Plugin:
                     dll_version = "?"
                 versions.append({"tag": _tag_of_dir(d), "dir": d.name,
                                  "network_built": helixscan.network_ready(d),
-                                 "dll_version": dll_version})
+                                 "dll_version": dll_version,
+                                 "size_mb": round(_dir_size(d) / 1e6, 1)})
             return {"active_tag": self.settings.getSetting("active_tag", ""),
                     "versions": versions, "root": str(_helixsr_root()),
-                    "plugin_version": _plugin_version()}
+                    "plugin_version": _plugin_version(),
+                    "extra_folders": self._extra_folders()}
         return await asyncio.to_thread(_state)
+
+    async def add_scan_folder(self, path: str) -> dict:
+        """Add a hand-picked game folder to every scan (persisted)."""
+        cleaned = helixscan.clean_path(str(path or ""))
+        d = Path(cleaned).expanduser()
+        if not d.is_dir():
+            return {"ok": False, "error": f"not a folder: {cleaned}"}
+        try:
+            key = str(d.resolve())
+        except OSError:
+            return {"ok": False, "error": f"cannot resolve: {cleaned}"}
+        folders = [f for f in self._extra_folders() if f != key]
+        folders.append(key)
+        self.settings.setSetting("extra_folders", folders)
+        self.settings.commit()
+        return {"ok": True, "folders": folders}
+
+    async def remove_scan_folder(self, path: str) -> dict:
+        folders = [f for f in self._extra_folders() if f != str(path or "")]
+        self.settings.setSetting("extra_folders", folders)
+        self.settings.commit()
+        return {"ok": True, "folders": folders}
 
     async def set_active_version(self, tag: str) -> dict:
         self.settings.setSetting("active_tag", tag)
@@ -449,16 +524,232 @@ class Plugin:
 
     async def remove_version(self, tag: str) -> dict:
         def _rm():
-            d = _dir_for_tag(tag)
-            if d is None:
-                return {"ok": False, "error": "not downloaded"}
-            shutil.rmtree(d, ignore_errors=True)
-            if self.settings.getSetting("active_tag") == tag:
-                rest = _version_dirs()
-                self.settings.setSetting("active_tag", _tag_of_dir(rest[0]) if rest else "")
-                self.settings.commit()
-            return {"ok": True}
+            with self._ops_lock:
+                d = _dir_for_tag(tag)
+                if d is None:
+                    return {"ok": False, "error": "not downloaded"}
+                users = self._version_users(d)
+                if users:
+                    return {"ok": False, "error":
+                            f"still used by {', '.join(users)}: remove HelixSR from those games first"}
+                freed = _dir_size(d)
+                shutil.rmtree(d, ignore_errors=True)
+                if self.settings.getSetting("active_tag") == tag:
+                    rest = _version_dirs()
+                    self.settings.setSetting("active_tag", _tag_of_dir(rest[0]) if rest else "")
+                    self.settings.commit()
+                return {"ok": True, "freed_mb": round(freed / 1e6, 1)}
         return await asyncio.to_thread(_rm)
+
+    def _version_users(self, d: Path) -> list:
+        """Names of installed games whose markers record this version's DLL.
+        Call with _ops_lock held. Unknown DLL version matches nothing."""
+        try:
+            want = helixscan.version_of(d / "amd_fidelityfx_dx12.dll")
+        except OSError:
+            return []
+        if want == "?":
+            return []
+        users = []
+        for g in self._resolve_games(d, self._extra_folders()):
+            try:
+                installed = g.installed()
+            except Exception:  # noqa: BLE001
+                installed = False
+            if installed and want in _marker_versions(g):
+                users.append(g.name)
+        return users
+
+    async def remove_old_versions(self, keep_tag: str | None = None) -> dict:
+        """Delete downloaded versions except keep_tag (default: active)."""
+        def _rm():
+            with self._ops_lock:
+                keep = keep_tag or self.settings.getSetting("active_tag", "")
+                removed, skipped, freed = [], [], 0
+                for d in _version_dirs():
+                    tag = _tag_of_dir(d)
+                    if keep and tag == keep:
+                        continue
+                    users = self._version_users(d)
+                    if users:
+                        skipped.append(f"{tag} (used by {', '.join(users)})")
+                        continue
+                    freed += _dir_size(d)
+                    shutil.rmtree(d, ignore_errors=True)
+                    removed.append(tag)
+                tags = [_tag_of_dir(x) for x in _version_dirs()]
+                active = self.settings.getSetting("active_tag", "")
+                if active and active not in tags:
+                    self.settings.setSetting("active_tag", tags[0] if tags else "")
+                    self.settings.commit()
+                return {"ok": True, "removed": removed, "skipped": skipped,
+                        "freed_mb": round(freed / 1e6, 1)}
+        return await asyncio.to_thread(_rm)
+
+    async def clear_dlss_cache(self) -> dict:
+        """Delete once-used NVIDIA DLLs kept for retry in every version dir."""
+        def _rm():
+            cleared, freed = [], 0
+            for d in _version_dirs():
+                p = d / DLSS_FILE
+                try:
+                    if p.is_file():
+                        freed += p.stat().st_size
+                        p.unlink()
+                        cleared.append(f"{_tag_of_dir(d)}/{DLSS_FILE}")
+                except OSError:
+                    pass
+            return {"ok": True, "cleared": cleared, "freed_mb": round(freed / 1e6, 1)}
+        return await asyncio.to_thread(_rm)
+
+    async def check_build_ready(self, tag: str | None = None) -> dict:
+        """Fast pre-build checklist (no downloads, no writes)."""
+        d = _dir_for_tag(tag) if tag else await self._active_dir()
+        if d is None:
+            return {"ok": False, "error": "no HelixSR version downloaded", "checks": []}
+        return await asyncio.to_thread(self._check_build_ready_run, d)
+
+    def _check_build_ready_run(self, d: Path) -> dict:
+        import glob
+        checks = []
+        home = Path(os.environ.get("DECKY_USER_HOME") or Path.home())
+        data = Path(os.environ.get("XDG_DATA_HOME") or home / ".local" / "share") / "HelixSR"
+        # Python 3 + numpy, same preference order as helixsr-setup.sh.
+        cands = []
+        portable = data / "python" / "bin" / "python3"
+        if portable.is_file():
+            cands.append(str(portable))
+        cands.append("python3")
+        py, py_detail = "", ""
+        for c in cands:
+            try:
+                p = subprocess.run([c, "-c", "import numpy, sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)"],
+                                   capture_output=True, timeout=90)
+                if p.returncode == 0:
+                    py = c
+                    break
+                py_detail = f"{c}: no numpy"
+            except (OSError, subprocess.SubprocessError):
+                py_detail = f"{c}: not usable"
+        if py:
+            checks.append({"name": "Python 3 + numpy", "ok": True, "detail": py})
+        else:
+            checks.append({"name": "Python 3 + numpy", "ok": False,
+                           "detail": py_detail or "none found (setup downloads a portable Python)"})
+        # Shader compiler: Proton/Wine, same search order as helixsr-setup.sh.
+        wine = ""
+        for pat in ("./local/share/Steam/steamapps/common/Proton*/files/bin/wine",
+                    ".steam/steam/steamapps/common/Proton*/files/bin/wine",
+                    "./local/share/Steam/compatibilitytools.d/*/files/bin/wine",
+                    ".steam/root/compatibilitytools.d/*/files/bin/wine"):
+            for p in sorted(glob.glob(str(home / pat))):
+                if os.access(p, os.X_OK):
+                    wine = p
+                    break
+            if wine:
+                break
+        if not wine:
+            wine = shutil.which("wine") or ""
+        checks.append({"name": "Proton/Wine (shader compiler)", "ok": bool(wine),
+                       "detail": wine or "install Proton in Steam or Wine"})
+        # Disk space on both filesystems the setup writes to.
+        free_rt = _free_bytes(_helixsr_root())
+        free_data = _free_bytes(data if data.is_dir() else home)
+        need_dlss = not (d / DLSS_FILE).is_file() or _sha256_file(d / DLSS_FILE) != DLSS_SHA256
+        detail = (f"runtime {free_rt / 1e9:.1f} GB free, setup data {free_data / 1e9:.1f} GB free"
+                  + ("; ~56 MB DLSS download needed" if need_dlss else "; DLSS DLL already verified"))
+        checks.append({"name": "Disk space", "ok": free_rt > 500_000_000 and free_data > 500_000_000,
+                       "detail": detail})
+        return {"ok": all(c["ok"] for c in checks), "checks": checks}
+
+    async def start_migration(self, target_tag: str) -> dict:
+        """Move every game installed with another version to target_tag's
+        build, in a background thread; poll get_migration_status()."""
+        if self._mig["running"]:
+            return {"ok": False, "error": "a migration is already running"}
+        if self._build_thread and self._build_thread.is_alive():
+            return {"ok": False, "error": "a build is running: migrate after it finishes"}
+        target = _dir_for_tag(target_tag)
+        if target is None:
+            return {"ok": False, "error": f"not downloaded: {target_tag}"}
+        if not helixscan.network_ready(target):
+            return {"ok": False, "error": f"the network is not built for {target_tag}: run Build first"}
+        try:
+            target_version = helixscan.version_of(target / "amd_fidelityfx_dx12.dll")
+        except OSError:
+            target_version = "?"
+        self._mig = _new_mig_state()
+        self._mig["running"] = True
+        self._mig["tag"] = target_tag
+        threading.Thread(target=self._migration_run,
+                         args=(target, target_tag, target_version, self._extra_folders()),
+                         daemon=True).start()
+        return {"ok": True}
+
+    async def get_migration_status(self) -> dict:
+        st = dict(self._mig)
+        st["results"] = list(st["results"])
+        return st
+
+    def _migration_run(self, target: Path, target_tag: str, target_version: str, extra: list):
+        """Uninstall each outdated game (version-agnostic) and reinstall it
+        into the new build. One game's failure never stops the rest. Markers
+        preserve each game's chosen route, so fresh objects just work."""
+        st = self._mig
+        helixscan.take_log()
+        try:
+            with self._ops_lock:
+                gl, _skipped = helixscan.games(target, extra)
+                todo = []
+                for g in gl:
+                    try:
+                        installed = g.installed()
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if not installed:
+                        continue
+                    have = _marker_versions(g)
+                    if target_version != "?" and target_version in have:
+                        continue
+                    todo.append(g)
+                st["total"] = len(todo)
+                results = []
+                for n, g in enumerate(todo, 1):
+                    if not self._alive:
+                        return
+                    st["current"] = n
+                    st["current_name"] = g.name
+                    decky.logger.info(f"HelixSR migrating {g.name} to {target_tag}")
+                    try:
+                        helixscan.take_log()
+                        helixscan.uninstall(g)
+                        helixscan.install(g, target)
+                        detail = "\n".join(helixscan.take_log())[-2000:]
+                        results.append({"name": g.name, "ok": True, "detail": detail})
+                        st["results"] = list(results)
+                    except SystemExit as e:
+                        results.append({"name": g.name, "ok": False,
+                                        "detail": str(e) or "aborted"})
+                        st["results"] = list(results)
+                    except Exception as e:  # noqa: BLE001
+                        decky.logger.error(f"HelixSR migration of {g.name} failed: {e}")
+                        results.append({"name": g.name, "ok": False,
+                                        "detail": f"{type(e).__name__}: {e}"})
+                        st["results"] = list(results)
+                st["ok"] = all(r["ok"] for r in results)
+                if not results:
+                    st["ok"] = True
+                ok_names = {r["name"] for r in results if r["ok"]}
+                self._update_scan_file(
+                    [(g.name, str(g.folder)) for g in todo if g.name in ok_names],
+                    True, [target_version] if target_version != "?" else None)
+                self._scan_cache = _empty_scan_cache()
+        except Exception as e:  # noqa: BLE001
+            decky.logger.error(f"HelixSR migration failed: {e}")
+            st["error"] = f"{type(e).__name__}: {e}"
+        finally:
+            st["running"] = False
+            st["done"] = True
 
     async def _active_dir(self) -> Path | None:
         tag = self.settings.getSetting("active_tag", "")
@@ -475,6 +766,13 @@ class Plugin:
             d = rest[-1] if rest else None
         return d
 
+    def _extra_folders(self) -> list:
+        try:
+            extra = self.settings.getSetting("extra_folders", [])
+        except Exception:  # noqa: BLE001
+            return []
+        return [str(x) for x in extra] if isinstance(extra, list) else []
+
     async def start_scan(self) -> dict:
         """Scan Steam libraries for compatible games in a background thread; poll get_scan_status()."""
         if self._scan["running"]:
@@ -482,19 +780,24 @@ class Plugin:
         d = await self._active_dir()
         if d is None:
             return {"ok": False, "error": "no HelixSR version downloaded"}
+        extra = self._extra_folders()
         self._scan = _new_scan_state()
         self._scan["running"] = True
         self._scan_stop.clear()
-        threading.Thread(target=self._scan_run, args=(d, _tag_of_dir(d)), daemon=True).start()
+        threading.Thread(target=self._scan_run,
+                         args=(d, _tag_of_dir(d), extra), daemon=True).start()
         return {"ok": True}
 
-    def _scan_run(self, d: Path, tag: str):
+    def _scan_run(self, d: Path, tag: str, extra: list):
         st = self._scan
         try:
+            # Discard stale say() messages: games() narrates (e.g. folders
+            # already listed) and nothing here surfaces them per-scan.
+            helixscan.take_log()
             with self._ops_lock:
-                gl, skipped = helixscan.games(d, stop=self._scan_stop.is_set)
+                gl, skipped = helixscan.games(d, extra, self._scan_stop.is_set)
                 self._scan_cache = {"dir": str(d), "games": gl, "tag": tag,
-                                    "time": time.monotonic()}
+                                    "extra": list(extra), "time": time.monotonic()}
             if self._scan_stop.is_set():
                 st["cancelled"] = True
                 st["error"] = "scan cancelled"
@@ -515,7 +818,8 @@ class Plugin:
                     routes = [g.route] if g.route else []
                 out.append({"index": i, "name": g.name, "folder": str(g.folder),
                             "route": g.route, "available": routes, "inputs": list(g.inputs),
-                            "installed": inst, "status": status})
+                            "installed": inst, "status": status,
+                            "installed_versions": sorted(_marker_versions(g)) if inst else []})
             st["games"] = out
             st["tag"] = tag
             st["skipped"] = skipped
@@ -561,6 +865,8 @@ class Plugin:
                 g.setdefault("inputs", [])
                 if not isinstance(g.get("available"), list) or not g["available"]:
                     g["available"] = [g["route"]] if g.get("route") else []
+                if not isinstance(g.get("installed_versions"), list):
+                    g["installed_versions"] = []
                 g.setdefault("status", _status_for(g.get("route"), g.get("inputs") or []))
                 g.setdefault("installed", False)
                 games.append(g)
@@ -570,7 +876,7 @@ class Plugin:
         except (OSError, ValueError):
             return {"ok": True, "games": [], "tag": "", "skipped": 0, "scanned_at": 0}
 
-    def _update_scan_file(self, targets: list[tuple], installed: bool):
+    def _update_scan_file(self, targets: list[tuple], installed: bool, versions=None):
         """Optimistically refresh install flags in the persisted scan, matched
         by folder (indices may shift between scans)."""
         try:
@@ -589,6 +895,8 @@ class Plugin:
                 g["installed"] = installed
                 g["status"] = "HelixSR installed" if installed else _status_for(
                     g.get("route"), g.get("inputs") or [])
+                if versions is not None:
+                    g["installed_versions"] = list(versions)
                 changed = True
             if changed:
                 p.write_text(json.dumps(payload), encoding="utf-8")
@@ -606,15 +914,17 @@ class Plugin:
     async def uninstall_games(self, indices: list[int]) -> dict:
         return await self._game_op("uninstall", indices)
 
-    def _resolve_games(self, d: Path) -> list:
+    def _resolve_games(self, d: Path, extra: list | None = None) -> list:
         """Cached or fresh Game objects for installs. Call with _ops_lock held."""
+        if extra is None:
+            extra = []
         cached = self._scan_cache
-        if cached["dir"] == str(d) and cached["games"] \
-                and time.monotonic() - cached["time"] < SCAN_CACHE_TTL:
+        if cached["dir"] == str(d) and cached.get("extra", []) == list(extra) \
+                and cached["games"] and time.monotonic() - cached["time"] < SCAN_CACHE_TTL:
             return cached["games"]
-        gl, _skipped = helixscan.games(d)
-        self._scan_cache = {"dir": str(d), "games": gl,
-                            "tag": _tag_of_dir(d), "time": time.monotonic()}
+        gl, _skipped = helixscan.games(d, extra)
+        self._scan_cache = {"dir": str(d), "games": gl, "tag": _tag_of_dir(d),
+                            "extra": list(extra), "time": time.monotonic()}
         return gl
 
     async def _game_op(self, op: str, indices: list[int], route: str | None = None) -> dict:
@@ -625,11 +935,14 @@ class Plugin:
             clean = [int(i) for i in indices]
         except (TypeError, ValueError):
             return {"ok": False, "output": f"bad game numbers: {indices}"}
-        if route is not None and (not isinstance(route, str) or not route):
+        if route is not None and not isinstance(route, str):
             return {"ok": False, "output": f"bad route: {route}"}
-        return await asyncio.to_thread(self._game_op_run, op, d, clean, route)
+        route = route or None
+        extra = self._extra_folders()
+        return await asyncio.to_thread(self._game_op_run, op, d, clean, route, extra)
 
-    def _game_op_run(self, op: str, d: Path, indices: list[int], route: str | None = None) -> dict:
+    def _game_op_run(self, op: str, d: Path, indices: list[int],
+                     route: str | None = None, extra: list | None = None) -> dict:
         """Install/uninstall via the reference implementation, in-process (no
         child process, no prompts): fast file copies, guarded by _ops_lock.
         Reuses a fresh scan so every click doesn't re-walk the libraries."""
@@ -637,7 +950,7 @@ class Plugin:
             with self._ops_lock:
                 if not helixscan.network_ready(d):
                     return {"ok": False, "output": "the network is not built: run Build first"}
-                gl = self._resolve_games(d)
+                gl = self._resolve_games(d, extra or [])
                 targets = []
                 for i in indices:
                     if not 1 <= i <= len(gl):
@@ -981,6 +1294,7 @@ class Plugin:
         self._build_log: Path | None = None
         self._dl = _new_dl_state()
         self._scan = _new_scan_state()
+        self._mig = _new_mig_state()
         self._scan_stop = threading.Event()
         self._scan_cache = _empty_scan_cache()
         self._ops_lock = threading.Lock()

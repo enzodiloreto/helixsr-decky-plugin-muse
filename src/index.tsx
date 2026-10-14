@@ -5,6 +5,7 @@ import {
   PanelSectionRow,
   ProgressBar,
   SliderField,
+  TextField,
   ToggleField,
   staticClasses
 } from "@decky/ui";
@@ -22,22 +23,31 @@ import {
   HelixState,
   DownloadStatus,
   GameSettings,
+  MigrationStatus,
+  ReadinessCheck,
   ScanCache,
   ScanStatus,
+  apiAddScanFolder,
   apiCancelScan,
+  apiCheckBuildReady,
+  apiClearDlssCache,
   apiGetBuildStatus,
   apiGetDownloadStatus,
   apiGetGameSettings,
   apiGetLastScan,
+  apiGetMigrationStatus,
   apiGetReleases,
   apiGetScanStatus,
   apiGetState,
   apiInstallGames,
+  apiRemoveOldVersions,
+  apiRemoveScanFolder,
   apiRemoveVersion,
   apiSetActiveVersion,
   apiSetGameSettings,
   apiStartBuild,
   apiStartDownload,
+  apiStartMigration,
   apiStartScan,
   apiUninstallGames,
 } from "./services/api";
@@ -74,6 +84,20 @@ function parseBuildProgress(log: string): { pct: number; label: string } | null 
   return { pct: Math.min(100, parseInt(last[2], 10)), label: `${last[3]} — ${last[4]}` };
 }
 
+function cmpTags(a: string, b: string): number {
+  // Numeric dotted comparison ignoring a leading "v": v1.9.0 > v1.8.1.
+  const pa = a.replace(/^v/i, "").split(".").map((x) => parseInt(x, 10) || 0);
+  const pb = b.replace(/^v/i, "").split(".").map((x) => parseInt(x, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) < (pb[i] || 0) ? -1 : 1;
+  }
+  return 0;
+}
+
+// True while the panel is open; the plugin-scope build listener below only
+// toasts when it isn't, so completions are announced exactly once.
+let panelOpen = false;
+
 function Content() {
   const [releases, setReleases] = useState<HelixRelease[]>([]);
   const [state, setState] = useState<HelixState | null>(null);
@@ -92,6 +116,9 @@ function Content() {
   const [iniFor, setIniFor] = useState<number | null>(null);
   const [ini, setIni] = useState<GameSettings | null>(null);
   const [iniPath, setIniPath] = useState<string>("");
+  const [migrating, setMigrating] = useState<boolean>(false);
+  const [mig, setMig] = useState<MigrationStatus | null>(null);
+  const [folderInput, setFolderInput] = useState<string>("");
 
   const refreshState = async () => {
     try {
@@ -123,6 +150,7 @@ function Content() {
   };
 
   useEffect(() => {
+    panelOpen = true;
     (async () => {
       try {
         const [relsRes, s] = await Promise.all([apiGetReleases(), apiGetState()]);
@@ -145,6 +173,14 @@ function Content() {
             }
           }
         } catch { /* no cached scan yet */ }
+        try {
+          // Resume polling for operations still running (e.g. panel was closed).
+          const [dl0, sc0, mg0] = await Promise.all([
+            apiGetDownloadStatus(), apiGetScanStatus(), apiGetMigrationStatus()]);
+          if (dl0.running) { setDl(dl0); setDownloading(true); }
+          if (sc0.running) setScanning(true);
+          if (mg0.running) { setMig(mg0); setMigrating(true); }
+        } catch { /* nothing running */ }
       } catch (e) {
         console.error("[helixsr] init failed", e);
       }
@@ -162,6 +198,7 @@ function Content() {
       (window as any).__helixsr_listener = listener;
     })();
     return () => {
+      panelOpen = false;
       const l = (window as any).__helixsr_listener;
       if (l) removeEventListener("helixsr_build_done", l);
     };
@@ -237,6 +274,28 @@ function Content() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scanning]);
 
+  // Poll migration status while a migration runs
+  useEffect(() => {
+    if (!migrating) return;
+    const t = setInterval(async () => {
+      try {
+        const st = await apiGetMigrationStatus();
+        setMig(st);
+        if (st.done) {
+          setMigrating(false);
+          const done = st.results.filter((r) => r.ok).length;
+          const lines = st.results.map((r) => `${r.ok ? "✓" : "✗"} ${r.name}${r.ok ? "" : `: ${r.detail.slice(-300)}`}`);
+          setOutput(`Migration to ${st.tag}: ${done}/${st.results.length} moved.${lines.length ? "\n" + lines.join("\n") : ""}${st.error ? `\n${st.error}` : ""}`);
+          toaster.toast({ title: st.ok ? `Migrated to ${st.tag}` : "Migration finished with errors", body: `${done}/${st.results.length} games` });
+          refreshState();
+          onScan();
+        }
+      } catch { /* ignore */ }
+    }, 1000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [migrating]);
+
   // Poll build log while a build runs
   useEffect(() => {
     if (!building) return;
@@ -306,9 +365,29 @@ function Content() {
     }
   };
 
+  const runReadiness = async (): Promise<ReadinessCheck[] | null> => {
+    const c = await apiCheckBuildReady(activeVersion?.tag || null);
+    const lines = (c.checks || []).map((x) => `${x.ok ? "✓" : "✗"} ${x.name}: ${x.detail}`);
+    setOutput([(c.error || (!c.ok ? "Not ready to build:" : "Ready to build.")), ...lines].join("\n"));
+    return c.ok ? (c.checks || []) : null;
+  };
+
+  const onCheckBuild = async () => {
+    setBusy("ready");
+    try {
+      await runReadiness();
+    } finally {
+      setBusy("");
+    }
+  };
+
   const onBuild = async (rebuild: boolean) => {
     setBusy("build");
     try {
+      if (!(await runReadiness())) {
+        toaster.toast({ title: "Build not ready", body: "see Log" });
+        return;
+      }
       const r = await apiStartBuild(rebuild);
       if (!r.ok) {
         toaster.toast({ title: "Build not started", body: r.error || "" });
@@ -377,6 +456,103 @@ function Content() {
     }
   };
 
+  const onInstallAll = async () => {
+    const targets = games.filter((g) => !g.installed);
+    if (!targets.length) return;
+    setBusy("games-all");
+    try {
+      const r = await apiInstallGames(targets.map((g) => g.index), "");
+      setOutput(r.output);
+      toaster.toast({ title: r.ok ? `Installed in ${targets.length} game(s)` : "Install failed", body: r.ok ? "" : r.output.slice(-200) });
+      if (r.ok) {
+        setGames((gs) => gs.map((x) => (x.installed ? x : { ...x, installed: true, status: "HelixSR installed" })));
+        refreshState();
+      }
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const onRemoveAll = async () => {
+    const targets = games.filter((g) => g.installed);
+    if (!targets.length) return;
+    setBusy("games-all");
+    try {
+      const r = await apiUninstallGames(targets.map((g) => g.index));
+      setOutput(r.output);
+      toaster.toast({ title: r.ok ? `Removed from ${targets.length} game(s)` : "Uninstall failed", body: r.ok ? "" : r.output.slice(-200) });
+      if (r.ok) onScan();
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const onAddFolder = async () => {
+    const path = folderInput.trim();
+    if (!path) return;
+    setBusy("folder");
+    try {
+      const r = await apiAddScanFolder(path);
+      if (!r.ok) {
+        setOutput(r.error || "cannot add folder");
+        return;
+      }
+      setFolderInput("");
+      refreshState();
+      setOutput(`Scan folder added. Rescan to include it.`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const onRemoveFolder = async (path: string) => {
+    setBusy("folder");
+    try {
+      await apiRemoveScanFolder(path);
+      refreshState();
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const onRemoveOld = async () => {
+    setBusy("storage");
+    try {
+      const r = await apiRemoveOldVersions();
+      const lines = [...r.removed.map((t) => `removed ${t}`), ...r.skipped.map((t) => `kept ${t}`)];
+      setOutput(`Freed ${r.freed_mb} MB.\n${lines.join("\n")}`);
+      refreshState();
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const onClearDlss = async () => {
+    setBusy("storage");
+    try {
+      const r = await apiClearDlssCache();
+      setOutput(`Freed ${r.freed_mb} MB.\n${r.cleared.join("\n") || "nothing cached"}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const onMigrate = async () => {
+    if (!activeVersion) return;
+    try {
+      const r = await apiStartMigration(activeVersion.tag);
+      if (!r.ok) {
+        setOutput(r.error || "migration not started");
+        return;
+      }
+      setMigrating(true);
+      setMig(null);
+      setOutput(`Migrating games to ${activeVersion.tag} ...`);
+    } catch (e) {
+      console.error("[helixsr] start_migration failed", e);
+    }
+  };
+
   const onInstall = async (g: HelixGame) => {
     setBusy(`game-${g.index}`);
     try {
@@ -407,6 +583,14 @@ function Content() {
     label: `${r.tag} — ${r.published_at} — ${fmtSize(r.size)}${downloadedTags.has(r.tag) ? " ✓" : ""}`,
   }));
   const buildProg = building ? parseBuildProgress(output) : null;
+  const newestRelease = releases.length ? releases[0] : null;
+  const updateAvailable = newestRelease && ![...downloadedTags].some((t) => cmpTags(t, newestRelease.tag) >= 0);
+  const step = !state || !state.versions.length ? 1 : !activeVersion?.network_built ? 2 : !games.length ? 3 : 4;
+  const STEP_TEXT = ["", "Download a HelixSR release", "Build the network", "Scan your games", "Install into games"];
+  const migCandidates = activeVersion && activeVersion.dll_version && activeVersion.dll_version !== "?"
+    ? games.filter((g) => g.installed && !(g.installed_versions || []).includes(activeVersion.dll_version))
+    : [];
+  const downloadedVersions = (state?.versions || []).filter((v) => downloadedTags.has(v.tag));
 
   return (
     <div>
@@ -422,6 +606,14 @@ function Content() {
       )}
       <PanelSection title="Version">
         <PanelSectionRow>
+          <div style={{ fontSize: 12 }}>Step {step}/4 — {STEP_TEXT[step]}</div>
+        </PanelSectionRow>
+        {updateAvailable && newestRelease && (
+          <PanelSectionRow>
+            <div style={{ fontSize: 12 }}>Update available: {newestRelease.tag} — select it below to download.</div>
+          </PanelSectionRow>
+        )}
+        <PanelSectionRow>
           <DropdownItem
             label="HelixSR release"
             description={activeVersion ? `Active: ${activeVersion.tag} (network ${activeVersion.network_built ? "built" : "NOT built"})` : "No version downloaded yet"}
@@ -430,6 +622,11 @@ function Content() {
             onChange={(o) => setPicked(String(o.data))}
           />
         </PanelSectionRow>
+        {pickedRelease && !pickedDownloaded && pickedRelease.body && (
+          <PanelSectionRow>
+            <div style={{ whiteSpace: "pre-wrap", fontSize: 12, maxHeight: 160, overflowY: "auto" }}>{pickedRelease.body.slice(0, 800)}</div>
+          </PanelSectionRow>
+        )}
         <PanelSectionRow>
           <ButtonItem layout="below" disabled={busy !== "" || !releases.length} onClick={() => refreshReleases()}>
             Reload releases
@@ -464,6 +661,11 @@ function Content() {
             {building ? "Building network ..." : activeVersion?.network_built ? "Rebuild network (setup.sh)" : "Build network (setup.sh)"}
           </ButtonItem>
         </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" disabled={busy !== "" || building || !activeVersion} onClick={onCheckBuild}>
+            Check build readiness
+          </ButtonItem>
+        </PanelSectionRow>
         {building && buildProg && (
           <PanelSectionRow>
             <div style={{ width: "100%" }}>
@@ -492,6 +694,37 @@ function Content() {
               <ProgressBar indeterminate={true} />
               <div style={{ fontSize: 12, marginTop: 4 }}>Walking Steam libraries — this can take a few minutes on large collections ...</div>
             </div>
+          </PanelSectionRow>
+        )}
+        {migCandidates.length > 0 && activeVersion && !migrating && (
+          <PanelSectionRow>
+            <ButtonItem layout="below" disabled={busy !== "" || scanning} onClick={onMigrate}>
+              {`Migrate ${migCandidates.length} game(s) to ${activeVersion.tag}`}
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
+        {migrating && (
+          <PanelSectionRow>
+            <div style={{ width: "100%" }}>
+              <ProgressBar nProgress={mig && mig.total > 0 ? Math.min(100, (100 * mig.current) / mig.total) : 0} />
+              <div style={{ fontSize: 12, marginTop: 4 }}>
+                {mig && mig.total > 0 ? `Migrating ${mig.current}/${mig.total}${mig.current_name ? `: ${mig.current_name}` : ""} ...` : "Starting migration ..."}
+              </div>
+            </div>
+          </PanelSectionRow>
+        )}
+        {games.some((g) => !g.installed) && (
+          <PanelSectionRow>
+            <ButtonItem layout="below" disabled={busy !== "" || scanning} onClick={onInstallAll}>
+              Install all listed
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
+        {games.some((g) => g.installed) && (
+          <PanelSectionRow>
+            <ButtonItem layout="below" disabled={busy !== "" || scanning} onClick={onRemoveAll}>
+              Remove all installed
+            </ButtonItem>
           </PanelSectionRow>
         )}
         {games.map((g) => (
@@ -590,6 +823,45 @@ function Content() {
           </div>
         ))}
       </PanelSection>
+      <PanelSection title="Folders">
+        <PanelSectionRow>
+          <TextField
+            label="Extra game folder"
+            description="A game outside Steam libraries (also: drag its folder onto a manual setup run)"
+            value={folderInput}
+            onChange={(e) => setFolderInput((e.target as HTMLInputElement).value)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" disabled={busy !== "" || !folderInput.trim()} onClick={onAddFolder}>
+            Add folder
+          </ButtonItem>
+        </PanelSectionRow>
+        {(state?.extra_folders || []).map((f) => (
+          <PanelSectionRow key={f}>
+            <ButtonItem layout="below" disabled={busy !== ""} description={f} onClick={() => onRemoveFolder(f)}>
+              Remove folder
+            </ButtonItem>
+          </PanelSectionRow>
+        ))}
+      </PanelSection>
+      <PanelSection title="Storage">
+        {(state?.versions || []).filter((v) => downloadedTags.has(v.tag)).map((v) => (
+          <PanelSectionRow key={v.tag}>
+            <div style={{ fontSize: 12 }}>{v.tag} — {v.size_mb} MB on disk{v.tag === state?.active_tag ? " (active)" : ""}</div>
+          </PanelSectionRow>
+        ))}
+        <PanelSectionRow>
+          <ButtonItem layout="below" disabled={busy !== "" || downloadedVersions.length < 2} onClick={onRemoveOld}>
+            Remove all except active
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" disabled={busy !== ""} onClick={onClearDlss}>
+            Clear cached SDK files
+          </ButtonItem>
+        </PanelSectionRow>
+      </PanelSection>
       {output && (
         <PanelSection title="Log">
           <PanelSectionRow>
@@ -611,6 +883,9 @@ export default definePlugin(() => {
 
   const listener = addEventListener<[ok: boolean, rc: number]>("helixsr_build_done", (ok, rc) => {
     console.log("HelixSR build done:", ok, rc)
+    if (!panelOpen) {
+      toaster.toast({ title: ok ? "HelixSR build done" : "HelixSR build failed", body: `rc=${rc}` });
+    }
   });
 
   return {

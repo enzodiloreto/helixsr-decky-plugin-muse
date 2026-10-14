@@ -9,6 +9,7 @@ export interface HelixRelease {
   zip_name: string;
   zip_url: string;
   size: number;
+  body: string;
 }
 
 export interface HelixVersion {
@@ -16,6 +17,7 @@ export interface HelixVersion {
   dir: string;
   network_built: boolean;
   dll_version: string;
+  size_mb: number;
 }
 
 export interface HelixState {
@@ -23,6 +25,7 @@ export interface HelixState {
   versions: HelixVersion[];
   root: string;
   plugin_version: string;
+  extra_folders: string[];
 }
 
 export interface HelixGame {
@@ -34,6 +37,7 @@ export interface HelixGame {
   inputs: string[];
   installed: boolean;
   status: string;
+  installed_versions: string[];
 }
 
 export interface GameSettings {
@@ -74,6 +78,30 @@ export interface ScanCache {
   scanned_at: number;
 }
 
+export interface ReadinessCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface MigrationGameResult {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface MigrationStatus {
+  running: boolean;
+  done: boolean;
+  ok: boolean;
+  error: string;
+  tag: string;
+  total: number;
+  current: number;
+  current_name: string;
+  results: MigrationGameResult[];
+}
+
 export const apiGetReleases = callable<[], { releases: HelixRelease[]; error: string }>("get_releases");
 export const apiGetState = callable<[], HelixState>("get_state");
 export const apiSetActiveVersion = callable<[tag: string], HelixState>("set_active_version");
@@ -89,4 +117,11 @@ export const apiGetGameSettings = callable<[index: number], { ok: boolean; path?
 export const apiSetGameSettings = callable<[index: number, values: GameSettings], { ok: boolean; output?: string; path?: string }>("set_game_settings");
 export const apiUninstallGames = callable<[indices: number[]], { ok: boolean; output: string; rc?: number }>("uninstall_games");
 export const apiStartBuild = callable<[rebuild: boolean], { ok: boolean; log?: string; error?: string }>("start_build");
+export const apiCheckBuildReady = callable<[tag: string | null], { ok: boolean; error?: string; checks: ReadinessCheck[] }>("check_build_ready");
+export const apiStartMigration = callable<[tag: string], { ok: boolean; error?: string }>("start_migration");
+export const apiGetMigrationStatus = callable<[], MigrationStatus>("get_migration_status");
+export const apiRemoveOldVersions = callable<[], { ok: boolean; removed: string[]; skipped: string[]; freed_mb: number }>("remove_old_versions");
+export const apiClearDlssCache = callable<[], { ok: boolean; cleared: string[]; freed_mb: number }>("clear_dlss_cache");
+export const apiAddScanFolder = callable<[path: string], { ok: boolean; folders?: string[]; error?: string }>("add_scan_folder");
+export const apiRemoveScanFolder = callable<[path: string], { ok: boolean; folders?: string[] }>("remove_scan_folder");
 export const apiGetBuildStatus = callable<[], { running: boolean; log: string; log_path: string; network_built: boolean }>("get_build_status");

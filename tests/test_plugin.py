@@ -54,6 +54,7 @@ class PluginCase(unittest.TestCase):
         p._alive = True
         p._dl = main._new_dl_state()
         p._scan = main._new_scan_state()
+        p._mig = main._new_mig_state()
         p._scan_stop = threading.Event()
         p._scan_cache = main._empty_scan_cache()
         p._ops_lock = threading.Lock()
@@ -232,6 +233,141 @@ class PluginCase(unittest.TestCase):
             after = await p.get_last_scan()
             self.assertFalse(after["games"][idx - 1]["installed"])
             self.assertIn("FSR", after["games"][idx - 1]["status"])
+        asyncio.run(go())
+
+    def test_remove_guarded_while_used(self):
+        self._version_dir(tag="9.9.9")
+        home = make_steam_home(self.tmp)
+        os.environ["DECKY_USER_HOME"] = str(home)
+        p = self._plugin()
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            self.assertEqual(await p.start_scan(), {"ok": True})
+            st = await self._wait_done(p.get_scan_status)
+            idx = next(g["index"] for g in st["games"] if g["name"] == "GameB")
+            self.assertEqual(st["games"][idx - 1]["installed_versions"], [])
+            self.assertTrue((await p.install_games([idx], "optiscaler"))["ok"])
+            st2 = await self._rescan(p)
+            self.assertEqual(st2["games"][idx - 1]["installed_versions"], ["9.9.9"])
+            blocked = await p.remove_version("v9.9.9")
+            self.assertFalse(blocked["ok"])
+            self.assertIn("GameB", blocked["error"])
+            self.assertTrue((await p.uninstall_games([idx]))["ok"])
+            allowed = await p.remove_version("v9.9.9")
+            self.assertTrue(allowed["ok"], allowed)
+            self.assertGreaterEqual(allowed.get("freed_mb", 0), 0)
+        asyncio.run(go())
+
+    async def _rescan(self, p):
+        self.assertEqual(await p.start_scan(), {"ok": True})
+        return await self._wait_done(p.get_scan_status)
+
+    def test_remove_old_versions_and_dlss_cache(self):
+        self._version_dir(tag="9.9.8")
+        d9 = self._version_dir(tag="9.9.9")
+        (d9 / "nvngx_dlss.dll").write_bytes(b"Z" * 1000)
+        home = make_steam_home(self.tmp)
+        os.environ["DECKY_USER_HOME"] = str(home)
+        p = self._plugin(active="v9.9.9")
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            c = await p.clear_dlss_cache()
+            self.assertTrue(c["ok"])
+            self.assertEqual(len(c["cleared"]), 1)
+            self.assertFalse((d9 / "nvngx_dlss.dll").exists())
+            r = await p.remove_old_versions()
+            self.assertTrue(r["ok"], r)
+            self.assertEqual(r["removed"], ["v9.9.8"])
+            self.assertEqual(r["skipped"], [])
+            self.assertFalse((self.tmp / "runtime/helixsr/HelixSR-9.9.8").exists())
+            st = await p.get_state()
+            self.assertEqual([v["tag"] for v in st["versions"]], ["v9.9.9"])
+            self.assertGreaterEqual(st["versions"][0]["size_mb"], 0)
+        asyncio.run(go())
+
+    def test_extra_folders(self):
+        self._version_dir(tag="9.9.9")
+        home = make_steam_home(self.tmp)
+        os.environ["DECKY_USER_HOME"] = str(home)
+        side = self.tmp / "side" / "SideGame"
+        (side / "bin").mkdir(parents=True)
+        (side / "bin" / "amd_fidelityfx_upscaler_dx12.dll").write_bytes(b"FSR")
+        (side / "bin" / "game.exe").write_bytes(b"\x00" * 100)
+        p = self._plugin()
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            bad = await p.add_scan_folder(str(self.tmp / "nope"))
+            self.assertFalse(bad["ok"])
+            ok = await p.add_scan_folder(str(side))
+            self.assertTrue(ok["ok"])
+            self.assertEqual(len(ok["folders"]), 1)
+            dup = await p.add_scan_folder(str(side) + "/")
+            self.assertTrue(dup["ok"])
+            self.assertEqual(len(dup["folders"]), 1)
+            self.assertEqual(await p.start_scan(), {"ok": True})
+            st = await self._wait_done(p.get_scan_status)
+            names = [g["name"] for g in st["games"]]
+            self.assertIn("SideGame", names)
+            rm = await p.remove_scan_folder(str(side))
+            self.assertEqual(rm["folders"], [])
+        asyncio.run(go())
+
+    def test_check_build_ready_structure(self):
+        self._version_dir(tag="9.9.9")
+        p = self._plugin()
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            r = await p.check_build_ready("v9.9.9")
+            self.assertIn("checks", r)
+            self.assertEqual([c["name"] for c in r["checks"]],
+                             ["Python 3 + numpy", "Proton/Wine (shader compiler)", "Disk space"])
+            for c in r["checks"]:
+                self.assertIn("ok", c)
+                self.assertIn("detail", c)
+            missing = await p.check_build_ready("v0.0.0")
+            self.assertFalse(missing["ok"])
+        asyncio.run(go())
+
+    def test_migration_moves_games(self):
+        old = self._version_dir(tag="9.9.8")
+        new = self._version_dir(tag="9.9.9")
+        home = make_steam_home(self.tmp)
+        os.environ["DECKY_USER_HOME"] = str(home)
+        p = self._plugin(active="v9.9.8")
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            await self._rescan(p)
+            idx = await self._game_index(p, "GameA")
+            idx_b = await self._game_index(p, "GameB")
+            self.assertTrue((await p.install_games([idx]))["ok"])
+            self.assertTrue((await p.install_games([idx_b], "optiscaler"))["ok"])
+            r = await p.start_migration("v9.9.9")
+            self.assertEqual(r, {"ok": True})
+            for _ in range(400):
+                st = await p.get_migration_status()
+                if st.get("done"):
+                    break
+                await asyncio.sleep(0.05)
+            self.assertTrue(st["done"])
+            self.assertTrue(st["ok"], st)
+            self.assertEqual(st["total"], 2)
+            by_name = {x["name"]: x for x in st["results"]}
+            self.assertTrue(by_name["GameA"]["ok"] and by_name["GameB"]["ok"], st["results"])
+            target = home / ".local/share/lib/steamapps/common/GameA/bin/amd_fidelityfx_upscaler_dx12.dll"
+            self.assertTrue(main.helixscan.is_helixsr(target))
+            marker = json.loads((target.parent / "helixsr-install.json").read_text())
+            self.assertEqual(marker["helixsr"], "9.9.9")
+            marker_b = json.loads((home / ".local/share/lib/steamapps/common/GameB/HelixSR/helixsr-install.json").read_text())
+            self.assertEqual(marker_b["helixsr"], "9.9.9")
+            self.assertEqual(marker_b["route"], "optiscaler")
+            cached = await p.get_last_scan()
+            entry = next(g for g in cached["games"] if g["name"] == "GameA")
+            self.assertEqual(entry["installed_versions"], ["9.9.9"])
         asyncio.run(go())
 
     def test_last_scan_corrupt_is_empty(self):
