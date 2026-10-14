@@ -1216,17 +1216,23 @@ function Content() {
           </PanelSectionRow>
         )}
         <PanelSectionRow>
-          <DropdownItem
-            label="Show"
-            rgOptions={[
-              { data: "all", label: "All games" },
-              { data: "installed", label: "Installed only" },
-              { data: "available", label: "Not installed only" },
-              { data: "repair", label: "Needs repair" },
-            ]}
-            selectedOption={showMode}
-            onChange={(o) => setShowMode(String(o.data))}
-          />
+          <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
+            {([
+              ["all", "All"],
+              ["installed", "Installed"],
+              ["available", "Available"],
+              ["repair", "Repair"],
+            ] as const).map(([mode, label]) => (
+              <MButton
+                key={mode}
+                variant={showMode === mode ? "filled" : "outlined"}
+                onClick={() => setShowMode(mode)}
+                style={{ flex: "1 1 40%", minWidth: 0 }}
+              >
+                {label}
+              </MButton>
+            ))}
+          </div>
         </PanelSectionRow>
         {showMode === "repair" && !verify && (
           <PanelSectionRow>
