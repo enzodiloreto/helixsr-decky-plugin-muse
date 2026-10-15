@@ -54,6 +54,8 @@ class PluginCase(unittest.TestCase):
         p._alive = True
         p._dl = main._new_dl_state()
         p._dl_stop = threading.Event()
+        p._sc = main._new_sc_state()
+        p._sc_stop = threading.Event()
         p._scan = main._new_scan_state()
         p._mig = main._new_mig_state()
         p._update_check = {"at": 0.0, "result": {"ok": True, "update_available": False}}
@@ -353,11 +355,28 @@ class PluginCase(unittest.TestCase):
                          ["--yes", "--rebuild", "--dlss", str(dlss)])
         self.assertEqual(main.Plugin._build_args(modern, False, dlss),
                          ["--yes", "--no-fg", "--dlss", str(dlss)])
+        fg = Path("/x/nvngx_dlssg.dll")
+        self.assertEqual(main.Plugin._build_args(modern, True, dlss, fg),
+                         ["--yes", "--rebuild", "--dlss", str(dlss), "--dlssg", str(fg)])
+        self.assertEqual(main.Plugin._build_args(legacy, False, dlss, fg),
+                         ["--yes", "--dlss", str(dlss)])
         p = self._plugin()
         names = [c["name"] for c in p._check_build_ready_run(legacy)["checks"]]
         self.assertNotIn("Frame generation", names)
         names = [c["name"] for c in p._check_build_ready_run(modern)["checks"]]
         self.assertIn("Frame generation", names)
+        names = [c["name"] for c in p._check_build_ready_run(modern, fg=True)["checks"]]
+        self.assertIn("DLSS Frame Generation DLL", names)
+        self.assertIn("NGX core prerequisites", names)
+
+        async def fg_go():
+            p.loop = asyncio.get_event_loop()
+            legacy_active = self._plugin(active="v9.9.8")
+            legacy_active.loop = asyncio.get_event_loop()
+            r = await legacy_active.start_build(False, True)
+            self.assertFalse(r["ok"])
+            self.assertIn("1.9.0", r["error"])
+        asyncio.run(fg_go())
 
     def test_migration_moves_games(self):
         old = self._version_dir(tag="9.9.8")
@@ -889,6 +908,375 @@ def uninstall(g):
             self.assertIn("skipped", r["output"])
             self.assertIn("NoFsr", r["output"])
         asyncio.run(go())
+
+    SCALER_GAME_MODULE = '''MARKER = "helixsr-install.json"
+LOADER_NAMES = ("dxgi.dll",)
+
+class G:
+    def __init__(self, d):
+        import json
+        from pathlib import Path
+        spec = json.loads((Path(d) / "game.json").read_text())
+        self.name = spec["name"]
+        self.folder = Path(d)
+        self.target = Path(d)
+        self.fsr_targets = [Path(d) / n for n in spec.get("fsr", [])]
+        self.route = spec.get("route") or ("direct" if self.fsr_targets else "unsupported")
+        self.inputs = spec.get("inputs", [])
+
+    def installed(self):
+        import os
+        from pathlib import Path as _P
+        return (_P(self.target) / "HelixSR" / "helixsr-scaler.json").exists()
+
+    def label(self):
+        return "FSR 3.1 game" if self.fsr_targets else "DLSS only game"
+
+    def old_install(self):
+        return None
+
+
+def games(extra):
+    print("[helixsr-setup] scanned")
+    return [G(d) for d in extra]
+
+
+def install(g, here):
+    print(f"[helixsr-setup] installed {g.name}")
+
+
+def uninstall(g):
+    print(f"[helixsr-setup] uninstalled {g.name}")
+'''
+
+    def _scaler_env(self, stag="1.0.3", htag="1.9.0"):
+        root = Path(os.environ["DECKY_PLUGIN_RUNTIME_DIR"])
+        sdir = root / "scaler" / f"HelixSR-Scaler-{stag}"
+        (sdir / "OptiScaler" / "streamline").mkdir(parents=True)
+        (sdir / "OptiScaler.dll").write_bytes(b"OptiScaler fake")
+        (sdir / "OptiScaler.ini").write_text("[HelixSR]\nInt8=auto\nWaveSize=auto\nFrameGeneration=auto\n")
+        (sdir / "setup_linux.sh").write_text("#!/bin/sh\n")
+        (sdir / "OptiScaler" / "streamline" / "sl.dlss.dll").write_bytes(b"sl")
+        (sdir / "HelixSR-Scaler-package.txt").write_text(
+            "OptiScaler.dll\nOptiScaler.ini\nOptiScaler/streamline/sl.dlss.dll\nsetup_linux.sh\n")
+        hdir = root / "helixsr" / f"HelixSR-{htag}"
+        (hdir / "setup").mkdir(parents=True, exist_ok=True)
+        (hdir / "setup/helixsr_setup.py").write_text("# layout marker\n")
+        (hdir / "helixsr-setup.sh").write_text("#!/bin/sh\n")
+        (hdir / "amd_fidelityfx_dx12.dll").write_bytes(
+            b"\x00HelixSR " + htag.encode() + b"\x00" + b"\x00" * 100 + b"HXSRNET1" + b"\x00" * 24)
+        (hdir / "helixsr-fg").mkdir(exist_ok=True)
+        (hdir / "helixsr-fg" / "nvexec64.dll").write_bytes(b"nv")
+        (hdir / "setup/helixsr_install.py").write_text(self.SCALER_GAME_MODULE)
+        return sdir, hdir
+
+    def _stub_json_game(self, name, inputs=("DLSS",), fsr=()):
+        d = self.tmp / f"stub-{name}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "game.json").write_text(json.dumps({"name": name, "fsr": list(fsr),
+                                                 "inputs": list(inputs)}))
+        return str(d)
+
+    def test_scaler_install_uninstall_roundtrip(self):
+        sdir, hdir = self._scaler_env()
+        ga = self._stub_json_game("DlssGame", inputs=["DLSS"])
+        (Path(ga) / "dxgi.dll").write_bytes(b"the game's own dxgi")
+        p = self._plugin(active="v1.9.0")
+        p.settings.setSetting("scaler_tag", "v1.0.3")
+        p.settings.setSetting("extra_folders", [ga])
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            st = await self._rescan(p)
+            self.assertTrue(st["ok"], st.get("error"))
+            idx = {g["name"]: g["index"] for g in st["games"]}
+            r = await p.install_games([idx["DlssGame"]], "scaler")
+            self.assertTrue(r["ok"], r["output"])
+            self.assertIn("WINEDLLOVERRIDES", r["output"])
+            exe = Path(ga)
+            self.assertTrue((exe / "dxgi.dll").is_file())
+            self.assertNotEqual((exe / "dxgi.dll").read_bytes(), b"the game's own dxgi")
+            self.assertTrue((exe / "OptiScaler.ini").is_file())
+            self.assertTrue((exe / "OptiScaler" / "streamline" / "sl.dlss.dll").is_file())
+            self.assertTrue((exe / "HelixSR" / "helixsr.dll").is_file())
+            self.assertTrue((exe / "HelixSR" / "helixsr-fg" / "nvexec64.dll").is_file())
+            self.assertEqual((exe / "HelixSR" / "backup" / "dxgi.dll").read_bytes(),
+                             b"the game's own dxgi")
+            rec = json.loads((exe / "HelixSR" / "helixsr-scaler.json").read_text())
+            self.assertEqual(rec["loader"], "dxgi.dll")
+            self.assertEqual(rec["scaler"], "v1.0.3")
+            self.assertEqual(rec["helixsr"], "1.9.0")
+            self.assertIn("WINEDLLOVERRIDES", rec["launch_options"])
+            # settings roundtrip on the scaler ini
+            s = await p.get_scaler_settings(idx["DlssGame"])
+            self.assertTrue(s["ok"], s.get("error"))
+            self.assertEqual(s["values"], {"Int8": "auto", "WaveSize": "auto",
+                                           "FrameGeneration": "auto"})
+            w = await p.set_scaler_settings(idx["DlssGame"], {"Int8": "on"})
+            self.assertTrue(w["ok"], w.get("output"))
+            s = await p.get_scaler_settings(idx["DlssGame"])
+            self.assertEqual(s["values"]["Int8"], "on")
+            bad = await p.set_scaler_settings(idx["DlssGame"], {"Nope": 1})
+            self.assertFalse(bad["ok"])
+            bad = await p.set_scaler_settings(idx["DlssGame"], {"Int8": "sometimes"})
+            self.assertFalse(bad["ok"])
+            # scan overlay: installed as scaler with launch options
+            st2 = await self._rescan(p)
+            g = next(x for x in st2["games"] if x["name"] == "DlssGame")
+            self.assertTrue(g["installed"])
+            self.assertEqual(g["route"], "scaler")
+            self.assertIn("WINEDLLOVERRIDES", g["launch_options"])
+            self.assertIn("1.9.0", g["installed_versions"])
+            # verify passes, then fails honestly when the loader is deleted
+            v = await p.verify_installs()
+            self.assertTrue(v["ok"])
+            self.assertTrue(v["games"][0]["ok"], v["games"])
+            (exe / "dxgi.dll").unlink()
+            v = await p.verify_installs()
+            self.assertFalse(v["games"][0]["ok"])
+            # uninstall removes everything and restores the backup
+            u = await p.uninstall_games([idx["DlssGame"]])
+            self.assertTrue(u["ok"], u["output"])
+            self.assertEqual((exe / "dxgi.dll").read_bytes(), b"the game's own dxgi")
+            self.assertFalse((exe / "HelixSR").exists())
+            self.assertFalse((exe / "OptiScaler.ini").exists())
+            self.assertFalse((exe / "OptiScaler").exists())
+        asyncio.run(go())
+
+    def test_scaler_install_guards(self):
+        sdir, hdir = self._scaler_env()
+        ga = self._stub_json_game("DlssGame", inputs=["DLSS"])
+        gf = self._stub_json_game("FsrGame", inputs=[], fsr=["up.dll"])
+        p = self._plugin(active="v1.9.0")
+        p.settings.setSetting("scaler_tag", "v1.0.3")
+        p.settings.setSetting("extra_folders", [ga, gf])
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            st = await self._rescan(p)
+            idx = {g["name"]: g["index"] for g in st["games"]}
+            # FSR games are refused (drop-in instead), nothing installed
+            bad = await p.install_games([idx["FsrGame"]], "scaler")
+            self.assertFalse(bad["ok"])
+            self.assertIn("drop-in", bad["output"])
+            # no scaler downloaded
+            p.settings.setSetting("scaler_tag", "")
+            bad = await p.install_games([idx["DlssGame"]], "scaler")
+            self.assertFalse(bad["ok"])
+            self.assertIn("download HelixSR Scaler", bad["output"])
+        asyncio.run(go())
+
+    def test_scaler_migration_versions(self):
+        import types
+        sdir, hdir = self._scaler_env()
+        ga = self._stub_json_game("DlssGame", inputs=["DLSS"])
+        (Path(ga) / "HelixSR").mkdir(parents=True)
+        marker = {"scaler": "v1.0.3", "helixsr": "1.9.0", "loader": "dxgi.dll", "files": [],
+                  "backup": {}, "launch_options": "WINEDLLOVERRIDES=\"dxgi=n,b\" %command%"}
+        (Path(ga) / "HelixSR" / "helixsr-scaler.json").write_text(json.dumps(marker))
+        g = types.SimpleNamespace(target=Path(ga), fsr_targets=[], folder=Path(ga), name="DlssGame")
+        self.assertEqual(main._marker_versions(g), {"1.9.0"})
+        p = self._plugin(active="v1.9.0")
+        p.settings.setSetting("scaler_tag", "v1.0.3")
+        p.settings.setSetting("extra_folders", [ga])
+        # current install: nothing to do (no bogus migrate count)
+        p._mig = main._new_mig_state()
+        p._migration_run(hdir, "v1.9.0", "1.9.0", [ga])
+        self.assertTrue(p._mig["done"])
+        self.assertTrue(p._mig["ok"])
+        self.assertEqual(p._mig["results"], [])
+        # outdated install: reinstalled into the target build, marker updated
+        marker["helixsr"] = "1.8.0"
+        (Path(ga) / "HelixSR" / "helixsr-scaler.json").write_text(json.dumps(marker))
+        p._mig = main._new_mig_state()
+        p._migration_run(hdir, "v1.9.0", "1.9.0", [ga])
+        self.assertTrue(p._mig["done"])
+        self.assertTrue(p._mig["ok"], p._mig["results"])
+        self.assertEqual(len(p._mig["results"]), 1)
+        self.assertTrue(p._mig["results"][0]["ok"])
+        rec = json.loads((Path(ga) / "HelixSR" / "helixsr-scaler.json").read_text())
+        self.assertEqual(rec["helixsr"], "1.9.0")
+        self.assertTrue((Path(ga) / "dxgi.dll").is_file())
+        self.assertTrue((Path(ga) / "HelixSR" / "helixsr.dll").is_file())
+
+    def _scaler_tar_bytes(self, top="HelixSR-Scaler-1.0.3-linux", valid=True):
+        import io
+        buf = io.BytesIO()
+        with __import__("tarfile").open(fileobj=buf, mode="w:gz") as tf:
+            def add(name, data=b"x", mode=0o644):
+                info = __import__("tarfile").TarInfo(top + "/" + name)
+                info.size = len(data)
+                info.mode = mode
+                tf.addfile(info, io.BytesIO(data))
+            if valid:
+                add("OptiScaler.dll", b"OptiScaler fake")
+                add("OptiScaler.ini", b"[HelixSR]\n")
+                add("setup_linux.sh", b"#!/bin/sh\n", 0o755)
+            else:
+                add("README.txt", b"nope")
+        return buf.getvalue()
+
+    def test_scaler_asset_match(self):
+        rel = {"tag_name": "v1.0.3", "assets": [
+            {"name": "HelixSR-Scaler-1.0.3.zip", "size": 132504212,
+             "browser_download_url": "win"},
+            {"name": "HelixSR-Scaler-1.0.3-linux.tar.gz", "size": 132489118,
+             "browser_download_url": "linux"},
+            {"name": "SHA256SUMS.txt", "size": 100, "browser_download_url": "s"}]}
+        a = main._scaler_asset(rel)
+        self.assertEqual(a["browser_download_url"], "linux")
+        self.assertIsNone(main._scaler_asset(
+            {"tag_name": "v1.0.0", "assets": [{"name": "HelixSR-Scaler-1.0.0.zip"}]}))
+        self.assertIsNone(main._scaler_asset({}))
+
+    def test_scaler_releases_and_download(self):
+        payload = self._scaler_tar_bytes()
+        p = self._plugin()
+        listing = [{"tag_name": "v1.0.3", "draft": False, "name": "N",
+                     "published_at": "2026-10-15T15:07:20Z",
+                     "assets": [{"name": "HelixSR-Scaler-1.0.3-linux.tar.gz",
+                                 "size": len(payload),
+                                 "browser_download_url": "https://example.invalid/s.tar.gz"}],
+                     "body": "notes"}]
+
+        class Resp:
+            def __init__(self, data):
+                self._data = data
+                self.headers = {"Content-Length": str(len(data))}
+
+            def read(self, n):
+                chunk, self._data = self._data[:n], self._data[n:]
+                return chunk
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            with mock.patch.object(main, "_fetch_json", return_value=listing):
+                r = await p.get_scaler_releases()
+            self.assertEqual(r["error"], "")
+            self.assertEqual(len(r["releases"]), 1)
+            rel = r["releases"][0]
+            self.assertEqual(rel["tar_name"], "HelixSR-Scaler-1.0.3-linux.tar.gz")
+            self.assertIn("notes", rel["body"])
+            with mock.patch.object(main.urllib.request, "urlopen", return_value=Resp(payload)):
+                self.assertEqual(await p.start_scaler_download("v1.0.3", rel["tar_url"]),
+                                 {"ok": True})
+                st = await self._wait_done(p.get_scaler_download_status)
+            self.assertTrue(st["ok"], st["error"])
+            self.assertEqual(st["dir"], "HelixSR-Scaler-1.0.3-linux")
+            s = await p.get_scaler_state()
+            self.assertEqual(s["tag"], "v1.0.3")
+            self.assertEqual(s["dir"], "HelixSR-Scaler-1.0.3-linux")
+            self.assertTrue(s["files_ok"])
+            # bad layout is rejected
+            bad = self._scaler_tar_bytes(top="HelixSR-Scaler-9.9.9", valid=False)
+            with mock.patch.object(main.urllib.request, "urlopen", return_value=Resp(bad)):
+                self.assertEqual(await p.start_scaler_download(
+                    "v9.9.9", "https://example.invalid/bad.tgz"), {"ok": True})
+                st = await self._wait_done(p.get_scaler_download_status)
+            self.assertFalse(st["ok"])
+            self.assertIn("Scaler layout", st["error"])
+        asyncio.run(go())
+
+    def test_scaler_download_cancel(self):
+        p = self._plugin()
+
+        import time
+
+        class Slow:
+            headers = {}
+
+            def read(self, n):
+                time.sleep(0.2)
+                return b"x" * (1 << 20)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            with mock.patch.object(main.urllib.request, "urlopen", return_value=Slow()):
+                self.assertEqual(await p.start_scaler_download("v9.9.9", "https://example.invalid/x.tgz"),
+                                 {"ok": True})
+                await asyncio.sleep(0.3)
+                self.assertEqual(await p.cancel_scaler_download(), {"ok": True})
+                st = await self._wait_done(p.get_scaler_download_status)
+            self.assertTrue(st["cancelled"])
+            self.assertFalse(st["ok"])
+            self.assertEqual(await p.cancel_scaler_download(),
+                             {"ok": False, "error": "no scaler download running"})
+        asyncio.run(go())
+
+    def test_hash_pins_wellformed(self):
+        # A truncated pin fails every download with a checksum error (seen
+        # live with DLSSG_SHA256); trip over it here instead of on Deck.
+        for pin in (main.DLSS_SHA256, main.DLSSG_SHA256, main.XESS_SHA256):
+            self.assertEqual(len(pin), 64)
+            int(pin, 16)
+
+    def test_fetch_zip_entry(self):
+        import hashlib
+        import http.server
+        import threading
+        import zipfile
+        d = Path(tempfile.mkdtemp(prefix="hxrange-"))
+        self.addCleanup(shutil.rmtree, d, True)
+        stored = b"S" * 5000
+        deflated = bytes(range(256)) * 40
+        with zipfile.ZipFile(d / "a.zip", "w") as z:
+            z.writestr("s/stored.bin", stored, compress_type=zipfile.ZIP_STORED)
+            z.writestr("f/deflated.bin", deflated, compress_type=zipfile.ZIP_DEFLATED)
+            z.writestr("top.txt", b"hi")
+        data = (d / "a.zip").read_bytes()
+
+        class RangeHandler(http.server.BaseHTTPRequestHandler):
+            def _serve(self):
+                body = data
+                total = len(body)
+                rng = (self.headers.get("Range") or "").strip()
+                if rng.startswith("bytes="):
+                    start, end = rng[len("bytes="):].split("-", 1)
+                    start, end = int(start or 0), int(end or total - 1)
+                    chunk = body[start:end + 1]
+                    self.send_response(206)
+                    self.send_header("Content-Range",
+                                     f"bytes {start}-{start + len(chunk) - 1}/{total}")
+                    self.send_header("Content-Length", str(len(chunk)))
+                else:
+                    chunk = body
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(total))
+                self.send_header("Accept-Ranges", "bytes")
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(chunk)
+
+            do_GET = _serve
+            do_HEAD = _serve
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), RangeHandler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        url = f"http://127.0.0.1:{srv.server_port}/a.zip"
+        self.assertEqual(main._fetch_zip_entry(url, "s/stored.bin", hashlib.sha256(stored).hexdigest()),
+                         stored)
+        self.assertEqual(main._fetch_zip_entry(url, "f/deflated.bin", hashlib.sha256(deflated).hexdigest()),
+                         deflated)
+        with self.assertRaises(OSError):
+            main._fetch_zip_entry(url, "nope.bin", "0" * 64)
+        with self.assertRaises(OSError):
+            main._fetch_zip_entry(url, "top.txt", "0" * 64)
 
     def test_preset_case_insensitive_sorted_capped(self):
         p = self._plugin()

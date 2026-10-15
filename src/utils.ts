@@ -23,6 +23,7 @@ export const ROUTE_LABELS: Record<string, string> = {
   optiscaler: "OptiScaler (select DLSS)",
   dlss: "DLSS loader (experimental!)",
   unsupported: "No FSR 3.1 — needs HelixSR Scaler",
+  scaler: "HelixSR Scaler (Insert for menu)",
 };
 
 export const ROUTE_SHORT: Record<string, string> = {
@@ -30,6 +31,7 @@ export const ROUTE_SHORT: Record<string, string> = {
   optiscaler: "OptiScaler",
   dlss: "DLSS loader",
   unsupported: "Unsupported",
+  scaler: "Scaler",
 };
 
 export function parseBuildProgress(log: string): { pct: number; label: string } | null {
@@ -47,6 +49,7 @@ export function shortRoute(route: string): string {
   if (route === "optiscaler") return "OptiScaler, pick DLSS in-game";
   if (route === "dlss") return "DLSS loader, pick DLSS in-game";
   if (route === "unsupported") return "not supported by the drop-in";
+  if (route === "scaler") return "scaler: pick DLSS/XeSS/FSR in-game, Insert for menu";
   return route;
 }
 

@@ -30,6 +30,10 @@ import {
   PluginUpdateInfo,
   PluginUpdateStatus,
   ReadinessCheck,
+  ScalerDownloadStatus,
+  ScalerRelease,
+  ScalerSettings,
+  ScalerState,
   ScanCache,
   ScanStatus,
   VerifyResult,
@@ -38,6 +42,7 @@ import {
   apiApplyLogFix,
   apiCancelDownload,
   apiCancelScan,
+  apiCancelScalerDownload,
   apiCheckBuildReady,
   apiCheckPluginUpdate,
   apiClearDlssCache,
@@ -53,6 +58,10 @@ import {
   apiGetPluginUpdateStatus,
   apiGetReleases,
   apiGetScanStatus,
+  apiGetScalerDownloadStatus,
+  apiGetScalerReleases,
+  apiGetScalerSettings,
+  apiGetScalerState,
   apiGetState,
   apiHealthCheck,
   apiInstallGames,
@@ -63,11 +72,13 @@ import {
   apiSaveIniPreset,
   apiSetActiveVersion,
   apiSetGameSettings,
+  apiSetScalerSettings,
   apiStartBuild,
   apiStartDownload,
   apiStartMigration,
   apiStartPluginUpdate,
   apiStartScan,
+  apiStartScalerDownload,
   apiUninstallGames,
   apiVerifyInstalls,
 } from "./services/api";
@@ -107,6 +118,19 @@ function formatPresetSummary(v: GameSettings): string {
 // preset with the same name (case-insensitive), which then takes over.
 const DEFAULT_PRESET_NAME = "Default";
 
+// HelixSR Scaler settings (OptiScaler.ini [HelixSR]): the only place to
+// change them besides the in-game menu (Insert). Sharpening is OptiScaler's.
+const SCALER_SETTING_LABELS: Record<string, string> = {
+  Int8: "Speed boost — faster int8 math (auto decides; off if the picture shimmers)",
+  WaveSize: "Wave size — 64 for RX 7000 / 9000 if the picture is broken",
+  FrameGeneration: "Frame generation — needs an FG build (off if crashes or stutters)",
+};
+const SCALER_SETTING_OPTIONS: Record<string, [string, string][]> = {
+  Int8: [["auto", "Auto"], ["on", "On"], ["off", "Off"]],
+  WaveSize: [["auto", "Auto"], ["64", "64"], ["32", "32"]],
+  FrameGeneration: [["auto", "Auto"], ["on", "On"], ["off", "Off"]],
+};
+
 function Content() {
   const [releases, setReleases] = useState<HelixRelease[]>([]);
   const [state, setState] = useState<HelixState | null>(null);
@@ -116,10 +140,19 @@ function Content() {
   const [busy, setBusy] = useState<string>("");
   const [output, setOutput] = useState<string>("");
   const [building, setBuilding] = useState<boolean>(false);
+  const [fgBuild, setFgBuild] = useState<boolean>(false);
   const [downloading, setDownloading] = useState<boolean>(false);
   const [dl, setDl] = useState<DownloadStatus | null>(null);
   const [dlRate, setDlRate] = useState<string>("");
   const dlPrev = useRef<{ t: number; bytes: number } | null>(null);
+  const [scalerReleases, setScalerReleases] = useState<ScalerRelease[]>([]);
+  const [scalerState, setScalerState] = useState<ScalerState | null>(null);
+  const [scalerPicked, setScalerPicked] = useState<string>("");
+  const [scalerDownloading, setScalerDownloading] = useState<boolean>(false);
+  const [scDl, setScDl] = useState<ScalerDownloadStatus | null>(null);
+  const [scIniFor, setScIniFor] = useState<number | null>(null);
+  const [scIni, setScIni] = useState<ScalerSettings | null>(null);
+  const [scIniPath, setScIniPath] = useState<string>("");
   const [scanning, setScanning] = useState<boolean>(false);
   const [routes, setRoutes] = useState<Record<number, string>>({});
   const [iniFor, setIniFor] = useState<number | null>(null);
@@ -194,6 +227,30 @@ function Content() {
     }
   };
 
+  const refreshScalerState = async () => {
+    try {
+      const s = await apiGetScalerState();
+      setScalerState(s);
+      return s;
+    } catch (e) {
+      console.error("[helixsr] get_scaler_state failed", e);
+      return null;
+    }
+  };
+
+  const refreshScalerReleases = async () => {
+    try {
+      const r = await apiGetScalerReleases();
+      setScalerReleases(r.releases);
+      if (!scalerPicked) setScalerPicked(r.releases[0]?.tag || "");
+      if (r.error) setOutput(`Failed to load Scaler releases: ${r.error}`);
+      return r;
+    } catch (e) {
+      console.error("[helixsr] get_scaler_releases failed", e);
+      return null;
+    }
+  };
+
   useEffect(() => {
     panelOpen = true;
     (async () => {
@@ -220,14 +277,22 @@ function Content() {
         } catch { /* no cached scan yet */ }
         try {
           // Resume polling for operations still running (e.g. panel was closed).
-          const [dl0, sc0, mg0, pu0] = await Promise.all([
+          const [dl0, sc0, mg0, pu0, scdl0] = await Promise.all([
             apiGetDownloadStatus(), apiGetScanStatus(), apiGetMigrationStatus(),
-            apiGetPluginUpdateStatus()]);
+            apiGetPluginUpdateStatus(), apiGetScalerDownloadStatus()]);
           if (dl0.running) { setDl(dl0); setDownloading(true); }
           if (sc0.running) setScanning(true);
           if (mg0.running) { setMig(mg0); setMigrating(true); }
           if (pu0.running) { setPu(pu0); setUpdating(true); }
+          if (scdl0.running) { setScDl(scdl0); setScalerDownloading(true); }
         } catch { /* nothing running */ }
+        try {
+          const [scalerRels, scalerSt] = await Promise.all([apiGetScalerReleases(), apiGetScalerState()]);
+          setScalerReleases(scalerRels.releases);
+          setScalerState(scalerSt);
+          setScalerPicked(scalerRels.releases[0]?.tag || "");
+          if (scalerRels.error) console.error("[helixsr] scaler releases:", scalerRels.error);
+        } catch { /* scaler feed is best-effort */ }
         try {
           await onCheckPluginUpdate(false);
         } catch { /* update check is best-effort */ }
@@ -295,6 +360,32 @@ function Content() {
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [downloading]);
+
+  // Poll scaler download progress while one runs
+  useEffect(() => {
+    if (!scalerDownloading) return;
+    const t = setInterval(async () => {
+      try {
+        const st = await apiGetScalerDownloadStatus();
+        setScDl(st);
+        if (st.done) {
+          setScalerDownloading(false);
+          if (st.cancelled) {
+            setOutput("Scaler download cancelled.");
+          } else if (st.ok) {
+            setOutput(`Downloaded Scaler ${st.tag} (${st.dir}).`);
+            toaster.toast({ title: `Downloaded Scaler ${st.tag}`, body: "" });
+          } else {
+            toaster.toast({ title: "Scaler download failed", body: st.error || "" });
+            setOutput(st.error || "scaler download failed");
+          }
+          refreshScalerState();
+        }
+      } catch { /* ignore */ }
+    }, 500);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scalerDownloading]);
 
   // Poll scan status while a scan runs
   useEffect(() => {
@@ -408,6 +499,7 @@ function Content() {
   const activeVersion = state?.versions.find((v) => v.tag === state.active_tag);
   const pickedRelease = releases.find((r) => r.tag === picked);
   const pickedDownloaded = picked ? downloadedTags.has(picked) : false;
+  const scalerPickedRelease = scalerReleases.find((r) => r.tag === scalerPicked);
 
   const onCancelDownload = async () => {
     try {
@@ -461,6 +553,99 @@ function Content() {
     }
   };
 
+  const onCancelScalerDownload = async () => {
+    try {
+      await apiCancelScalerDownload();
+    } catch (e) {
+      console.error("[helixsr] cancel_scaler_download failed", e);
+    }
+  };
+
+  const onScalerDownload = async () => {
+    const rel = scalerReleases.find((r) => r.tag === scalerPicked);
+    if (!rel) {
+      setOutput("No Scaler release selected.");
+      return;
+    }
+    setScDl(null);
+    try {
+      const r = await apiStartScalerDownload(rel.tag, rel.tar_url);
+      if (!r.ok) {
+        toaster.toast({ title: "Scaler download not started", body: r.error || "" });
+        setOutput(r.error || "scaler download not started");
+        return;
+      }
+      setScalerDownloading(true);
+      setOutput(`Downloading ${rel.tar_name} (${fmtSize(rel.size)}) ...`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toaster.toast({ title: "Scaler download failed to start", body: msg });
+      setOutput(`Could not start scaler download: ${msg}`);
+      console.error("[helixsr] start_scaler_download failed", e);
+    }
+  };
+
+  const onOpenScIni = async (g: HelixGame) => {
+    setBusy(`scini-${g.index}`);
+    try {
+      const r = await apiGetScalerSettings(g.index);
+      if (!r.ok || !r.values) {
+        setOutput(r.error || "cannot read scaler settings");
+        return;
+      }
+      setScIni(r.values);
+      setScIniPath(r.path || "");
+      setScIniFor(g.index);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const onSaveScIni = async () => {
+    if (scIniFor === null || !scIni) return;
+    setBusy("scini-save");
+    try {
+      const r = await apiSetScalerSettings(scIniFor, scIni);
+      setOutput(r.output || "");
+      toaster.toast({ title: r.ok ? "Scaler settings saved" : "Save failed", body: r.ok ? "" : (r.output || "").slice(-200) });
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const onCopyLaunchOptions = async (text: string) => {
+    const done = () => toaster.toast({ title: "Launch options copied", body: "Paste in Steam → Properties → Launch Options" });
+    try {
+      await navigator.clipboard.writeText(text);
+      done();
+      return;
+    } catch (e) {
+      console.error("[helixsr] async clipboard failed, trying fallback", e);
+    }
+    // Fallback for CEF without async clipboard permission.
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      if (!document.execCommand("copy")) throw new Error("execCommand returned false");
+      document.body.removeChild(ta);
+      done();
+    } catch (e) {
+      console.error("[helixsr] clipboard fallback failed", e);
+      setOutput(`Copy failed — select the text by hand:\n${text}`);
+      toaster.toast({ title: "Copy failed", body: "select the text manually" });
+    }
+  };
+
+  const pickedRoute = (g: HelixGame): string => {
+    const avail = g.available || [];
+    if (avail.length === 1) return avail[0];
+    return routes[g.index] || g.route;
+  };
+
   const onRemove = async () => {
     if (!picked || !pickedDownloaded) return;
     await armOrRun(`remove ${picked}`,
@@ -480,7 +665,7 @@ function Content() {
   };
 
   const runReadiness = async (): Promise<ReadinessCheck[] | null> => {
-    const c = await apiCheckBuildReady(activeVersion?.tag || null);
+    const c = await apiCheckBuildReady(activeVersion?.tag || null, fgBuild);
     const lines = (c.checks || []).map((x) => `${x.ok ? "✓" : "✗"} ${x.name}: ${x.detail}`);
     setOutput([(c.error || (!c.ok ? "Not ready to build:" : "Ready to build.")), ...lines].join("\n"));
     return c.ok ? (c.checks || []) : null;
@@ -512,7 +697,7 @@ function Content() {
         toaster.toast({ title: "Build not ready", body: "see Log" });
         return;
       }
-      const r = await apiStartBuild(rebuild);
+      const r = await apiStartBuild(rebuild, fgBuild);
       if (!r.ok) {
         toaster.toast({ title: "Build not started", body: r.error || "" });
         setOutput(r.error || "build not started");
@@ -1027,9 +1212,25 @@ function Content() {
   };
 
   const onInstall = async (g: HelixGame) => {
+    const route = pickedRoute(g);
+    if (route === "scaler") {
+      await armOrRun(`install scaler ${g.index}`,
+        `Tap again to confirm installing HelixSR Scaler in "${g.name}". Not for online games or games with anti-cheat (ban risk). You must also paste its Steam launch options by hand.`,
+        async () => {
+          setBusy(`game-${g.index}`);
+          try {
+            const r = await apiInstallGames([g.index], route);
+            setOutput(r.output);
+            toaster.toast({ title: r.ok ? `Scaler installed in ${g.name}` : "Install failed", body: r.ok ? "Paste its Steam launch options" : r.output.slice(-200) });
+            if (r.ok) onScan();
+          } finally {
+            setBusy("");
+          }
+        });
+      return;
+    }
     setBusy(`game-${g.index}`);
     try {
-      const route = routes[g.index] || g.route;
       const r = await apiInstallGames([g.index], route);
       setOutput(r.output);
       toaster.toast({ title: r.ok ? `Installed in ${g.name}` : "Install failed", body: r.ok ? "" : r.output.slice(-200) });
@@ -1299,6 +1500,16 @@ function Content() {
             Check build readiness
           </MButton>
         </PanelSectionRow>
+        {activeVersion?.layout === "modern" && (
+        <PanelSectionRow>
+          <ToggleField
+            label="Frame generation (experimental)"
+            description="Builds FG into the DLL for Scaler games (~400 MB extra downloads, longer build)"
+            checked={fgBuild}
+            onChange={(c: boolean) => setFgBuild(c)}
+          />
+        </PanelSectionRow>
+        )}
         {building && buildProg && (
           <PanelSectionRow>
             <div style={{ width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
@@ -1482,11 +1693,13 @@ function Content() {
             <PanelSectionRow>
               <MButton
                 
-                disabled={busy !== "" || scanning || (!g.installed && !(g.fsr || []).length && activeLayout === "modern")}
-                description={g.installed ? shortRoute(g.route) : (ROUTE_LABELS[routes[g.index] || g.route] || g.status)}
-                variant={g.installed ? "outlined" : "filled"} onClick={() => (g.installed ? onUninstall(g) : onInstall(g))}
+                disabled={busy !== "" || scanning || (!g.installed && !(g.fsr || []).length && activeLayout === "modern" && !((g.available || []).includes("scaler")))}
+                description={g.installed ? shortRoute(g.route) : (ROUTE_LABELS[pickedRoute(g)] || g.status)}
+                variant={confirm === `install scaler ${g.index}` ? "danger" : (g.installed ? "outlined" : "filled")} onClick={() => (g.installed ? onUninstall(g) : onInstall(g))}
               >
-                {`${g.installed ? "Remove from" : "Install in"} ${g.name}`}
+                {confirm === `install scaler ${g.index}` && !g.installed
+                  ? `Tap again: install Scaler in ${g.name}`
+                  : `${g.installed ? "Remove from" : "Install in"} ${g.name}`}
               </MButton>
             </PanelSectionRow>
             {!g.installed && g.available.length > 1 && (
@@ -1526,13 +1739,36 @@ function Content() {
                 </div>
               </PanelSectionRow>
             )}
-            {g.installed && iniFor !== g.index && (
+            {g.installed && g.route !== "scaler" && iniFor !== g.index && (
               <PanelSectionRow>
                 <MButton  disabled={busy !== "" || scanning} variant="text" onClick={() => onOpenIni(g)}>
                   {`Settings — ${g.name}`}
                 </MButton>
               </PanelSectionRow>
             )}
+            {g.installed && g.route === "scaler" && scIniFor !== g.index && (
+              <PanelSectionRow>
+                <MButton  disabled={busy !== "" || scanning} variant="text" onClick={() => onOpenScIni(g)}>
+                  {`Scaler settings — ${g.name}`}
+                </MButton>
+              </PanelSectionRow>
+            )}
+            {g.launch_options ? (
+              <PanelSectionRow>
+                <Card tone="neutral" radius={M3.shape.md} style={{ background: M3.color.surfaceContainerLow, width: "100%" }}>
+                  <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
+                    Steam launch options — Steam → game Properties → General → Launch Options, paste:
+                  </div>
+                  <div style={{ fontFamily: M3.mono, fontSize: 12, overflowWrap: "anywhere" }}>{g.launch_options}</div>
+                  <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.xs }}>
+                    Required for the Insert menu. Take them back out if you uninstall.
+                  </div>
+                  <MButton variant="tonal" onClick={() => onCopyLaunchOptions(g.launch_options || "")}>
+                    Copy launch options
+                  </MButton>
+                </Card>
+              </PanelSectionRow>
+            ) : null}
             {g.installed && logFor !== g.index && (
               <PanelSectionRow>
                 <MButton  disabled={busy !== "" || scanning} variant="text" onClick={() => onOpenLog(g)}>
@@ -1721,6 +1957,44 @@ function Content() {
                 </PanelSectionRow>
               </div>
             )}
+            {g.installed && g.route === "scaler" && scIniFor === g.index && scIni && (
+              <div>
+                <PanelSectionRow>
+                  <div style={{ fontSize: 12 }}>{scIniPath}</div>
+                </PanelSectionRow>
+                {(["Int8", "WaveSize", "FrameGeneration"] as const).map((key) => (
+                  <PanelSectionRow key={key}>
+                    <div style={{ width: "100%" }}>
+                      <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
+                        {key} — {SCALER_SETTING_LABELS[key]}
+                      </div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
+                        {SCALER_SETTING_OPTIONS[key].map(([v, label]) => (
+                          <MButton
+                            key={v}
+                            variant={scIni[key] === v ? "filled" : "outlined"}
+                            onClick={() => setScIni({ ...scIni, [key]: v } as ScalerSettings)}
+                            style={{ flex: "1 1 40%", minWidth: 0 }}
+                          >
+                            {label}
+                          </MButton>
+                        ))}
+                      </div>
+                    </div>
+                  </PanelSectionRow>
+                ))}
+                <PanelSectionRow>
+                  <MButton  disabled={busy !== ""} variant="filled" onClick={onSaveScIni}>
+                    Save scaler settings
+                  </MButton>
+                </PanelSectionRow>
+                <PanelSectionRow>
+                  <MButton  variant="text" onClick={() => { setScIniFor(null); setScIni(null); }}>
+                    Close scaler settings
+                  </MButton>
+                </PanelSectionRow>
+              </div>
+            )}
           </Card>
             )}
           </Fragment>
@@ -1728,6 +2002,72 @@ function Content() {
         </>
       </PanelSection>
       )}
+      <PanelSection title="4 · HelixSR Scaler">
+        <>
+        <PanelSectionRow>
+          <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
+            For games with DLSS/XeSS/FSR2 but no FSR 3.1: OptiScaler with HelixSR built in (Insert for the menu).
+            Not for online games or games with anti-cheat. Needs a built HelixSR 1.9.0+ and manual Steam launch
+            options per game. About 132 MB to download, plus copies in each game.
+          </div>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
+            {scalerState?.tag ? `Downloaded: ${scalerState.tag} (${scalerState.size_mb} MB on disk)` : "Not downloaded yet"}
+          </div>
+        </PanelSectionRow>
+        {scalerReleases.map((r) => (
+          <PanelSectionRow key={r.tag}>
+            <MButton
+              variant={scalerPicked === r.tag ? "filled" : "outlined"}
+              description={`${r.published_at} · ${fmtSize(r.size)} download`}
+              onClick={() => setScalerPicked(r.tag)}
+            >
+              {`${r.tag}${scalerState?.tag === r.tag ? " ✓" : ""}`}
+            </MButton>
+          </PanelSectionRow>
+        ))}
+        {scalerPickedRelease && scalerPickedRelease.body && (
+          <PanelSectionRow>
+            <Card tone="neutral" radius={M3.shape.md}>
+              <PagedText text={scalerPickedRelease.body.slice(0, 800)} pageSize={12} maxHeight={160} />
+            </Card>
+          </PanelSectionRow>
+        )}
+        <PanelSectionRow>
+          <MButton  disabled={busy !== "" || scalerDownloading || !scalerPicked} variant="tonal" onClick={() => refreshScalerReleases()}>
+            Reload scaler releases
+          </MButton>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <MButton
+            disabled={busy !== "" || scalerDownloading || !scalerPicked}
+            variant="filled" onClick={onScalerDownload}
+          >
+            {scalerDownloading ? "Downloading Scaler ..." : `Download ${scalerPicked || "Scaler"}`}
+          </MButton>
+        </PanelSectionRow>
+        {scalerDownloading && (
+          <PanelSectionRow>
+            <div style={{ width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
+              <ProgressBar nProgress={scDl && scDl.total > 0 ? Math.min(100, (100 * scDl.downloaded) / scDl.total) : 0} nTransitionSec={M3.motion.bar} />
+              <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.xs, fontVariantNumeric: M3.tabular }}>
+                {scDl && scDl.total > 0
+                  ? `${fmtSize(scDl.downloaded)} / ${fmtSize(scDl.total)} (${Math.floor((100 * scDl.downloaded) / scDl.total)}%)`
+                  : scDl ? `${fmtSize(scDl.downloaded)} downloaded ...` : "Starting scaler download ..."}
+              </div>
+            </div>
+          </PanelSectionRow>
+        )}
+        {scalerDownloading && (
+          <PanelSectionRow>
+            <MButton  variant="text" onClick={onCancelScalerDownload}>
+              Cancel scaler download
+            </MButton>
+          </PanelSectionRow>
+        )}
+        </>
+      </PanelSection>
       {hasVersions && (
       <PanelSection title="Folders">
         <>

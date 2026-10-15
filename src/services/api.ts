@@ -65,8 +65,44 @@ export interface HelixGame {
   installed: boolean;
   status: string;
   installed_versions: string[];
+  launch_options?: string;
   exe: string;
   fsr: string[];
+}
+
+export interface ScalerRelease {
+  tag: string;
+  name: string;
+  published_at: string;
+  tar_name: string;
+  tar_url: string;
+  size: number;
+  body: string;
+}
+
+export interface ScalerState {
+  tag: string;
+  dir: string;
+  files_ok: boolean;
+  size_mb: number;
+}
+
+export interface ScalerDownloadStatus {
+  running: boolean;
+  done: boolean;
+  ok: boolean;
+  cancelled: boolean;
+  error: string;
+  tag: string;
+  downloaded: number;
+  total: number;
+  dir: string;
+}
+
+export interface ScalerSettings {
+  Int8: string;
+  WaveSize: string;
+  FrameGeneration: string;
 }
 
 export interface HealthCheck {
@@ -169,6 +205,13 @@ export const apiCancelScan = callable<[], { ok: boolean; error?: string }>("canc
 export const apiGetScanStatus = callable<[], ScanStatus>("get_scan_status");
 export const apiGetLastScan = callable<[], ScanCache>("get_last_scan");
 export const apiInstallGames = callable<[indices: number[], route: string], { ok: boolean; output: string; rc?: number }>("install_games");
+export const apiGetScalerReleases = callable<[], { releases: ScalerRelease[]; error: string }>("get_scaler_releases");
+export const apiGetScalerState = callable<[], ScalerState>("get_scaler_state");
+export const apiStartScalerDownload = callable<[tag: string, tar_url: string], { ok: boolean; error?: string }>("start_scaler_download");
+export const apiCancelScalerDownload = callable<[], { ok: boolean; error?: string }>("cancel_scaler_download");
+export const apiGetScalerDownloadStatus = callable<[], ScalerDownloadStatus>("get_scaler_download_status");
+export const apiGetScalerSettings = callable<[index: number], { ok: boolean; path?: string; values?: ScalerSettings; error?: string }>("get_scaler_settings");
+export const apiSetScalerSettings = callable<[index: number, values: ScalerSettings], { ok: boolean; output?: string; path?: string }>("set_scaler_settings");
 export const apiRepairGames = callable<[indices: number[]], { ok: boolean; output: string }>("repair_games");
 export const apiVerifyInstalls = callable<[], { ok: boolean; games: VerifyResult[]; error?: string }>("verify_installs");
 export const apiHealthCheck = callable<[], { ok: boolean; checks: HealthCheck[]; error?: string }>("health_check");
@@ -182,8 +225,8 @@ export const apiFactoryReset = callable<[], { ok: boolean; games_uninstalled?: s
 export const apiGetGameSettings = callable<[index: number], { ok: boolean; path?: string; values?: GameSettings; layout?: string; note?: string; error?: string }>("get_game_settings");
 export const apiSetGameSettings = callable<[index: number, values: GameSettings], { ok: boolean; output?: string; path?: string }>("set_game_settings");
 export const apiUninstallGames = callable<[indices: number[]], { ok: boolean; output: string; rc?: number }>("uninstall_games");
-export const apiStartBuild = callable<[rebuild: boolean], { ok: boolean; log?: string; error?: string }>("start_build");
-export const apiCheckBuildReady = callable<[tag: string | null], { ok: boolean; error?: string; checks: ReadinessCheck[] }>("check_build_ready");
+export const apiStartBuild = callable<[rebuild: boolean, fg?: boolean], { ok: boolean; log?: string; error?: string }>("start_build");
+export const apiCheckBuildReady = callable<[tag: string | null, fg?: boolean], { ok: boolean; error?: string; checks: ReadinessCheck[] }>("check_build_ready");
 export const apiStartMigration = callable<[tag: string], { ok: boolean; error?: string }>("start_migration");
 export const apiGetMigrationStatus = callable<[], MigrationStatus>("get_migration_status");
 export const apiRemoveOldVersions = callable<[], { ok: boolean; removed: string[]; skipped: string[]; freed_mb: number }>("remove_old_versions");
