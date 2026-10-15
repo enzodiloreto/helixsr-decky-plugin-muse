@@ -88,13 +88,19 @@ import {
 let panelOpen = false;
 
 function presetsEqual(a: GameSettings, b: GameSettings): boolean {
-  return a.Sharpener === b.Sharpener && a.Sharpness === b.Sharpness
-    && a.UseGameSlider === b.UseGameSlider && a.WaveSize === b.WaveSize;
+  if (a.Sharpener !== b.Sharpener || a.Sharpness !== b.Sharpness) return false;
+  const wa = a.WaveSize === "auto" ? "default" : a.WaveSize;
+  const wb = b.WaveSize === "auto" ? "default" : b.WaveSize;
+  if (wa !== wb) return false;
+  if ("UseGameSlider" in a && "UseGameSlider" in b) return a.UseGameSlider === b.UseGameSlider;
+  return true;
 }
 
 function formatPresetSummary(v: GameSettings): string {
+  const wave = `wave ${v.WaveSize}`;
+  if (!("UseGameSlider" in v)) return `${v.Sharpener} · ${v.Sharpness} · ${wave}`;
   const slider = v.UseGameSlider === "true" ? "game-slider" : "manual";
-  return `${v.Sharpener} · ${v.Sharpness} · ${slider} · wave ${v.WaveSize}`;
+  return `${v.Sharpener} · ${v.Sharpness} · ${slider} · ${wave}`;
 }
 
 // Built-in preset shown first in the picker unless the user saved their own
@@ -118,6 +124,7 @@ function Content() {
   const [routes, setRoutes] = useState<Record<number, string>>({});
   const [iniFor, setIniFor] = useState<number | null>(null);
   const [ini, setIni] = useState<GameSettings | null>(null);
+  const [iniSchema, setIniSchema] = useState<string>("legacy");
   const [iniPath, setIniPath] = useState<string>("");
   const [presets, setPresets] = useState<Record<string, GameSettings>>({});
   const [presetDefaults, setPresetDefaults] = useState<GameSettings | null>(null);
@@ -553,6 +560,7 @@ function Content() {
         return;
       }
       setIni(r.values);
+      setIniSchema(r.layout === "modern" ? "modern" : "legacy");
       setIniPath(r.path || "");
       setIniFor(g.index);
       setPresetPick("");
@@ -708,13 +716,11 @@ function Content() {
   const onApplyPreset = async () => {
     if (iniFor === null || !presetPick) return;
     const applied = presetPick;
-    const isBuiltin = presetDefaults !== null && applied === DEFAULT_PRESET_NAME
-      && !Object.keys(presets).some((n) => n.toLowerCase() === applied.toLowerCase());
     setBusy("preset");
     try {
-      const r = isBuiltin
-        ? await apiSetGameSettings(iniFor, { ...presetDefaults })
-        : await apiApplyIniPreset(iniFor, applied);
+      // Stored presets are translated to the game's schema server-side; the
+      // built-in Default resolves to that game's defaults the same way.
+      const r = await apiApplyIniPreset(iniFor, applied);
       setOutput(r.output || "");
       toaster.toast({ title: r.ok ? `Preset "${applied}" applied` : "Apply failed", body: r.ok ? "" : (r.output || "").slice(-200) });
       if (r.ok) {
@@ -1063,6 +1069,7 @@ function Content() {
   const visInstalled = visibleGames.filter((g) => g.installed).length;
   const downloadedVersions = (state?.versions || []).filter((v) => downloadedTags.has(v.tag));
   const totalMB = downloadedVersions.reduce((a, v) => a + (v.size_mb || 0), 0);
+  const activeLayout = state?.versions.find((v) => v.tag === state?.active_tag)?.layout || "legacy";
   const buildProg = building ? parseBuildProgress(output) : null;
   // Live operation reflected in the hero so deep-scrolled users see state.
   const heroOp = downloading
@@ -1469,13 +1476,13 @@ function Content() {
                 <span style={{ ...M3.type.title, flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>{g.name}</span>
                 {g.installed
                   ? <Chip tone="success">Installed</Chip>
-                  : <Chip tone="secondary">{ROUTE_SHORT[g.route] || g.route}</Chip>}
+                  : <Chip tone="secondary">{ROUTE_SHORT[g.route || ""] || g.route || "—"}</Chip>}
               </div>
             </PanelSectionRow>
             <PanelSectionRow>
               <MButton
                 
-                disabled={busy !== "" || scanning}
+                disabled={busy !== "" || scanning || (!g.installed && !(g.fsr || []).length && activeLayout === "modern")}
                 description={g.installed ? shortRoute(g.route) : (ROUTE_LABELS[routes[g.index] || g.route] || g.status)}
                 variant={g.installed ? "outlined" : "filled"} onClick={() => (g.installed ? onUninstall(g) : onInstall(g))}
               >
@@ -1598,6 +1605,7 @@ function Content() {
                     onChange={(v: number) => setIni({ ...ini, Sharpness: String(Math.round(v * 100) / 100) })}
                   />
                 </PanelSectionRow>
+                {iniSchema === "legacy" && (
                 <PanelSectionRow>
                   <ToggleField
                     label="Use game slider"
@@ -1606,17 +1614,18 @@ function Content() {
                     onChange={(c: boolean) => setIni({ ...ini, UseGameSlider: c ? "true" : "false" })}
                   />
                 </PanelSectionRow>
+                )}
                 <PanelSectionRow>
                   <div style={{ width: "100%" }}>
                     <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
-                      WaveSize — 64 for RX 7000 / 9000 in OptiScaler games if the log says wave32
+                      {iniSchema === "modern"
+                        ? "WaveSize — 64 for RX 7000 / 9000 if the log says wave32"
+                        : "WaveSize — 64 for RX 7000 / 9000 in OptiScaler games if the log says wave32"}
                     </div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
-                      {([
-                        ["default", "Default"],
-                        ["64", "64"],
-                        ["32", "32"],
-                      ] as const).map(([v, label]) => (
+                      {((iniSchema === "modern"
+                        ? [["auto", "Auto"], ["64", "64"], ["32", "32"]]
+                        : [["default", "Default"], ["64", "64"], ["32", "32"]]) as [string, string][]).map(([v, label]) => (
                         <MButton
                           key={v}
                           variant={ini.WaveSize === v ? "filled" : "outlined"}
@@ -1706,7 +1715,7 @@ function Content() {
                   </MButton>
                 </PanelSectionRow>
                 <PanelSectionRow>
-                  <MButton  variant="text" onClick={() => { setIniFor(null); setIni(null); setPresetPick(""); setPresetName(""); }}>
+                  <MButton  variant="text" onClick={() => { setIniFor(null); setIni(null); setIniSchema("legacy"); setPresetPick(""); setPresetName(""); }}>
                     Close settings
                   </MButton>
                 </PanelSectionRow>

@@ -20,6 +20,7 @@ from pathlib import Path
 # and add the `decky-loader/plugin/imports` path to `python.analysis.extraPaths` in `.vscode/settings.json`
 import decky
 import helixscan
+import helixref
 from settings import SettingsManager
 
 GITHUB_OWNER = "lonewolf0622"
@@ -153,6 +154,9 @@ def _status_for(route, inputs):
         return "DLSS (HelixSR as the game's DLSS, experimental: select DLSS in the game)"
     if route == "direct":
         return "FSR 3.1 (HelixSR replaces the game's FSR DLL: select AMD FSR in the game)"
+    if route in ("unsupported", None):
+        have = " / ".join(inputs) if inputs else "no FSR 3.1"
+        return f"{have} only: not supported by the drop-in (needs HelixSR Scaler)"
     if route == "optiscaler":
         return " / ".join(inputs) + " (through OptiScaler: select DLSS in the game)"
     return route or "compatible"
@@ -244,6 +248,20 @@ def _largest_zip(release: dict):
     assets = [a for a in (release.get("assets") or []) if str(a.get("name", "")).endswith(".zip")]
     if not assets:
         return None
+    return sorted(assets, key=lambda x: x.get("size", 0) or 0, reverse=True)[0]
+
+
+def _helixsr_asset(release: dict, tag: str):
+    """The HelixSR release zip, matched by name. Since 1.9.0 releases carry
+    extra zips (HelixSR-Scaler), largest-zip would grab the wrong file; it
+    stays as the fallback for older single-zip releases."""
+    assets = [a for a in (release.get("assets") or []) if str(a.get("name", "")).endswith(".zip")]
+    if not assets:
+        return None
+    want = "helixsr-%s.zip" % str(tag).lstrip("vV").lower()
+    for a in assets:
+        if str(a.get("name", "")).lower() == want:
+            return a
     return sorted(assets, key=lambda x: x.get("size", 0) or 0, reverse=True)[0]
 
 
@@ -365,6 +383,11 @@ INI_SECTIONS = {"Sharpener": "Sharpening", "Sharpness": "Sharpening",
                 "UseGameSlider": "Sharpening", "WaveSize": "Compatibility"}
 INI_DEFAULTS = {"Sharpener": "off", "Sharpness": "0.5",
                 "UseGameSlider": "false", "WaveSize": "default"}
+# 1.9.0+ settings: no game slider, WaveSize auto instead of default,
+# Sharpness default 0.1 (range and Sharpener unchanged).
+INI_DEFAULTS_MODERN = {"Sharpener": "off", "Sharpness": "0.1", "WaveSize": "auto"}
+INI_WAVES = {"legacy": ("default", "64", "32"), "modern": ("auto", "64", "32")}
+BUILTIN_DEFAULT_PRESET = "Default"
 MAX_INI_PRESETS = 20
 
 
@@ -394,10 +417,17 @@ def _find_ini(g, create=False):
     return None
 
 
-def _read_ini_values(p: Path):
-    """Current helixsr.ini values with README defaults for anything missing
-    or invalid. Returns (values, note)."""
-    vals = dict(INI_DEFAULTS)
+def _schema_defaults(schema: str) -> dict:
+    if schema == "modern":
+        return dict(INI_DEFAULTS_MODERN)
+    return dict(INI_DEFAULTS)
+
+
+def _read_ini_values(p: Path, schema: str = "legacy"):
+    """Current helixsr.ini values with template defaults for anything missing
+    or invalid. Returns (values, note). Only the schema's keys are returned."""
+    vals = _schema_defaults(schema)
+    waves = INI_WAVES.get(schema, INI_WAVES["legacy"])
     try:
         text = p.read_text(encoding="utf-8", errors="replace")
         cp = configparser.ConfigParser()
@@ -414,24 +444,28 @@ def _read_ini_values(p: Path):
             f = float(cp.get("Sharpening", "Sharpness").strip())
             if 0.0 <= f <= 1.0:
                 vals["Sharpness"] = str(round(f, 2))
-        if cp.has_option("Sharpening", "UseGameSlider"):
+        if schema == "legacy" and cp.has_option("Sharpening", "UseGameSlider"):
             vals["UseGameSlider"] = "true" if cp.getboolean("Sharpening", "UseGameSlider") else "false"
         if cp.has_option("Compatibility", "WaveSize"):
             v = cp.get("Compatibility", "WaveSize").strip()
-            if v in ("default", "64", "32"):
+            if v in waves:
                 vals["WaveSize"] = v
     except (ValueError, configparser.Error):
         pass
     return vals, ""
 
 
-def _normalize_ini_values(values: dict):
+def _normalize_ini_values(values: dict, schema: str = "legacy"):
     """Validate RPC settings (template key names). Only provided keys are
-    returned, so partial updates (e.g. auto-fix) leave the rest untouched."""
+    returned, so partial updates (e.g. auto-fix) leave the rest untouched.
+    Keys outside the schema are rejected."""
     norm = {}
+    waves = INI_WAVES.get(schema, INI_WAVES["legacy"])
     for key, v in values.items():
         if key not in INI_SECTIONS:
             return None, f"unknown setting: {key}"
+        if schema == "modern" and key == "UseGameSlider":
+            return None, "UseGameSlider was removed in HelixSR 1.9.0"
         if key == "Sharpener":
             if not isinstance(v, str) or v.lower() not in ("off", "nvidia", "rcas"):
                 return None, f"bad Sharpener: {v!r} (off, nvidia, rcas)"
@@ -453,10 +487,76 @@ def _normalize_ini_values(values: dict):
                 return None, f"bad UseGameSlider: {v!r} (true or false)"
         elif key == "WaveSize":
             s = str(v)
-            if s not in ("default", "64", "32"):
-                return None, f"bad WaveSize: {v!r} (default, 64, 32)"
+            if s not in waves:
+                return None, f"bad WaveSize: {v!r} ({', '.join(waves)})"
             norm[key] = s
     return norm, ""
+
+
+def _translate_ini_values(values: dict, schema: str):
+    """Map a stored preset to a schema: WaveSize default<->auto, the game
+    slider dropped (modern) or defaulted (legacy). Returns a full snapshot
+    for the schema, or (None, err) for corrupt values."""
+    if not isinstance(values, dict):
+        return None, "bad settings"
+    mapped = {}
+    for key, v in values.items():
+        if key == "UseGameSlider" and schema == "modern":
+            continue
+        if key == "WaveSize":
+            s = str(v)
+            if schema == "modern" and s == "default":
+                s = "auto"
+            elif schema == "legacy" and s == "auto":
+                s = "default"
+            mapped[key] = s
+        else:
+            mapped[key] = v
+    full = _schema_defaults(schema)
+    full.update(mapped)
+    return _normalize_ini_values(full, schema)
+
+
+def _installed_helixsr_version(g) -> str:
+    """HelixSR version string from a game's install markers ("" if none)."""
+    candidates = []
+    folder = getattr(g, "folder", None)
+    if folder is not None:
+        candidates.append(Path(folder) / helixscan.FOLDER / helixscan.MARKER)
+    if g.target is not None:
+        candidates.append(g.target / helixscan.FOLDER / helixscan.MARKER)
+    for t in g.fsr_targets:
+        candidates.append(t.parent / helixscan.MARKER)
+    for p in candidates:
+        try:
+            rec = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict) and rec.get("helixsr"):
+            return str(rec["helixsr"])
+    return ""
+
+
+def _ini_layout_for(g, d) -> str:
+    """Settings schema for a game: the layout of the HelixSR version that
+    installed it (markers record the DLL version), else the active
+    version's layout (mixed installs, pruned versions)."""
+    try:
+        want = _installed_helixsr_version(g)
+        if want and want != "?":
+            for vd in _version_dirs():
+                try:
+                    got = helixscan.version_of(vd / "amd_fidelityfx_dx12.dll")
+                except OSError:
+                    continue
+                if got == want:
+                    return helixref.layout_of(vd)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        return helixref.layout_of(d)
+    except Exception:  # noqa: BLE001
+        return "legacy"
 
 
 def _set_ini_value(text: str, section: str, key: str, value: str) -> str:
@@ -505,6 +605,7 @@ def _repair_direct(g, here):
     deliberately refuses this case ("left as it is") so it never clobbers an
     unrecognized file; repair is explicit instead: the game's current DLL
     becomes the new backup, then the drop-in proceeds as usual."""
+    mod = helixref.install_module(here)
     for t in g.fsr_targets:
         orig = helixscan.original(t)
         if t.exists() and not helixscan.is_helixsr(t):
@@ -526,11 +627,11 @@ def _repair_direct(g, here):
             if not orig.exists():
                 os.replace(t, orig)
             helixscan.copy_checked(here / helixscan.DLL, t)
-        helixscan.copy_network(here, t.parent)
+        mod.copy_network(here, t.parent)
         made = helixscan.read_marker(t.parent).get("ini_made")
         (t.parent / helixscan.MARKER).write_text(json.dumps(
             {"helixsr": helixscan.version_of(here / helixscan.DLL), "files": [t.name],
-             "route": "direct", "ini_made": helixscan.make_ini(t.parent, made)}, indent=1) + "\n")
+             "route": "direct", "ini_made": mod.make_ini(t.parent, made)}, indent=1) + "\n")
         decky.logger.info(f"HelixSR repair installed {t} (the game's file kept as {orig.name})")
 
 
@@ -556,7 +657,7 @@ class Plugin:
             out = []
             for r in data:
                 tag = r.get("tag_name", "")
-                a = _largest_zip(r)
+                a = _helixsr_asset(r, tag)
                 if not tag or a is None:
                     continue
                 out.append({"tag": tag, "name": r.get("name", tag),
@@ -578,6 +679,7 @@ class Plugin:
                 versions.append({"tag": _tag_of_dir(d), "dir": d.name,
                                  "network_built": helixscan.network_ready(d),
                                  "dll_version": dll_version,
+                                 "layout": helixref.layout_of(d),
                                  "size_mb": round(_dir_size_cached(d) / 1e6, 1)})
             return {"active_tag": self.settings.getSetting("active_tag", ""),
                     "versions": versions, "root": str(_helixsr_root()),
@@ -976,6 +1078,9 @@ class Plugin:
                   + ("; ~56 MB DLSS download needed" if need_dlss else "; DLSS DLL already verified"))
         checks.append({"name": "Disk space", "ok": free_rt > 500_000_000 and free_data > 500_000_000,
                        "detail": detail})
+        if helixref.layout_of(d) == "modern":
+            checks.append({"name": "Frame generation", "ok": True,
+                           "detail": "skipped (--no-fg): the plugin installs the FSR drop-in only"})
         return {"ok": all(c["ok"] for c in checks), "checks": checks}
 
     async def start_migration(self, target_tag: str) -> dict:
@@ -1012,10 +1117,9 @@ class Plugin:
         into the new build. One game's failure never stops the rest. Markers
         preserve each game's chosen route, so fresh objects just work."""
         st = self._mig
-        helixscan.take_log()
         try:
             with self._ops_lock:
-                gl, _skipped = helixscan.games(target, extra)
+                gl, _skipped, _log = helixref.scan(target, extra)
                 todo = []
                 for g in gl:
                     try:
@@ -1037,11 +1141,8 @@ class Plugin:
                     st["current_name"] = g.name
                     decky.logger.info(f"HelixSR migrating {g.name} to {target_tag}")
                     try:
-                        helixscan.take_log()
-                        helixscan.uninstall(g)
-                        helixscan.install(g, target)
-                        detail = "\n".join(helixscan.take_log())[-2000:]
-                        results.append({"name": g.name, "ok": True, "detail": detail})
+                        detail = helixref.uninstall(g, target) + "\n" + helixref.install(g, target)
+                        results.append({"name": g.name, "ok": True, "detail": detail[-2000:]})
                         st["results"] = list(results)
                     except SystemExit as e:
                         results.append({"name": g.name, "ok": False,
@@ -1107,11 +1208,10 @@ class Plugin:
     def _scan_run(self, d: Path, tag: str, extra: list):
         st = self._scan
         try:
-            # Discard stale say() messages: games() narrates (e.g. folders
-            # already listed) and nothing here surfaces them per-scan.
-            helixscan.take_log()
+            # The scan narrates (e.g. folders already listed); per-scan output
+            # is returned by the dispatch and dropped here, as before.
             with self._ops_lock:
-                gl, skipped = helixscan.games(d, extra, self._scan_stop.is_set)
+                gl, skipped, _log = helixref.scan(d, extra, self._scan_stop.is_set)
                 self._scan_cache = {"dir": str(d), "games": gl, "tag": tag,
                                     "extra": list(extra), "time": time.monotonic()}
             if self._scan_stop.is_set():
@@ -1129,7 +1229,7 @@ class Plugin:
                 except Exception:  # noqa: BLE001
                     status = g.route or "compatible"
                 try:
-                    routes = helixscan.available_routes(g, d)
+                    routes = helixref.available_routes(g, d)
                 except Exception:  # noqa: BLE001
                     routes = [g.route] if g.route else []
                 out.append({"index": i, "name": g.name, "folder": str(g.folder),
@@ -1248,7 +1348,7 @@ class Plugin:
         if cached["dir"] == str(d) and cached.get("extra", []) == list(extra) \
                 and cached["games"] and time.monotonic() - cached["time"] < SCAN_CACHE_TTL:
             return cached["games"]
-        gl, _skipped = helixscan.games(d, extra)
+        gl, _skipped, _log = helixref.scan(d, extra)
         self._scan_cache = {"dir": str(d), "games": gl, "tag": _tag_of_dir(d),
                             "extra": list(extra), "time": time.monotonic()}
         return gl
@@ -1282,40 +1382,70 @@ class Plugin:
                     if not 1 <= i <= len(gl):
                         return {"ok": False, "output": f"not a game number: {i} (scan found {len(gl)})"}
                     targets.append(gl[i - 1])
-                if op == "install" and route is not None:
-                    picked = []
+                modern = helixref.layout_of(d) != "legacy"
+                if op == "install" and route is not None and modern:
+                    # Modern installs the drop-in only (legacy installs switch
+                    # internally); an explicit legacy route is meaningless, and
+                    # games without FSR 3.1 cannot be installed at all.
                     for g in targets:
-                        if route not in helixscan.available_routes(g, d):
+                        if getattr(g, "fsr_targets", None):
+                            continue
+                        old = g.old_install() if callable(getattr(g, "old_install", None)) else None
+                        if old:
                             return {"ok": False, "output":
-                                    f"{g.name} cannot use route '{route}'"}
-                        # Same as the reference's per-game question: switch
-                        # routes (install() removes the old way first) and
-                        # remember OptiScaler where picked. A shallow copy
-                        # keeps the scan cache pristine on success and failure.
-                        c = copy.copy(g)
-                        c.route = route
-                        c.chosen = route == "optiscaler" and g.can_opti
-                        picked.append(c)
-                    targets = picked
-                helixscan.take_log()
+                                    f"{g.name}: {old} install can only be removed"}
+                        try:
+                            why = g.label()
+                        except Exception:  # noqa: BLE001
+                            why = "not supported by the drop-in"
+                        return {"ok": False, "output": f"{g.name}: {why}"}
+                if op == "install" and route is not None and not modern:
+                        picked = []
+                        for g in targets:
+                            if route not in helixscan.available_routes(g, d):
+                                return {"ok": False, "output":
+                                        f"{g.name} cannot use route '{route}'"}
+                            # Same as the reference's per-game question: switch
+                            # routes (install() removes the old way first) and
+                            # remember OptiScaler where picked. A shallow copy
+                            # keeps the scan cache pristine on success and failure.
+                            c = copy.copy(g)
+                            c.route = route
+                            c.chosen = route == "optiscaler" and g.can_opti
+                            picked.append(c)
+                        targets = picked
+                skipped: list = []
+                if op == "install" and modern:
+                    # Batch installs include listed-but-unsupported games; skip
+                    # them with a note instead of aborting the whole batch.
+                    keep = [g for g in targets if getattr(g, "fsr_targets", None)]
+                    skipped = [g.name for g in targets if not getattr(g, "fsr_targets", None)]
+                    targets = keep
+                    if not targets:
+                        return {"ok": False, "output":
+                                f"no FSR 3.1 games selected ({', '.join(skipped)})"}
+                logs = []
                 for g in targets:
                     decky.logger.info(f"HelixSR {op} {g.name} (route {g.route})")
                     if op == "install":
-                        helixscan.install(g, d)
+                        logs.append(helixref.install(g, d))
                     elif op == "repair":
                         if g.route == "direct":
                             _repair_direct(g, d)
+                            logs.append("")
                         else:
-                            helixscan.install(g, d)
+                            logs.append(helixref.install(g, d))
                     else:
-                        helixscan.uninstall(g)
+                        logs.append(helixref.uninstall(g, d))
                 # Note: the cache is intentionally NOT invalidated here. Cached
                 # Game objects only resolve index -> folder; installed() and
                 # route-relevant markers are re-read live wherever they matter,
                 # and mutating game A never changes game B's detection.
                 self._update_scan_file([(g.name, str(g.folder)) for g in targets],
                                        op == "install")
-                return {"ok": True, "output": "\n".join(helixscan.take_log())[-8000:]}
+                if skipped:
+                    logs.append(f"skipped (no FSR 3.1): {', '.join(skipped)}")
+                return {"ok": True, "output": "\n".join(logs)[-8000:]}
         except SystemExit as e:
             return {"ok": False, "output": str(e) or "aborted"}
         except Exception as e:  # noqa: BLE001
@@ -1344,8 +1474,12 @@ class Plugin:
             return {"ok": False, "output": "bad settings"}
         return await asyncio.to_thread(self._game_settings_run, "set", d, idx, values)
 
-    def _game_settings_run(self, op: str, d: Path, index: int, values: dict | None) -> dict:
-        """Read/write a game's helixsr.ini (sharpening, WaveSize...)."""
+    def _game_settings_run(self, op: str, d: Path, index: int, values: dict | None,
+                             translate: bool = False) -> dict:
+        """Read/write a game's helixsr.ini (sharpening, WaveSize...). The key
+        schema follows the game's installed HelixSR (1.9.0+ drops the game
+        slider, WaveSize auto). With translate=True a stored preset is mapped
+        to that schema first (manual sets stay strict)."""
         try:
             with self._ops_lock:
                 gl = self._resolve_games(d)
@@ -1353,17 +1487,23 @@ class Plugin:
                     msg = f"not a game number: {index} (scan found {len(gl)})"
                     return {"ok": False, "error" if op == "get" else "output": msg}
                 g = gl[index - 1]
+                schema = _ini_layout_for(g, d)
                 if op == "get":
                     p = _find_ini(g)
                     if p is None:
                         return {"ok": False, "error":
                                 "no helixsr.ini found: install HelixSR in this game first"}
-                    vals, note = _read_ini_values(p)
-                    out = {"ok": True, "path": str(p), "values": vals}
+                    vals, note = _read_ini_values(p, schema)
+                    out = {"ok": True, "path": str(p), "values": vals, "layout": schema}
                     if note:
                         out["note"] = note
                     return out
-                norm, err = _normalize_ini_values(values or {})
+                if translate:
+                    norm, err = _translate_ini_values(values or {}, schema)
+                    if err and (values or {}):
+                        err = f"stored preset is corrupt: {err}"
+                else:
+                    norm, err = _normalize_ini_values(values or {}, schema)
                 if err:
                     return {"ok": False, "output": err}
                 p = _find_ini(g)
@@ -1378,7 +1518,7 @@ class Plugin:
                     p = _find_ini(g, create=True)
                     if p is None:
                         return {"ok": False, "output": "cannot locate settings file for this game"}
-                    helixscan.make_ini(p.parent, None)
+                    helixref.install_module(d).make_ini(p.parent, None)
                 text = p.read_text(encoding="utf-8", errors="replace") if p.is_file() else ""
                 for key, val in norm.items():
                     text = _set_ini_value(text, INI_SECTIONS[key], key, val)
@@ -1485,7 +1625,20 @@ class Plugin:
 
     async def get_ini_presets(self) -> dict:
         return {"ok": True, "presets": self._sorted_presets(self._load_presets()),
-                "defaults": dict(INI_DEFAULTS)}
+                "defaults": _schema_defaults(await self._active_layout())}
+
+    async def _active_layout(self) -> str:
+        """Settings schema generation of the active version (legacy fallback)."""
+        try:
+            d = await self._active_dir()
+        except Exception:  # noqa: BLE001
+            d = None
+        if d is None:
+            return "legacy"
+        try:
+            return helixref.layout_of(d)
+        except Exception:  # noqa: BLE001
+            return "legacy"
 
     async def save_ini_preset(self, name: str, values: dict) -> dict:
         name = str(name or "").strip()
@@ -1493,11 +1646,10 @@ class Plugin:
             return {"ok": False, "error": "preset name must be 1-40 characters"}
         if not isinstance(values, dict):
             return {"ok": False, "error": "bad settings"}
-        norm, err = _normalize_ini_values(values)
+        schema = await self._active_layout()
+        full, err = _translate_ini_values(values, schema)
         if err:
             return {"ok": False, "error": err}
-        full = dict(INI_DEFAULTS)
-        full.update(norm)
         presets = self._load_presets()
         existing = next((k for k in presets if k.lower() == name.lower()), None)
         overwrote = existing is not None
@@ -1536,14 +1688,16 @@ class Plugin:
         actual = str(name) if str(name) in presets else next(
             (k for k in presets if k.lower() == str(name).lower()), None)
         if actual is None:
-            return {"ok": False, "output": f"no preset named {name}"}
-        stored = presets[actual]
-        if not isinstance(stored, dict):
-            return {"ok": False, "output": f"preset '{actual}' is corrupt: bad settings"}
-        norm, err = _normalize_ini_values(stored)
-        if err:
-            return {"ok": False, "output": f"preset '{actual}' is corrupt: {err}"}
-        return await asyncio.to_thread(self._game_settings_run, "set", d, idx, norm)
+            # Built-in Default (shown unless the user saved their own): the
+            # target game's schema defaults, translated on write.
+            if str(name).lower() != BUILTIN_DEFAULT_PRESET.lower():
+                return {"ok": False, "output": f"no preset named {name}"}
+            values: dict = {}
+        else:
+            values = presets[actual]
+            if not isinstance(values, dict):
+                return {"ok": False, "output": f"preset '{actual}' is corrupt: bad settings"}
+        return await asyncio.to_thread(self._game_settings_run, "set", d, idx, values, True)
 
     async def verify_installs(self) -> dict:
         d = await self._active_dir()
@@ -1707,6 +1861,8 @@ class Plugin:
                 problems.append(f"{helixscan.LOADER} missing or replaced next to the game's exe")
             if not helixscan.is_helixsr(g.target / helixscan.CORE):
                 problems.append(f"{helixscan.CORE} missing or replaced next to the game's exe")
+        elif g.route in ("unsupported", None):
+            problems.append("not supported by the drop-in (needs HelixSR Scaler)")
         else:
             problems.append(f"unknown route {g.route}")
         return problems
@@ -1726,7 +1882,7 @@ class Plugin:
         try:
             with self._ops_lock:
                 if d is not None:
-                    gl, _skipped = helixscan.games(d, extra)
+                    gl, _skipped, _log = helixref.scan(d, extra)
                     for g in gl:
                         try:
                             if not g.installed():
@@ -1734,15 +1890,14 @@ class Plugin:
                         except Exception:  # noqa: BLE001
                             continue
                         try:
-                            helixscan.take_log()
-                            helixscan.uninstall(g)
+                            helixref.uninstall(g, d)
                             uninstalled.append(g.name)
                         except Exception as e:  # noqa: BLE001
                             failed.append(f"{g.name}: {e}")
                 removed, skipped, freed = [], [], 0
                 still_used: dict[str, list] = {}
                 if d is not None:
-                    gl2, _skipped = helixscan.games(d, extra)
+                    gl2, _skipped, _log = helixref.scan(d, extra)
                     for g in gl2:
                         try:
                             if not g.installed():
@@ -1784,7 +1939,9 @@ class Plugin:
         """Build the network: a background thread first ensures NVIDIA's DLSS
         DLL (downloaded with the plugin's own TLS, verified by hash), then the
         reference helixsr-setup.sh runs with --dlss so its Python never needs
-        HTTPS. Game prompts default to no on EOF; use install_games after."""
+        HTTPS. Game prompts default to no on EOF; use install_games after.
+        For 1.9.0+ frame generation is skipped (--no-fg): it serves HelixSR
+        Scaler, not the drop-in this plugin installs."""
         thread_alive = bool(self._build_thread and self._build_thread.is_alive())
         if thread_alive:
             return {"ok": False, "error": "build already running"}
@@ -1913,12 +2070,20 @@ class Plugin:
                 pass
             self._build_running = False
 
-    async def _spawn_and_watch(self, d: Path, log: Path, header: str,
-                               bash: str, script: str, dlss: Path, rebuild: bool):
-        args = [bash, script, "--yes"]
+    @staticmethod
+    def _build_args(d: Path, rebuild: bool, dlss: Path) -> list:
+        args = ["--yes"]
         if rebuild:
             args.append("--rebuild")
-        args += ["--dlss", str(dlss)]
+        if helixref.layout_of(d) == "modern":
+            args.append("--no-fg")
+        return args + ["--dlss", str(dlss)]
+
+    async def _spawn_and_watch(self, d: Path, log: Path, header: str,
+                               bash: str, script: str, dlss: Path, rebuild: bool):
+        args = [bash, script] + self._build_args(d, rebuild, dlss)
+        if "--no-fg" in args:
+            self._build_log_line(log, "[helixsr] frame generation skipped (--no-fg): drop-in only")
         try:
             proc = await asyncio.create_subprocess_exec(
                 *args,

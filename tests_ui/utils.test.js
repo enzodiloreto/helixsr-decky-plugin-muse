@@ -76,7 +76,7 @@ describe("parseBuildProgress", () => {
 
 describe("routes", () => {
   it("labels every known route short and long", () => {
-    for (const r of ["direct", "optiscaler", "dlss"]) {
+    for (const r of ["direct", "optiscaler", "dlss", "unsupported"]) {
       assert.ok(ROUTE_LABELS[r].length > 0);
       assert.ok(ROUTE_SHORT[r].length > 0);
       assert.ok(shortRoute(r).length > 0);

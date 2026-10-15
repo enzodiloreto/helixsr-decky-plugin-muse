@@ -17,6 +17,7 @@ export interface HelixVersion {
   dir: string;
   network_built: boolean;
   dll_version: string;
+  layout?: string;
   size_mb: number;
 }
 
@@ -77,7 +78,7 @@ export interface HealthCheck {
 export interface GameSettings {
   Sharpener: string;
   Sharpness: string;
-  UseGameSlider: string;
+  UseGameSlider?: string;
   WaveSize: string;
 }
 
@@ -178,7 +179,7 @@ export const apiSaveIniPreset = callable<[name: string, values: GameSettings], {
 export const apiDeleteIniPreset = callable<[name: string], { ok: boolean; presets?: Record<string, GameSettings> }>("delete_ini_preset");
 export const apiApplyIniPreset = callable<[index: number, name: string], { ok: boolean; output?: string }>("apply_ini_preset");
 export const apiFactoryReset = callable<[], { ok: boolean; games_uninstalled?: string[]; games_failed?: string[]; versions_removed?: string[]; versions_skipped?: string[]; freed_mb?: number; note?: string; error?: string }>("factory_reset");
-export const apiGetGameSettings = callable<[index: number], { ok: boolean; path?: string; values?: GameSettings; note?: string; error?: string }>("get_game_settings");
+export const apiGetGameSettings = callable<[index: number], { ok: boolean; path?: string; values?: GameSettings; layout?: string; note?: string; error?: string }>("get_game_settings");
 export const apiSetGameSettings = callable<[index: number, values: GameSettings], { ok: boolean; output?: string; path?: string }>("set_game_settings");
 export const apiUninstallGames = callable<[indices: number[]], { ok: boolean; output: string; rc?: number }>("uninstall_games");
 export const apiStartBuild = callable<[rebuild: boolean], { ok: boolean; log?: string; error?: string }>("start_build");

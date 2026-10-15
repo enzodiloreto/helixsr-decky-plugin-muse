@@ -338,6 +338,27 @@ class PluginCase(unittest.TestCase):
             self.assertFalse(missing["ok"])
         asyncio.run(go())
 
+    def test_build_args_and_ready_modern(self):
+        legacy = self._version_dir(tag="9.9.8")
+        base = Path(tempfile.mkdtemp(prefix="hxmodern-"))
+        self.addCleanup(shutil.rmtree, base, True)
+        modern = base / "HelixSR-1.9.0"
+        (modern / "setup").mkdir(parents=True)
+        (modern / "setup/helixsr_setup.py").write_text("# layout marker\n")
+        (modern / "helixsr-setup.sh").write_text("#!/bin/sh\n")
+        dlss = Path("/x/nvngx_dlss.dll")
+        self.assertEqual(main.Plugin._build_args(legacy, False, dlss),
+                         ["--yes", "--dlss", str(dlss)])
+        self.assertEqual(main.Plugin._build_args(legacy, True, dlss),
+                         ["--yes", "--rebuild", "--dlss", str(dlss)])
+        self.assertEqual(main.Plugin._build_args(modern, False, dlss),
+                         ["--yes", "--no-fg", "--dlss", str(dlss)])
+        p = self._plugin()
+        names = [c["name"] for c in p._check_build_ready_run(legacy)["checks"]]
+        self.assertNotIn("Frame generation", names)
+        names = [c["name"] for c in p._check_build_ready_run(modern)["checks"]]
+        self.assertIn("Frame generation", names)
+
     def test_migration_moves_games(self):
         old = self._version_dir(tag="9.9.8")
         new = self._version_dir(tag="9.9.9")
@@ -698,6 +719,175 @@ class PluginCase(unittest.TestCase):
             self.assertEqual(r["values"]["Sharpener"], "nvidia")
             missing = await p.apply_ini_preset(idx, "nope")
             self.assertFalse(missing["ok"])
+        asyncio.run(go())
+
+    def test_ini_schemas_and_translation(self):
+        full_legacy = {"Sharpener": "rcas", "Sharpness": "0.8",
+                       "UseGameSlider": True, "WaveSize": "64"}
+        norm, err = main._normalize_ini_values(full_legacy, "legacy")
+        self.assertEqual(err, "")
+        self.assertEqual(norm, {"Sharpener": "rcas", "Sharpness": "0.8",
+                                "UseGameSlider": "true", "WaveSize": "64"})
+        # modern drops the slider, WaveSize auto instead of default
+        bad, err = main._normalize_ini_values({"UseGameSlider": "false"}, "modern")
+        self.assertIsNone(bad)
+        self.assertIn("1.9.0", err)
+        bad, err = main._normalize_ini_values({"WaveSize": "default"}, "modern")
+        self.assertIsNone(bad)
+        self.assertIn("auto", err)
+        norm, err = main._normalize_ini_values({"Sharpener": "nvidia", "Sharpness": "0.6",
+                                                "WaveSize": "auto"}, "modern")
+        self.assertEqual(err, "")
+        self.assertEqual(norm, {"Sharpener": "nvidia", "Sharpness": "0.6", "WaveSize": "auto"})
+        # translation both ways, with default fill
+        full, err = main._translate_ini_values(full_legacy, "modern")
+        self.assertEqual(err, "")
+        self.assertEqual(full, {"Sharpener": "rcas", "Sharpness": "0.8", "WaveSize": "64"})
+        modern = {"Sharpener": "off", "Sharpness": "0.1", "WaveSize": "auto"}
+        full, err = main._translate_ini_values(modern, "legacy")
+        self.assertEqual(err, "")
+        self.assertEqual(full, {"Sharpener": "off", "Sharpness": "0.1",
+                                "UseGameSlider": "false", "WaveSize": "default"})
+        full, err = main._translate_ini_values({"Sharpener": "bogus"}, "modern")
+        self.assertIsNone(full)
+        self.assertIn("bogus", err)
+        full, err = main._translate_ini_values("nope", "legacy")
+        self.assertIsNone(full)
+        # modern read: slider ignored, auto accepted, 0.1 default kept
+        p = Path(tempfile.mkdtemp(prefix="hxini-")) / "helixsr.ini"
+        self.addCleanup(shutil.rmtree, p.parent, True)
+        p.write_text("[Sharpening]\nSharpener = nvidia\nSharpness = 0.6\nUseGameSlider = true\n"
+                     "[Compatibility]\nWaveSize = auto\n")
+        vals, note = main._read_ini_values(p, "modern")
+        self.assertEqual(vals, {"Sharpener": "nvidia", "Sharpness": "0.6", "WaveSize": "auto"})
+        vals, _ = main._read_ini_values(p, "legacy")
+        self.assertEqual(vals["UseGameSlider"], "true")
+        self.assertEqual(vals["WaveSize"], "default")
+
+    def test_ini_layout_per_game(self):
+        import types
+        base = Path(tempfile.mkdtemp(prefix="hxly-"))
+        self.addCleanup(shutil.rmtree, base, True)
+        root = base / "helixsr"
+        legacy = root / "HelixSR-9.9.8"
+        legacy.mkdir(parents=True)
+        (legacy / "helixsr-setup.sh").write_text("#!/bin/sh\n")
+        (legacy / "amd_fidelityfx_dx12.dll").write_bytes(b"\x00HelixSR 9.9.8\x00" + b"\x00" * 100)
+        modern = root / "HelixSR-1.9.0"
+        (modern / "setup").mkdir(parents=True)
+        (modern / "setup/helixsr_setup.py").write_text("# layout marker\n")
+        (modern / "helixsr-setup.sh").write_text("#!/bin/sh\n")
+        (modern / "amd_fidelityfx_dx12.dll").write_bytes(b"\x00HelixSR 1.9.0\x00" + b"\x00" * 100)
+        gfolder = base / "GameX"
+        (gfolder / "HelixSR").mkdir(parents=True)
+        g = types.SimpleNamespace(target=None, fsr_targets=[],
+                                  folder=gfolder, name="GameX")
+        with mock.patch.dict(os.environ, {"DECKY_PLUGIN_RUNTIME_DIR": str(base)}):
+            # no marker: falls back to the given (active) version's layout
+            self.assertEqual(main._ini_layout_for(g, legacy), "legacy")
+            self.assertEqual(main._ini_layout_for(g, modern), "modern")
+            # marker records the installing version: a legacy install stays
+            # legacy even with a modern version active, and vice versa
+            (gfolder / "HelixSR" / "helixsr-install.json").write_text(
+                json.dumps({"helixsr": "9.9.8", "files": [], "route": "direct"}))
+            self.assertEqual(main._ini_layout_for(g, modern), "legacy")
+            (gfolder / "HelixSR" / "helixsr-install.json").write_text(
+                json.dumps({"helixsr": "1.9.0", "files": [], "route": "direct"}))
+            self.assertEqual(main._ini_layout_for(g, legacy), "modern")
+
+    MODERN_STUB_MODULE = '''MARKER = "helixsr-install.json"
+LOADER_NAMES = ("dxgi.dll",)
+
+class G:
+    def __init__(self, d):
+        import json
+        from pathlib import Path
+        spec = json.loads((Path(d) / "game.json").read_text())
+        self.name = spec["name"]
+        self.folder = Path(d)
+        self.target = None
+        self.fsr_targets = [Path(d) / n for n in spec.get("fsr", [])]
+        self.route = spec.get("route") or ("direct" if self.fsr_targets else "unsupported")
+        self.inputs = []
+
+    def installed(self):
+        return False
+
+    def label(self):
+        return "FSR 3.1 game" if self.fsr_targets else "DLSS only: use HelixSR Desktop (HelixSR Scaler)"
+
+    def old_install(self):
+        return None
+
+
+CALLS = []
+
+
+def games(extra):
+    print("[helixsr-setup] scanned")
+    return [G(d) for d in extra]
+
+
+def install(g, here):
+    CALLS.append(g.name)
+    print(f"[helixsr-setup] installed {g.name}")
+
+
+def uninstall(g):
+    print(f"[helixsr-setup] uninstalled {g.name}")
+'''
+
+    def _modern_dir(self, tag="1.9.0"):
+        root = Path(os.environ["DECKY_PLUGIN_RUNTIME_DIR"]) / "helixsr"
+        d = root / f"HelixSR-{tag}"
+        (d / "setup").mkdir(parents=True, exist_ok=True)
+        (d / "setup/helixsr_setup.py").write_text("# layout marker\n")
+        (d / "helixsr-setup.sh").write_text("#!/bin/sh\n")
+        (d / "amd_fidelityfx_dx12.dll").write_bytes(
+            b"\x00HelixSR " + tag.encode() + b"\x00" + b"\x00" * 100 + b"HXSRNET1" + b"\x00" * 24)
+        (d / "setup/helixsr_install.py").write_text(self.MODERN_STUB_MODULE)
+        return d
+
+    def _stub_game_dir(self, name, fsr=(), route=None):
+        d = self.tmp / f"stub-{name}"
+        d.mkdir(parents=True, exist_ok=True)
+        spec = {"name": name, "fsr": list(fsr)}
+        if route:
+            spec["route"] = route
+        (d / "game.json").write_text(json.dumps(spec))
+        return str(d)
+
+    def test_modern_install_validation_and_batch_skip(self):
+        d = self._modern_dir()
+        fa = self._stub_game_dir("HasFsr", fsr=["up.dll"])
+        fb = self._stub_game_dir("NoFsr", route="unsupported")
+        p = self._plugin(active="v1.9.0")
+        p.settings.setSetting("extra_folders", [fa, fb])
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            st = await self._rescan(p)
+            self.assertTrue(st["ok"], st.get("error"))
+            idx = {g["name"]: g["index"] for g in st["games"]}
+            mod = main.helixref.install_module(d)
+            # explicit legacy route on an FSR game: ignored, drop-in installs
+            mod.CALLS.clear()
+            r = await p.install_games([idx["HasFsr"]], "optiscaler")
+            self.assertTrue(r["ok"], r["output"])
+            self.assertEqual(mod.CALLS, ["HasFsr"])
+            # explicit route on a game without FSR: clear error, nothing installed
+            mod.CALLS.clear()
+            bad = await p.install_games([idx["NoFsr"]], "direct")
+            self.assertFalse(bad["ok"])
+            self.assertIn("HelixSR Scaler", bad["output"])
+            self.assertEqual(mod.CALLS, [])
+            # batch: compatible games install, others skipped with a note
+            mod.CALLS.clear()
+            r = await p.install_games([idx["HasFsr"], idx["NoFsr"]], "")
+            self.assertTrue(r["ok"], r["output"])
+            self.assertEqual(mod.CALLS, ["HasFsr"])
+            self.assertIn("skipped", r["output"])
+            self.assertIn("NoFsr", r["output"])
         asyncio.run(go())
 
     def test_preset_case_insensitive_sorted_capped(self):
@@ -1240,6 +1430,66 @@ class PluginCase(unittest.TestCase):
             with mock.patch.object(main, "_fetch_json", side_effect=OSError("down")):
                 r = await p.get_releases()
             self.assertIn("OSError", r["error"])
+        asyncio.run(go())
+
+    def test_helixsr_asset_match(self):
+        rel = {"tag_name": "v1.9.0", "assets": [
+            {"name": "HelixSR-Scaler-1.0.0.zip", "size": 131359942,
+             "browser_download_url": "scaler"},
+            {"name": "HelixSR-1.9.0.zip", "size": 3803249,
+             "browser_download_url": "main"},
+            {"name": "SHA256SUMS.txt", "size": 478,
+             "browser_download_url": "sums"}]}
+        self.assertEqual(main._helixsr_asset(rel, "v1.9.0")["browser_download_url"], "main")
+        solo = {"tag_name": "v1.8.1", "assets": [
+            {"name": "h.zip", "size": 12, "browser_download_url": "u"}]}
+        self.assertEqual(main._helixsr_asset(solo, "v1.8.1")["name"], "h.zip")
+        self.assertIsNone(main._helixsr_asset(
+            {"tag_name": "v1", "assets": [{"name": "n.txt"}]}, "v1"))
+
+    def test_generation_dispatch(self):
+        helixref = main.helixref
+        legacy = self._version_dir(tag="9.9.8")
+        self.assertEqual(helixref.layout_of(legacy), "legacy")
+        self.assertIs(helixref.install_module(legacy), main.helixscan)
+        base = Path(tempfile.mkdtemp(prefix="hxmodern-"))
+        self.addCleanup(shutil.rmtree, base, True)
+        modern = base / "HelixSR-1.9.0"
+        (modern / "setup").mkdir(parents=True)
+        (modern / "setup/helixsr_setup.py").write_text("# layout marker\n")
+        (modern / "amd_fidelityfx_dx12.dll").write_bytes(b"DLL")
+        self.assertEqual(helixref.layout_of(modern), "modern")
+        # synthetic modern reference (our own code, not upstream's): import
+        # mechanics, stdout capture, per-generation signatures.
+        (modern / "setup/helixsr_install.py").write_text(
+            'MARKER = "helixsr-install.json"\n'
+            'LOADER_NAMES = ("dxgi.dll",)\n'
+            'def games(extra):\n'
+            '    print("[helixsr-setup] scanned")\n'
+            '    return []\n'
+            'def install(g, here):\n'
+            '    print("[helixsr-setup] installed")\n'
+            'def uninstall(g):\n'
+            '    print("[helixsr-setup] uninstalled")\n'
+            'if __name__ == "__main__":\n'
+            '    raise SystemExit("nope")\n')
+        mod = helixref.install_module(modern)
+        self.assertTrue(mod.__name__.startswith("helixsr_install_"))
+        self.assertIs(helixref.install_module(modern), mod)
+        gl, skipped, log = helixref.scan(modern, ["/tmp"])
+        self.assertEqual((gl, skipped), ([], 0))
+        self.assertIn("scanned", log)
+        self.assertIn("installed", helixref.install(object(), modern))
+        self.assertIn("uninstalled", helixref.uninstall(object(), modern))
+        self.assertEqual(helixref.available_routes(object(), modern), [])
+        self.assertEqual(helixref.loader_name(modern), "dxgi.dll")
+        p = self._plugin()
+        p.settings.setSetting("active_tag", "v9.9.8")
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            s = await p.get_state()
+            self.assertEqual(s["versions"][0]["layout"], "legacy")
         asyncio.run(go())
 
 

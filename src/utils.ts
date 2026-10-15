@@ -22,12 +22,14 @@ export const ROUTE_LABELS: Record<string, string> = {
   direct: "FSR drop-in (select AMD FSR)",
   optiscaler: "OptiScaler (select DLSS)",
   dlss: "DLSS loader (experimental!)",
+  unsupported: "No FSR 3.1 — needs HelixSR Scaler",
 };
 
 export const ROUTE_SHORT: Record<string, string> = {
   direct: "FSR drop-in",
   optiscaler: "OptiScaler",
   dlss: "DLSS loader",
+  unsupported: "Unsupported",
 };
 
 export function parseBuildProgress(log: string): { pct: number; label: string } | null {
@@ -44,6 +46,7 @@ export function shortRoute(route: string): string {
   if (route === "direct") return "drop-in, pick AMD FSR in-game";
   if (route === "optiscaler") return "OptiScaler, pick DLSS in-game";
   if (route === "dlss") return "DLSS loader, pick DLSS in-game";
+  if (route === "unsupported") return "not supported by the drop-in";
   return route;
 }
 
