@@ -2,8 +2,6 @@
 
 ![HelixSR Muse Plugin banner](assets/helixsr_muse_banner_main.png)
 
-<a href="https://github.com/enzodiloreto/helixsr-decky-plugin-muse/releases"><img src="assets/helixsr_muse_download_big_icon.png" width="300" alt="Download the latest release"></a>
-
 A [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) plugin that manages
 [HelixSR](https://github.com/lonewolf0622/HelixSR) (upscaling on AMD GPUs, built from
 NVIDIA's DLSS model): pick a release, download it with a progress bar, build its
