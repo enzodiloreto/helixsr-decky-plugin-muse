@@ -71,6 +71,7 @@ class PluginCase(unittest.TestCase):
         p._build_running = False
         p._build_log = None
         p._build_proc = None
+        p._build_cancel = threading.Event()
         return p
 
     def _version_dir(self, tag="1.8.1", network=True):
@@ -602,6 +603,36 @@ class PluginCase(unittest.TestCase):
                 self.assertEqual(proc.returncode, -15)
         asyncio.run(go())
 
+    def test_cancel_build(self):
+        d = self._version_dir(tag="9.9.9", network=False)
+        self._fake_setup(d, "echo started\nsleep 30\necho done\n")
+        digest = self._seed_dlss(d)
+        p = self._plugin()
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            self.assertEqual(await p.cancel_build(),
+                             {"ok": False, "error": "no build running"})
+            with mock.patch.object(main, "DLSS_SHA256", digest):
+                r = await p.start_build()
+                self.assertTrue(r["ok"], r)
+                await asyncio.sleep(0.5)
+                proc = p._build_proc
+                self.assertIsNotNone(proc)
+                self.assertEqual(await p.cancel_build(), {"ok": True})
+                await self._wait_build(p)
+            for _ in range(200):
+                if proc.returncode is not None:
+                    break
+                await asyncio.sleep(0.05)
+            self.assertEqual(proc.returncode, -15)
+            self.assertEqual(emitted[-1], ("helixsr_build_done", False, -15))
+            log = Path(r["log"]).read_text()
+            self.assertIn("build cancelled", log)
+            self.assertFalse(main.helixscan.network_ready(d))
+            self.assertFalse((await p.get_build_status())["running"])
+        asyncio.run(go())
+
     # --- routes + settings --------------------------------------------------
 
     async def _game_index(self, p, name):
@@ -1109,6 +1140,15 @@ def uninstall(g):
             self.assertEqual(rec["scaler"], "v1.0.3")
             self.assertEqual(rec["helixsr"], "1.9.0")
             self.assertIsNone(rec["launch_options"])
+            # persisted cache already reflects the install: the panel refreshes
+            # from it instead of re-walking the libraries
+            cached = await p.get_last_scan()
+            row = next(g for g in cached["games"] if g["name"] == "DlssGame")
+            self.assertTrue(row["installed"])
+            self.assertEqual(row["route"], "scaler")
+            self.assertEqual(row["installed_versions"], ["1.9.0", "scaler-v1.0.3"])
+            # dxgi.dll needs no Steam launch options: the row stays empty
+            self.assertEqual(row["launch_options"], "")
             # settings roundtrip on the scaler ini
             s = await p.get_scaler_settings(idx["DlssGame"])
             self.assertTrue(s["ok"], s.get("error"))
@@ -1132,7 +1172,8 @@ def uninstall(g):
             self.assertTrue(g["installed"])
             self.assertEqual(g["route"], "scaler")
             self.assertEqual(g["launch_options"], "")
-            self.assertIn("1.9.0", g["installed_versions"])
+            # HelixSR build version plus the Scaler tag, both recorded
+            self.assertEqual(g["installed_versions"], ["1.9.0", "scaler-v1.0.3"])
             self.assertEqual(main._scaler_launch_options("dxgi.dll"), None)
             self.assertEqual(main._scaler_launch_options("winmm.dll"),
                              'WINEDLLOVERRIDES="winmm=n,b" %command%')
@@ -1150,6 +1191,12 @@ def uninstall(g):
             self.assertFalse((exe / "HelixSR").exists())
             self.assertFalse((exe / "OptiScaler.ini").exists())
             self.assertFalse((exe / "OptiScaler").exists())
+            # the cache row flips back without a rescan, with route/status text
+            after = await p.get_last_scan()
+            row = next(g for g in after["games"] if g["name"] == "DlssGame")
+            self.assertFalse(row["installed"])
+            self.assertEqual(row["route"], "scaler")
+            self.assertIn("not supported by the drop-in", row["status"])
         asyncio.run(go())
 
     def test_scaler_install_guards(self):

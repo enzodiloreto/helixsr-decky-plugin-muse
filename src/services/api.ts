@@ -240,4 +240,5 @@ export const apiRemoveScanFolder = callable<[path: string], { ok: boolean; folde
 export const apiCheckPluginUpdate = callable<[force: boolean], PluginUpdateInfo>("check_plugin_update");
 export const apiStartPluginUpdate = callable<[], { ok: boolean; version?: string; error?: string }>("start_plugin_update");
 export const apiGetPluginUpdateStatus = callable<[], PluginUpdateStatus>("get_plugin_update_status");
-export const apiGetBuildStatus = callable<[], { running: boolean; log: string; log_path: string; network_built: boolean }>("get_build_status");
+export const apiGetBuildStatus = callable<[], { running: boolean; log: string; log_path: string; network_built: boolean; fg_built?: boolean }>("get_build_status");
+export const apiCancelBuild = callable<[], { ok: boolean; error?: string }>("cancel_build");

@@ -248,7 +248,7 @@ def _status_for(route, inputs):
         return "DLSS (HelixSR as the game's DLSS, experimental: select DLSS in the game)"
     if route == "direct":
         return "FSR 3.1 (HelixSR replaces the game's FSR DLL: select AMD FSR in the game)"
-    if route in ("unsupported", None):
+    if route in ("unsupported", None, "scaler"):
         have = " / ".join(inputs) if inputs else "no FSR 3.1"
         return f"{have} only: not supported by the drop-in (needs HelixSR Scaler)"
     if route == "optiscaler":
@@ -1923,9 +1923,8 @@ class Plugin:
                     status = "HelixSR Scaler installed"
                     routes = ["scaler"]
                     launch_options = sc.get("launch_options") or ""
-                if sc:
-                    iv = ([sc["helixsr"]] if sc.get("helixsr") else []
-                          + [f"scaler-{sc['scaler']}" if sc.get("scaler") else "scaler"])
+                    iv = [sc["helixsr"]] if sc.get("helixsr") else []
+                    iv.append(f"scaler-{sc['scaler']}" if sc.get("scaler") else "scaler")
                 else:
                     iv = sorted(_marker_versions(g))
                 out.append({"index": i, "name": g.name, "folder": str(g.folder),
@@ -2017,6 +2016,41 @@ class Plugin:
                     g.get("route"), g.get("inputs") or [])
                 if versions is not None:
                     g["installed_versions"] = list(versions)
+                changed = True
+            if changed:
+                p.write_text(json.dumps(payload), encoding="utf-8")
+        except (OSError, ValueError):
+            pass
+
+    def _update_scaler_rows(self, targets: list):
+        """Refresh persisted scan rows for scaler installs from the live
+        install record (launch options, versions): the panel can then refresh
+        from this cache instead of walking the libraries again.
+        Call with _ops_lock held."""
+        try:
+            p = self._scan_cache_path()
+            payload = json.loads(p.read_text(encoding="utf-8"))
+            games = payload.get("games")
+            if not isinstance(games, list):
+                return
+            by_folder = {g.get("folder"): g for g in games if isinstance(g, dict)}
+            by_name = {g.get("name"): g for g in games if isinstance(g, dict)}
+            changed = False
+            for g in targets:
+                row = by_folder.get(str(g.folder)) or by_name.get(g.name)
+                if row is None:
+                    continue
+                sc = _scaler_install_info(g)
+                if not sc:
+                    continue
+                row["installed"] = True
+                row["status"] = "HelixSR Scaler installed"
+                row["route"] = "scaler"
+                row["available"] = ["scaler"]
+                row["launch_options"] = sc.get("launch_options") or ""
+                iv = [sc["helixsr"]] if sc.get("helixsr") else []
+                iv.append(f"scaler-{sc['scaler']}" if sc.get("scaler") else "scaler")
+                row["installed_versions"] = iv
                 changed = True
             if changed:
                 p.write_text(json.dumps(payload), encoding="utf-8")
@@ -2152,6 +2186,7 @@ class Plugin:
                         except (OSError, SystemExit) as e:
                             return {"ok": False, "output": f"{g.name}: {e}"}
                     self._update_scan_file([(g.name, str(g.folder)) for g in targets], True)
+                    self._update_scaler_rows(targets)
                     return {"ok": True, "output": "\n".join(logs)[-8000:]}
             except SystemExit as e:
                 return {"ok": False, "output": str(e) or "aborted"}
@@ -2184,6 +2219,7 @@ class Plugin:
                 if skipped:
                     logs.append("skipped: " + "; ".join(skipped))
                 self._update_scan_file([(g.name, str(g.folder)) for g in targets], True)
+                self._update_scaler_rows(targets)
                 return {"ok": True, "output": "\n".join(logs)[-8000:]}
         except SystemExit as e:
             return {"ok": False, "output": str(e) or "aborted"}
@@ -2896,14 +2932,6 @@ class Plugin:
                                           "(withdrawn in 1.9.3+; alternative providers live in Scaler)"}
         if not rebuild and helixscan.network_ready(d):
             return {"ok": False, "error": "the network is already built — nothing to do"}
-        thread_alive = bool(self._build_thread and self._build_thread.is_alive())
-        if thread_alive:
-            return {"ok": False, "error": "build already running"}
-        d = await self._active_dir()
-        if d is None:
-            return {"ok": False, "error": "no HelixSR version downloaded"}
-        if not rebuild and helixscan.network_ready(d):
-            return {"ok": False, "error": "the network is already built — nothing to do"}
         script = d / "helixsr-setup.sh"
         if not script.is_file():
             return {"ok": False, "error": f"helixsr-setup.sh not found in {d}: re-download the version"}
@@ -2916,6 +2944,7 @@ class Plugin:
         with open(log, "w") as f:
             f.write(header)
         self._build_log = log
+        self._build_cancel.clear()
         self._build_running = True
         self._build_thread = threading.Thread(
             target=self._build_run, args=(d, log, header, bash, str(script), bool(rebuild), bool(fg)),
@@ -2974,12 +3003,16 @@ class Plugin:
                 except (TypeError, ValueError):
                     total = 0
                 got, last_pct = 0, -1
+                cancelled = False
                 try:
                     with r, open(dlss, "wb") as f:
                         while True:
                             if not self._alive:
                                 self._build_running = False
                                 return
+                            if self._build_cancel.is_set():
+                                cancelled = True
+                                break
                             chunk = r.read(1 << 20)
                             if not chunk:
                                 break
@@ -2996,6 +3029,10 @@ class Plugin:
                     dlss.unlink(missing_ok=True)
                     line(f"[helixsr] DLSS download failed: {type(e).__name__}: {e}")
                     self._finish_build(log, False, -1, "setup failed: dlss download failed")
+                    return
+                if cancelled:
+                    dlss.unlink(missing_ok=True)
+                    self._finish_build(log, False, -1, "build cancelled during the DLSS download")
                     return
                 if total and got != total:
                     dlss.unlink(missing_ok=True)
@@ -3045,6 +3082,9 @@ class Plugin:
                      "without it frame generation stays unavailable, upscaling is unaffected")
             if not self._alive:
                 self._build_running = False
+                return
+            if self._build_cancel.is_set():
+                self._finish_build(log, False, -1, "build cancelled before setup started")
                 return
             fut = asyncio.run_coroutine_threadsafe(
                 self._spawn_and_watch(d, log, header, bash, script, dlss, rebuild, dlssg), self.loop)
@@ -3130,6 +3170,8 @@ class Plugin:
                 if dlssg is not None:
                     dlssg.unlink(missing_ok=True)
                 self._build_log_line(log, "[helixsr] network built; once-used nvngx_dlss.dll removed")
+            elif self._build_cancel.is_set():
+                self._build_log_line(log, "[helixsr] build cancelled; nvngx_dlss.dll kept for retry")
             else:
                 self._build_log_line(log, "[helixsr] setup failed; nvngx_dlss.dll kept for retry")
             self._build_log_line(log, f"[helixsr] setup exited rc={rc}")
@@ -3163,6 +3205,21 @@ class Plugin:
                 "network_built": bool(d and helixscan.network_ready(d)),
                 "fg_built": bool(d and _fg_built(d))}
 
+    async def cancel_build(self) -> dict:
+        """Ask a running network build to stop: aborts the plugin's DLSS/FG
+        pre-download or terminates the setup script (rc reflects the signal);
+        poll get_build_status(). Same paths the plugin unload uses."""
+        if not (self._build_thread and self._build_thread.is_alive()):
+            return {"ok": False, "error": "no build running"}
+        proc, self._build_proc = self._build_proc, None
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+        self._build_cancel.set()
+        return {"ok": True}
+
     # Asyncio-compatible long-running code, executed in a task when the plugin is loaded
     # MUST NOT BLOCK - spawn tasks for long work.
     async def _main(self):
@@ -3192,6 +3249,7 @@ class Plugin:
         self._scan_cache = _empty_scan_cache()
         self._ops_lock = threading.Lock()
         self._build_proc = None
+        self._build_cancel = threading.Event()
         decky.logger.info("HelixSR Muse Plugin loaded")
 
     # Function called first during the unload process, utilize this to handle your plugin being stopped, but not

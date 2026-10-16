@@ -44,10 +44,12 @@ The panel walks Version → Build → Games → Scaler, with a status line and c
    disk space; runs automatically before every build), then **Build network** or
    **Rebuild network**. The build downloads NVIDIA's DLSS DLL once (~56 MB, used to
    generate the network, then deleted), then compiles shaders through Proton/Wine's
-   DXC — expect several minutes; the Log streams progress with a % bar. On 1.9.0+
+   DXC — expect several minutes; the Log streams progress with a % bar, and the
+   build can be cancelled. On 1.9.0+
    an experimental **frame generation** toggle adds the FG build (extra ~400 MB of
    SDK/driver downloads, needs `zstd` or Python 3.14); without it FG is skipped.
-   The version line reports whether FG is actually built.
+   On builds without the FG engine (1.9.3+) the toggle is shown disabled with the
+   reason. The version line reports whether FG is actually built.
 3. **Games** — **Scan games** walks your Steam libraries (1.9.0+ also covers other
    stores) for DLSS / XeSS / FSR titles (the last scan is remembered, incl. install
    states; scans run in the background and can be cancelled). On older HelixSR, pick
@@ -56,7 +58,9 @@ The panel walks Version → Build → Games → Scaler, with a status line and c
    single-option games. **Install in / Remove from** each game, **Install/Remove
    all** at once (games without FSR 3.1 are skipped with a note instead of aborting
    the batch), or **Migrate** every outdated game to the active build in one go
-   (scaler installs migrate too). Per-game **Settings** edit `helixsr.ini` inline —
+   (scaler installs migrate too); the list updates instantly after each
+   install/uninstall from the persisted scan (only **Scan games** re-walks the
+   libraries). Per-game **Settings** edit `helixsr.ini` inline —
    the editor follows the installing HelixSR's template (1.9.0+: no game slider,
    `WaveSize` auto, Sharpness default 0.1) — with named **presets** (save/apply/
    delete with two-tap delete, plus a built-in **Default** that resets to defaults;

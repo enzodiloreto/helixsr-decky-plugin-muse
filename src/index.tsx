@@ -40,6 +40,7 @@ import {
   apiAddScanFolder,
   apiApplyIniPreset,
   apiApplyLogFix,
+  apiCancelBuild,
   apiCancelDownload,
   apiCancelPluginUpdate,
   apiCancelScan,
@@ -177,7 +178,7 @@ function Content() {
   const [showAllReleases, setShowAllReleases] = useState<boolean>(false);
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
   const [showMode, setShowMode] = useState<string>("all");
-  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({ installed: false, not: false });
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean | undefined>>({});
   const [health, setHealth] = useState<HealthCheck[] | null>(null);
   const [migrating, setMigrating] = useState<boolean>(false);
   const [mig, setMig] = useState<MigrationStatus | null>(null);
@@ -562,10 +563,14 @@ function Content() {
     if (pickedDownloaded) {
       setBusy("version");
       try {
-        setState(await apiSetActiveVersion(picked));
+        const st = await apiSetActiveVersion(picked);
+        setState(st);
         setPicked(picked);
         setGames([]);
         setGamesTag("");
+        // the FG flag can't carry across to a build without the FG engine
+        const nv = (st.versions || []).find((v) => v.tag === st.active_tag);
+        if (nv && nv.fg_available === false) setFgBuild(false);
       } finally {
         setBusy("");
         refreshState();
@@ -727,6 +732,15 @@ function Content() {
     }
   };
 
+  const onCancelBuild = async () => {
+    try {
+      const r = await apiCancelBuild();
+      if (!r.ok) setOutput(r.error || "build not cancelled");
+    } catch (e) {
+      console.error("[helixsr] cancel_build failed", e);
+    }
+  };
+
   const onBuild = async (rebuild: boolean) => {
     if (rebuild) {
       await armOrRun("rebuild network",
@@ -780,6 +794,27 @@ function Content() {
       await apiCancelScan();
     } catch (e) {
       console.error("[helixsr] cancel_scan failed", e);
+    }
+  };
+
+  // Refresh the games list from the persisted scan (the backend rewrites it
+  // after every install/uninstall): an uninstall doesn't warrant a
+  // minutes-long library re-walk. Falls back to a real scan when there is
+  // no cached list, and mimics what a scan completion resets.
+  const refreshGamesFromCache = async () => {
+    try {
+      const cached = await apiGetLastScan();
+      if (!cached.games.length) return false;
+      setGames(cached.games);
+      setVerify(null);
+      setIniFor(null);
+      setIni(null);
+      setLogFor(null);
+      setGameLogs([]);
+      setLogFixes([]);
+      return true;
+    } catch {
+      return false;
     }
   };
 
@@ -996,7 +1031,7 @@ function Content() {
   };
 
   const onInstallAll = async () => {
-    const targets = visibleGames.filter((g) => !g.installed);
+    const targets = installAllTargets;
     if (!targets.length) return;
     setBusy("games-all");
     try {
@@ -1005,7 +1040,9 @@ function Content() {
       const note = r.output.includes("skipped") || !r.ok ? r.output.slice(-200) : "";
       toaster.toast({ title: r.ok ? `Installed in ${targets.length} game(s)` : "Install failed", body: note });
       if (r.ok) {
-        setGames((gs) => gs.map((x) => (x.installed ? x : { ...x, installed: true, status: "HelixSR installed" })));
+        const done = new Set(targets.map((t) => t.index));
+        setGames((gs) => gs.map((x) => (!x.installed && done.has(x.index)
+          ? { ...x, installed: true, status: "HelixSR installed" } : x)));
         refreshState();
       }
     } finally {
@@ -1025,7 +1062,7 @@ function Content() {
           const r = await apiUninstallGames(targets.map((g) => g.index));
           setOutput(r.output);
           toaster.toast({ title: r.ok ? `Removed from ${targets.length} game(s)` : "Uninstall failed", body: r.ok ? "" : r.output.slice(-200) });
-          if (r.ok) onScan();
+          if (r.ok && !(await refreshGamesFromCache())) onScan();
         } finally {
           setBusy("");
         }
@@ -1274,7 +1311,7 @@ function Content() {
             const r = await apiInstallGames([g.index], route);
             setOutput(r.output);
             toaster.toast({ title: r.ok ? `Scaler installed in ${g.name}` : "Install failed", body: r.ok ? "Paste its Steam launch options" : r.output.slice(-200) });
-            if (r.ok) onScan();
+            if (r.ok && !(await refreshGamesFromCache())) onScan();
           } finally {
             setBusy("");
           }
@@ -1298,7 +1335,7 @@ function Content() {
       const r = await apiUninstallGames([g.index]);
       setOutput(r.output);
       toaster.toast({ title: r.ok ? `Removed from ${g.name}` : "Uninstall failed", body: r.ok ? "" : r.output.slice(-200) });
-      if (r.ok) onScan();
+      if (r.ok && !(await refreshGamesFromCache())) onScan();
     } finally {
       setBusy("");
     }
@@ -1317,12 +1354,21 @@ function Content() {
     Number(b.installed) - Number(a.installed) || a.index - b.index);
   const installedGroup = visibleGames.filter((g) => g.installed);
   const availGroup = visibleGames.filter((g) => !g.installed);
+  // undefined = auto: the sole non-empty group starts expanded (a first scan
+  // shouldn't present two collapsed headers); an explicit tap wins over the
+  // default from then on.
+  const openInstalled = openGroups.installed ?? (installedGroup.length > 0 && availGroup.length === 0);
+  const openNot = openGroups.not ?? (availGroup.length > 0 && installedGroup.length === 0);
   const installedCount = games.filter((g) => g.installed).length;
-  const visNotInstalled = visibleGames.filter((g) => !g.installed).length;
   const visInstalled = visibleGames.filter((g) => g.installed).length;
   const downloadedVersions = (state?.versions || []).filter((v) => downloadedTags.has(v.tag));
   const totalMB = downloadedVersions.reduce((a, v) => a + (v.size_mb || 0), 0);
   const activeLayout = state?.versions.find((v) => v.tag === state?.active_tag)?.layout || "legacy";
+  // "Install all" can only cover games the active HelixSR can actually install
+  // into: on 1.9.0+ (modern layout) that is games with FSR 3.1 files (the
+  // drop-in's requirement); the backend skips the rest with a note.
+  const installAllTargets = visibleGames.filter((g) => !g.installed
+    && (activeLayout !== "modern" || (g.fsr || []).length > 0));
   const buildProg = building ? parseBuildProgress(output) : null;
   // Live operation reflected in the hero so deep-scrolled users see state.
   const heroOp = downloading
@@ -1405,6 +1451,30 @@ function Content() {
         <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.sm }}>
           Step {step}/4 — {STEP_TEXT[step]}
         </div>
+        {step === 2 && activeVersion && !building && (
+          <div style={{ marginTop: M3.space.sm }}>
+            <MButton
+              disabled={busy !== "" || downloading || scanning || migrating || updating}
+              description="Compiles the shaders HelixSR needs — takes several minutes"
+              variant="filled"
+              onClick={() => doBuild(false)}
+            >
+              Build network now
+            </MButton>
+          </div>
+        )}
+        {step === 3 && games.length === 0 && !scanning && (
+          <div style={{ marginTop: M3.space.sm }}>
+            <MButton
+              disabled={busy !== "" || downloading || building || migrating || updating}
+              description="Finds DLSS / XeSS / FSR titles in your Steam libraries"
+              variant="filled"
+              onClick={onScan}
+            >
+              Scan games now
+            </MButton>
+          </div>
+        )}
         {heroOp && (
           <div style={{ marginTop: M3.space.sm }}>
             {heroOp.pct === null
@@ -1565,12 +1635,15 @@ function Content() {
             Check build readiness
           </MButton>
         </PanelSectionRow>
-        {activeVersion?.layout === "modern" && activeVersion?.fg_available !== false && (
+        {activeVersion?.layout === "modern" && (
         <PanelSectionRow>
           <ToggleField
             label="Frame generation (experimental)"
-            description="Builds FG into the DLL for Scaler games (~400 MB extra downloads, longer build)"
+            description={activeVersion?.fg_available === false
+              ? "No FG engine in this HelixSR build (withdrawn in 1.9.3+ — Scaler's providers cover FG)"
+              : "Builds FG into the DLL for Scaler games (~400 MB extra downloads, longer build)"}
             checked={fgBuild}
+            disabled={activeVersion?.fg_available === false}
             onChange={(c: boolean) => setFgBuild(c)}
           />
         </PanelSectionRow>
@@ -1581,6 +1654,13 @@ function Content() {
               <ProgressBar nProgress={buildProg.pct} nTransitionSec={M3.motion.bar} />
               <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.xs, fontVariantNumeric: M3.tabular }}>{buildProg.pct}% — {buildProg.label}</div>
             </div>
+          </PanelSectionRow>
+        )}
+        {building && (
+          <PanelSectionRow>
+            <MButton variant="text" onClick={onCancelBuild}>
+              Cancel build
+            </MButton>
           </PanelSectionRow>
         )}
         </>
@@ -1636,10 +1716,10 @@ function Content() {
             </div>
           </PanelSectionRow>
         )}
-        {visNotInstalled > 0 && (
+        {installAllTargets.length > 0 && (
           <PanelSectionRow>
             <MButton  disabled={busy !== "" || scanning} variant="filled" onClick={onInstallAll}>
-              {`Install all ${visNotInstalled} game(s)`}
+              {`Install all ${installAllTargets.length} game(s)`}
             </MButton>
           </PanelSectionRow>
         )}
@@ -1690,13 +1770,6 @@ function Content() {
             />
           </PanelSectionRow>
         )}
-        {filter.trim() && (
-          <PanelSectionRow>
-            <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
-              {visibleGames.length}/{games.length} shown
-            </div>
-          </PanelSectionRow>
-        )}
         <PanelSectionRow>
           <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
             {([
@@ -1725,7 +1798,9 @@ function Content() {
         )}
         <PanelSectionRow>
           <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
-            Showing {({ all: "All games", installed: "Installed only", available: "Not installed only", repair: "Needs repair" } as Record<string, string>)[showMode] || showMode} — {visibleGames.length}/{games.length}
+            {games.length > 0
+              ? `Showing ${({ all: "all games", installed: "installed only", available: "not installed only", repair: "needs repair" } as Record<string, string>)[showMode] || showMode}${filter.trim() ? ` · filter "${filter.trim()}"` : ""} — ${visibleGames.length}/${games.length}`
+              : "Scan to find games"}
           </div>
         </PanelSectionRow>
         {sortedGames.map((g, si) => (
@@ -1736,16 +1811,16 @@ function Content() {
                   variant="text"
                   onClick={() => setOpenGroups({
                     ...openGroups,
-                    [g.installed ? "installed" : "not"]: !(g.installed ? openGroups.installed : openGroups.not),
+                    [g.installed ? "installed" : "not"]: !(g.installed ? openInstalled : openNot),
                   })}
                 >
                   {g.installed
-                    ? `Installed (${installedGroup.length}) — ${openGroups.installed ? "collapse" : "expand"}`
-                    : `Not installed (${availGroup.length}) — ${openGroups.not ? "collapse" : "expand"}`}
+                    ? `Installed (${installedGroup.length}) — ${openInstalled ? "collapse" : "expand"}`
+                    : `Not installed (${availGroup.length}) — ${openNot ? "collapse" : "expand"}`}
                 </MButton>
               </PanelSectionRow>
             )}
-            {(g.installed ? openGroups.installed : openGroups.not) && (
+            {(g.installed ? openInstalled : openNot) && (
           <Card variant="outlined" style={{ width: "100%", marginBottom: M3.space.sm }}>
             <PanelSectionRow>
               <div style={{ display: "flex", alignItems: "center", gap: M3.space.sm, flexWrap: "wrap", width: "100%", boxSizing: "border-box", minWidth: 0 }}>
@@ -1789,7 +1864,7 @@ function Content() {
               </PanelSectionRow>
             )}
             <PanelSectionRow>
-              <MButton  disabled={busy !== ""} variant="text" onClick={() => setExpanded({ ...expanded, [g.index]: !expanded[g.index] })}>
+              <MButton variant="text" onClick={() => setExpanded({ ...expanded, [g.index]: !expanded[g.index] })}>
                 {expanded[g.index] ? "Hide details" : "Details"}
               </MButton>
             </PanelSectionRow>
@@ -1827,7 +1902,7 @@ function Content() {
                 </Card>
               </PanelSectionRow>
             ) : null}
-            {g.launch_options ? (
+            {g.installed && g.launch_options ? (
               <PanelSectionRow>
                 <Card tone="neutral" radius={M3.shape.md} style={{ background: M3.color.surfaceContainerLow, width: "100%" }}>
                   <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
@@ -1965,7 +2040,6 @@ function Content() {
                         {allPresetNames.map((n) => (
                           <MButton
                             key={n}
-                            disabled={busy !== ""}
                             variant={presetPick === n ? "filled" : "outlined"}
                             onClick={() => setPresetPick(n)}
                             style={{ flex: "1 1 40%", minWidth: 0 }}
