@@ -62,6 +62,7 @@ class PluginCase(unittest.TestCase):
         p._pu = {"running": False, "done": False, "ok": False, "error": "",
                  "version": "", "url": "", "downloaded": 0, "total": 0,
                  "mode": "", "path": ""}
+        p._pu_stop = threading.Event()
         p._update_pending = ""
         p._scan_stop = threading.Event()
         p._scan_cache = main._empty_scan_cache()
@@ -398,6 +399,12 @@ class PluginCase(unittest.TestCase):
         names = [c["name"] for c in p._check_build_ready_run(modern, fg=True)["checks"]]
         self.assertIn("DLSS Frame Generation DLL", names)
         self.assertIn("NGX core prerequisites", names)
+        # FG engine gate: this fixture has no setup/fg (1.9.3-style)
+        self.assertFalse(main.helixref.fg_engine_available(modern))
+        (modern / "setup" / "fg").mkdir(parents=True)
+        (modern / "setup" / "fg" / "fg_setup.py").write_text("# engine\n")
+        self.assertTrue(main.helixref.fg_engine_available(modern))
+        self.assertFalse(main.helixref.fg_engine_available(legacy))
 
         async def fg_go():
             p.loop = asyncio.get_event_loop()
@@ -406,6 +413,14 @@ class PluginCase(unittest.TestCase):
             r = await legacy_active.start_build(False, True)
             self.assertFalse(r["ok"])
             self.assertIn("1.9.0", r["error"])
+            with mock.patch.object(main.helixref, "layout_of", return_value="modern"), \
+                    mock.patch.object(main.helixref, "fg_engine_available", return_value=False):
+                r = await legacy_active.check_build_ready("v9.9.8", fg=True)
+                self.assertFalse(r["ok"])
+                self.assertIn("withdrawn", r["error"])
+                r = await legacy_active.start_build(False, True)
+                self.assertFalse(r["ok"])
+                self.assertIn("withdrawn", r["error"])
         asyncio.run(fg_go())
 
     def test_migration_moves_games(self):
@@ -614,6 +629,63 @@ class PluginCase(unittest.TestCase):
             bad = await p.install_games([(await self._game_index(p, "GameA"))], "dlss")
             self.assertFalse(bad["ok"])
             self.assertIn("cannot use route", bad["output"])
+        asyncio.run(go())
+
+    def test_legacy_batch_skips_bad_route(self):
+        self._version_dir(tag="9.9.9")
+        home = make_steam_home(self.tmp)
+        os.environ["DECKY_USER_HOME"] = str(home)
+        p = self._plugin()
+        ga = home / ".local/share/lib/steamapps/common/GameA/bin/amd_fidelityfx_upscaler_dx12.dll"
+        original = ga.read_bytes()
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            idx_a = await self._game_index(p, "GameA")
+            idx_b = await self._game_index(p, "GameB")
+            r = await p.install_games([idx_a, idx_b], "dlss")
+            self.assertTrue(r["ok"], r["output"])
+            self.assertIn("skipped", r["output"])
+            self.assertIn("GameA", r["output"])
+            self.assertEqual(ga.read_bytes(), original)
+            folder = home / ".local/share/lib/steamapps/common/GameB"
+            self.assertTrue((folder / "dxgi.dll").exists())
+        asyncio.run(go())
+
+    def test_plugin_update_cancel(self):
+        p = self._plugin()
+
+        import time
+
+        async def fake_check(force=False):
+            return {"ok": True, "update_available": True, "latest": "9.9.9",
+                    "url": "https://example.invalid/u.zip", "size": 0}
+
+        class Slow:
+            headers = {}
+
+            def read(self, n):
+                time.sleep(0.2)
+                return b"x" * (1 << 20)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            p.check_plugin_update = fake_check
+            with mock.patch.object(main.urllib.request, "urlopen", return_value=Slow()):
+                self.assertEqual(await p.start_plugin_update(), {"ok": True, "version": "9.9.9"})
+                await asyncio.sleep(0.3)
+                self.assertEqual(await p.cancel_plugin_update(), {"ok": True})
+                st = await self._wait_done(p.get_plugin_update_status)
+            self.assertTrue(st["cancelled"])
+            self.assertFalse(st["ok"])
+            self.assertEqual(await p.cancel_plugin_update(),
+                             {"ok": False, "error": "no update running"})
         asyncio.run(go())
 
     def test_game_settings_roundtrip(self):
@@ -1022,7 +1094,7 @@ def uninstall(g):
             idx = {g["name"]: g["index"] for g in st["games"]}
             r = await p.install_games([idx["DlssGame"]], "scaler")
             self.assertTrue(r["ok"], r["output"])
-            self.assertIn("WINEDLLOVERRIDES", r["output"])
+            self.assertIn("dxgi.dll loads by itself", r["output"])
             exe = Path(ga)
             self.assertTrue((exe / "dxgi.dll").is_file())
             self.assertNotEqual((exe / "dxgi.dll").read_bytes(), b"the game's own dxgi")
@@ -1036,16 +1108,20 @@ def uninstall(g):
             self.assertEqual(rec["loader"], "dxgi.dll")
             self.assertEqual(rec["scaler"], "v1.0.3")
             self.assertEqual(rec["helixsr"], "1.9.0")
-            self.assertIn("WINEDLLOVERRIDES", rec["launch_options"])
+            self.assertIsNone(rec["launch_options"])
             # settings roundtrip on the scaler ini
             s = await p.get_scaler_settings(idx["DlssGame"])
             self.assertTrue(s["ok"], s.get("error"))
             self.assertEqual(s["values"], {"Int8": "auto", "WaveSize": "auto",
-                                           "FrameGeneration": "auto"})
+                                           "FrameGeneration": "auto", "QuickFlow": "auto"})
             w = await p.set_scaler_settings(idx["DlssGame"], {"Int8": "on"})
             self.assertTrue(w["ok"], w.get("output"))
             s = await p.get_scaler_settings(idx["DlssGame"])
             self.assertEqual(s["values"]["Int8"], "on")
+            w = await p.set_scaler_settings(idx["DlssGame"], {"QuickFlow": "fastest"})
+            self.assertTrue(w["ok"], w.get("output"))
+            bad = await p.set_scaler_settings(idx["DlssGame"], {"QuickFlow": "turbo"})
+            self.assertFalse(bad["ok"])
             bad = await p.set_scaler_settings(idx["DlssGame"], {"Nope": 1})
             self.assertFalse(bad["ok"])
             bad = await p.set_scaler_settings(idx["DlssGame"], {"Int8": "sometimes"})
@@ -1055,8 +1131,11 @@ def uninstall(g):
             g = next(x for x in st2["games"] if x["name"] == "DlssGame")
             self.assertTrue(g["installed"])
             self.assertEqual(g["route"], "scaler")
-            self.assertIn("WINEDLLOVERRIDES", g["launch_options"])
+            self.assertEqual(g["launch_options"], "")
             self.assertIn("1.9.0", g["installed_versions"])
+            self.assertEqual(main._scaler_launch_options("dxgi.dll"), None)
+            self.assertEqual(main._scaler_launch_options("winmm.dll"),
+                             'WINEDLLOVERRIDES="winmm=n,b" %command%')
             # verify passes, then fails honestly when the loader is deleted
             v = await p.verify_installs()
             self.assertTrue(v["ok"])
@@ -1307,6 +1386,81 @@ def uninstall(g):
             main._fetch_zip_entry(url, "nope.bin", "0" * 64)
         with self.assertRaises(OSError):
             main._fetch_zip_entry(url, "top.txt", "0" * 64)
+
+    def test_releases_skip_prereleases_by_default(self):
+        p = self._plugin()
+        rels = [
+            {"tag_name": "v1.9.3", "draft": False, "prerelease": False, "name": "N",
+             "published_at": "2026-10-16T00:00:00Z",
+             "assets": [{"name": "HelixSR-1.9.3.zip", "size": 10, "browser_download_url": "u3"}],
+             "body": ""},
+            {"tag_name": "v1.9.2", "draft": False, "prerelease": True, "name": "P",
+             "published_at": "2026-10-16T00:00:00Z",
+             "assets": [{"name": "HelixSR-1.9.2.zip", "size": 10, "browser_download_url": "u2"}],
+             "body": ""},
+            {"tag_name": "v1.9.1", "draft": True, "prerelease": False, "name": "D",
+             "published_at": "2026-10-16T00:00:00Z",
+             "assets": [{"name": "HelixSR-1.9.1.zip", "size": 10, "browser_download_url": "u1"}],
+             "body": ""},
+        ]
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            with mock.patch.object(main, "_fetch_json", return_value=rels):
+                r = await p.get_releases()
+            self.assertEqual([x["tag"] for x in r["releases"]], ["v1.9.3"])
+            with mock.patch.object(main, "_fetch_json", return_value=rels):
+                r = await p.get_releases(True)
+            self.assertEqual([x["tag"] for x in r["releases"]], ["v1.9.3", "v1.9.2"])
+        asyncio.run(go())
+
+    def test_scaler_releases_skip_prereleases_by_default(self):
+        p = self._plugin()
+        rels = [
+            {"tag_name": "v1.0.3", "draft": False, "prerelease": False, "name": "N",
+             "published_at": "2026-10-15T00:00:00Z",
+             "assets": [{"name": "HelixSR-Scaler-1.0.3-linux.tar.gz", "size": 10,
+                         "browser_download_url": "u3"}],
+             "body": ""},
+            {"tag_name": "v1.0.4", "draft": False, "prerelease": True, "name": "P",
+             "published_at": "2026-10-16T00:00:00Z",
+             "assets": [{"name": "HelixSR-Scaler-1.0.4-linux.tar.gz", "size": 10,
+                         "browser_download_url": "u4"}],
+             "body": ""},
+            {"tag_name": "nightly", "draft": False, "prerelease": True, "name": "B",
+             "published_at": "2026-10-16T00:00:00Z",
+             "assets": [{"name": "OptiScaler_v10.0.0-pre1.7z", "size": 10,
+                         "browser_download_url": "u7"}],
+             "body": ""},
+        ]
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            with mock.patch.object(main, "_fetch_json", return_value=rels):
+                r = await p.get_scaler_releases()
+            self.assertEqual([x["tag"] for x in r["releases"]], ["v1.0.3"])
+            with mock.patch.object(main, "_fetch_json", return_value=rels):
+                r = await p.get_scaler_releases(True)
+            self.assertEqual([x["tag"] for x in r["releases"]], ["v1.0.3", "v1.0.4"])
+        asyncio.run(go())
+
+    def test_scaler_bundled_preferred(self):
+        import types
+        sdir, hdir = self._scaler_env()
+        gt = self.tmp / "bundled-game"
+        gt.mkdir()
+        g = types.SimpleNamespace(name="Bundled", target=gt, fsr_targets=[], folder=gt)
+        (hdir / "helixsr-scaler").mkdir()
+        (hdir / "helixsr-scaler" / "OptiScaler.dll").write_bytes(b"bundled scaler")
+        (hdir / "helixsr-scaler" / "OptiScaler.ini").write_text("[HelixSR]\n")
+        p = self._plugin(active="v1.9.0")
+        # no scaler_tag set and the separate download removed: bundled wins
+        shutil.rmtree(sdir)
+        log = p._scaler_install_one(g, hdir)
+        self.assertIn("installed", log)
+        self.assertEqual((gt / "dxgi.dll").read_bytes(), b"bundled scaler")
+        rec = json.loads((gt / "HelixSR" / "helixsr-scaler.json").read_text())
+        self.assertEqual(rec["scaler"], "bundled")
 
     def test_preset_case_insensitive_sorted_capped(self):
         p = self._plugin()
@@ -1864,6 +2018,105 @@ def uninstall(g):
         self.assertEqual(main._helixsr_asset(solo, "v1.8.1")["name"], "h.zip")
         self.assertIsNone(main._helixsr_asset(
             {"tag_name": "v1", "assets": [{"name": "n.txt"}]}, "v1"))
+
+    def test_available_routes_ways_delegation(self):
+        import types
+        g = types.SimpleNamespace(fsr_targets=[], route="scaler",
+                                  ways=lambda: ["direct", "scaler"])
+        self.assertEqual(main.helixref.available_routes(g, "/nonexistent"), ["direct", "scaler"])
+        base = Path(tempfile.mkdtemp(prefix="hxways-"))
+        self.addCleanup(shutil.rmtree, base, True)
+        modern = base / "HelixSR-1.9.3"
+        (modern / "setup").mkdir(parents=True)
+        (modern / "setup/helixsr_setup.py").write_text("# layout marker\n")
+        (modern / "setup/helixsr_install.py").write_text('MARKER = "helixsr-install.json"\n')
+        plain = types.SimpleNamespace(fsr_targets=[], route="unsupported")
+        self.assertEqual(main.helixref.available_routes(plain, modern), [])
+        fsr = types.SimpleNamespace(fsr_targets=["x.dll"], route="direct")
+        self.assertEqual(main.helixref.available_routes(fsr, modern), ["direct"])
+
+    def test_fg_engine_gate(self):
+        base = Path(tempfile.mkdtemp(prefix="hxfggate-"))
+        self.addCleanup(shutil.rmtree, base, True)
+        root = base / "helixsr"
+        noeng = root / "HelixSR-1.9.3"
+        (noeng / "setup").mkdir(parents=True)
+        (noeng / "setup/helixsr_setup.py").write_text("# layout marker\n")
+        (noeng / "helixsr-setup.sh").write_text("#!/bin/sh\n")
+        (noeng / "amd_fidelityfx_dx12.dll").write_bytes(b"\x00HelixSR 1.9.3\x00" + b"\x00" * 100)
+        eng = root / "HelixSR-1.9.0"
+        (eng / "setup" / "fg").mkdir(parents=True)
+        (eng / "setup" / "fg" / "fg_setup.py").write_text("# engine\n")
+        (eng / "setup/helixsr_setup.py").write_text("# layout marker\n")
+        (eng / "helixsr-setup.sh").write_text("#!/bin/sh\n")
+        (eng / "amd_fidelityfx_dx12.dll").write_bytes(b"\x00HelixSR 1.9.0\x00" + b"\x00" * 100)
+        self.assertFalse(main.helixref.fg_engine_available(noeng))
+        self.assertTrue(main.helixref.fg_engine_available(eng))
+        with mock.patch.dict(os.environ, {"DECKY_PLUGIN_RUNTIME_DIR": str(base)}):
+            p = self._plugin(active="v1.9.3")
+
+            async def go():
+                p.loop = asyncio.get_event_loop()
+                r = await p.check_build_ready("v1.9.3", fg=True)
+                self.assertFalse(r["ok"])
+                self.assertIn("withdrawn", r["error"])
+                r = await p.start_build(False, True)
+                self.assertFalse(r["ok"])
+                self.assertIn("withdrawn", r["error"])
+            asyncio.run(go())
+
+    def test_upstream_scaler_manifest_interop(self):
+        import types
+        base = Path(tempfile.mkdtemp(prefix="hxup-"))
+        self.addCleanup(shutil.rmtree, base, True)
+        t = base / "GameU"
+        (t / "HelixSR").mkdir(parents=True)
+        (t / "dxgi.dll").write_bytes(b"upstream scaler loader")
+        (t / "OptiScaler.ini").write_text("[HelixSR]\nInt8=auto\n")
+        (t / "HelixSR" / "helixsr.dll").write_bytes(b"\x00HelixSR 1.9.3\x00" + b"\x00" * 100)
+        (t / "HelixSR-Scaler.files").write_text(
+            "# HelixSR Scaler, installed by the HelixSR setup\n# version=1.0.6\nname=dxgi.dll\n"
+            "dxgi.dll\nOptiScaler.ini\n")
+        g = types.SimpleNamespace(target=t, fsr_targets=[], folder=t, name="GameU")
+        p = self._plugin()
+        info = main._scaler_install_info(g)
+        self.assertEqual(info["kind"], "upstream")
+        self.assertEqual(info["scaler"], "1.0.6")
+        self.assertEqual(info["helixsr"], "1.9.3")
+        self.assertEqual(info["loader"], "dxgi.dll")
+        self.assertIsNone(info["launch_options"])
+        self.assertEqual(main._marker_versions(g), {"1.9.3"})
+        self.assertEqual(p._verify_game(g), [])
+        (t / "dxgi.dll").unlink()
+        problems = p._verify_game(g)
+        self.assertTrue(any("dxgi.dll" in x for x in problems), problems)
+
+    def test_scaler_delegates_to_upstream(self):
+        base = Path(tempfile.mkdtemp(prefix="hxdel-"))
+        self.addCleanup(shutil.rmtree, base, True)
+        d = base / "HelixSR-1.9.3"
+        (d / "setup").mkdir(parents=True)
+        (d / "setup/helixsr_setup.py").write_text("# layout marker\n")
+        (d / "setup/helixsr_install.py").write_text(
+            'CALLS = []\n'
+            'def install(g, here):\n'
+            '    CALLS.append((g.name, g.route))\n'
+            '    print(f"[helixsr-setup] installed {g.name} via {g.route}")\n'
+            'def uninstall(g):\n'
+            '    print("[helixsr-setup] uninstalled")\n'
+            'def install_scaler(g, here, fg_new=False):\n'
+            '    CALLS.append(("scaler", g.name))\n'
+            'def uninstall_scaler(t, quiet=False):\n'
+            '    print("[helixsr-setup] scaler removed")\n')
+        import types
+        p = self._plugin()
+        g = types.SimpleNamespace(target=base / "GameD", fsr_targets=[], folder=base / "GameD",
+                                  name="GameD", route="direct")
+        log = p._scaler_install_one(g, d)
+        self.assertIn("via scaler", log)
+        mod = main.helixref.install_module(d)
+        self.assertEqual(mod.CALLS, [("GameD", "scaler")])
+        self.assertEqual(p._scaler_uninstall_one(g, d).strip(), "[helixsr-setup] scaler removed")
 
     def test_generation_dispatch(self):
         helixref = main.helixref

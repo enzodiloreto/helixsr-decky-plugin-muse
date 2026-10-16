@@ -81,14 +81,28 @@ def scan(d, extra, stop=None):
 
 
 def available_routes(g, d):
-    """Installable routes for a scanned game. Legacy defers to the reference;
-    modern only installs the drop-in (legacy installs are removal-only)."""
+    """Installable routes for a scanned game. Objects reporting their own
+    ways (1.9.3+) win; legacy defers to the reference; other modern games
+    only install the drop-in (legacy installs are removal-only)."""
+    ways = getattr(g, "ways", None)
+    if callable(ways):
+        try:
+            return list(ways())
+        except Exception:  # noqa: BLE001
+            pass
     mod = install_module(d)
     if mod is helixscan:
         return helixscan.available_routes(g, d)
     if getattr(g, "fsr_targets", None):
         return ["direct"]
     return []
+
+
+def fg_engine_available(d) -> bool:
+    """Whether this version can build HelixSR's frame generation: 1.9.0-1.9.2
+    ship setup/fg/fg_setup.py; 1.9.3+ withdrew the FG engine (its setup says
+    upscaling only, Scaler providers cover FG instead)."""
+    return (Path(d) / "setup" / "fg" / "fg_setup.py").is_file()
 
 
 def install(g, d):
@@ -116,6 +130,26 @@ def uninstall(g, d):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         mod.uninstall(g)
+    return buf.getvalue()
+
+
+def has_scaler_support(d) -> bool:
+    """Whether this version's reference implements HelixSR Scaler itself
+    (1.9.3+: install_scaler); older modern versions need the plugin's own
+    installer driven by the separate Scaler download."""
+    try:
+        return hasattr(install_module(d), "install_scaler")
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def uninstall_upstream_scaler(t, d):
+    """Remove an upstream-recorded Scaler install via the reference
+    implementation (its manifest, backups and remover). Returns the log."""
+    mod = install_module(d)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        mod.uninstall_scaler(Path(t))
     return buf.getvalue()
 
 

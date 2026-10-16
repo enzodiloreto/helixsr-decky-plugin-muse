@@ -258,7 +258,8 @@ def _status_for(route, inputs):
 
 def _marker_versions(g) -> set:
     """HelixSR versions recorded in a game's install markers (per route),
-    including this plugin's scaler marker."""
+    including this plugin's scaler marker. The installed helixsr.dll itself
+    is also read: it carries the build version no matter what installed it."""
     out = set()
     paths = []
     if g.target is not None:
@@ -273,6 +274,14 @@ def _marker_versions(g) -> set:
             continue
         if isinstance(rec, dict) and rec.get("helixsr"):
             out.add(str(rec["helixsr"]))
+    if g.target is not None:
+        hp = g.target / helixscan.FOLDER / "helixsr.dll"
+        try:
+            v = helixscan.version_of(hp) if hp.is_file() else "?"
+        except OSError:
+            v = "?"
+        if v and v != "?":
+            out.add(v)
     return out
 
 
@@ -547,8 +556,10 @@ MAX_INI_PRESETS = 20
 SCALER_INI_SECTION = "HelixSR"
 SCALER_INI_SETTINGS = {"Int8": ("auto", "on", "off"),
                        "WaveSize": ("auto", "64", "32"),
-                       "FrameGeneration": ("auto", "on", "off")}
-SCALER_INI_DEFAULTS = {"Int8": "auto", "WaveSize": "auto", "FrameGeneration": "auto"}
+                       "FrameGeneration": ("auto", "on", "off"),
+                       "QuickFlow": ("auto", "off", "on", "fastest")}
+SCALER_INI_DEFAULTS = {"Int8": "auto", "WaveSize": "auto", "FrameGeneration": "auto",
+                       "QuickFlow": "auto"}
 
 
 def _find_ini(g, create=False):
@@ -769,6 +780,14 @@ SCALER_MARKER = "helixsr-scaler.json"
 SCALER_LOADER = "dxgi.dll"
 SCALER_SKIP_DIRS = {"Licenses"}
 SCALER_SKIP_FILES = {"setup_linux.sh", "setup_windows.bat"}
+# Upstream 1.9.3+ record layout (read-only interop: manifest next to the exe,
+# backups under HelixSR-Scaler-backup, remover script, runtime-made files).
+UPSTREAM_SCALER_MANIFEST = "HelixSR-Scaler.files"
+UPSTREAM_SCALER_BACKUP = "HelixSR-Scaler-backup"
+UPSTREAM_SCALER_REMOVER = "HelixSR-Scaler-remove.sh"
+UPSTREAM_SCALER_MADE = ("OptiScaler.log", "HelixSR/helixsr_upscaler.dll",
+                        "HelixSR/helixsr.log", "HelixSR/helixsr.ini",
+                        "HelixSR/helixsr-fg/nvexec.log")
 
 
 def _scaler_marker_path(g):
@@ -787,6 +806,67 @@ def _read_scaler_marker(g):
     except (OSError, ValueError):
         return {}
     return rec if isinstance(rec, dict) else {}
+
+
+def _read_upstream_scaler_record(t):
+    """Upstream's HelixSR-Scaler.files manifest next to the exe, parsed to
+    {name, version, files} (None when absent). Plain-text format, read only."""
+    if t is None:
+        return None
+    try:
+        lines = (Path(t) / UPSTREAM_SCALER_MANIFEST).read_text(
+            encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    rec = {"name": "dxgi.dll", "version": None, "files": []}
+    seen_any = False
+    for line in lines:
+        line = line.strip()
+        if line.startswith("# version="):
+            rec["version"] = line.split("=", 1)[1].strip() or None
+        elif line.startswith("name="):
+            rec["name"] = line.split("=", 1)[1].strip() or rec["name"]
+        elif line and not line.startswith("#"):
+            rec["files"].append(line.replace("\\", "/"))
+            seen_any = True
+    return rec if seen_any else None
+
+
+def _scaler_launch_options(loader: str) -> str | None:
+    """Steam launch options for a scaler loader name (None for dxgi.dll:
+    Proton loads a game's own dxgi.dll by itself)."""
+    if loader.lower() == "dxgi.dll":
+        return None
+    return f'WINEDLLOVERRIDES="{Path(loader).stem}=n,b" %command%'
+
+
+def _scaler_install_info(g):
+    """Unified view of a scaler install, ours or upstream's: {kind, scaler,
+    helixsr, loader, files, launch_options}. None when neither record exists.
+    The HelixSR build version comes from the installed helixsr.dll itself,
+    so it works no matter what installed it."""
+    rec = _read_scaler_marker(g)
+    if rec:
+        loader = str(rec.get("loader", SCALER_LOADER))
+        return {"kind": "ours", "scaler": rec.get("scaler") or None,
+                "helixsr": rec.get("helixsr") or None, "loader": loader,
+                "files": list(rec.get("files", [])),
+                "launch_options": rec.get("launch_options") or _scaler_launch_options(loader)}
+    up = _read_upstream_scaler_record(g.target)
+    if up is None:
+        return None
+    helixsr = ""
+    if g.target is not None:
+        hp = Path(g.target) / helixscan.FOLDER / "helixsr.dll"
+        try:
+            helixsr = helixscan.version_of(hp) if hp.is_file() else ""
+        except OSError:
+            helixsr = ""
+        if helixsr == "?":
+            helixsr = ""
+    return {"kind": "upstream", "scaler": up["version"], "helixsr": helixsr,
+            "loader": up["name"], "files": list(up["files"]),
+            "launch_options": _scaler_launch_options(up["name"])}
 
 
 def _scaler_package_files(sdir: Path) -> list:
@@ -815,10 +895,6 @@ def _scaler_package_files(sdir: Path) -> list:
             continue
         out.append(rel)
     return out
-
-
-def _scaler_launch_options(loader: str) -> str:
-    return f'WINEDLLOVERRIDES="{loader}=n,b" %command%'
 
 
 def _scaler_install_game(g, sdir: Path, here: Path, scaler_tag: str = "",
@@ -880,25 +956,77 @@ def _scaler_install_game(g, sdir: Path, here: Path, scaler_tag: str = "",
                 helixsr_files.append(rel.as_posix())
     else:
         lines.append("  no frame generation files in this HelixSR build (upscaling only)")
+    lo = _scaler_launch_options(loader)
     (folder / SCALER_MARKER).write_text(json.dumps(
         {"scaler": scaler_tag or rec.get("scaler", ""),
          "helixsr": helixsr_version or rec.get("helixsr", ""),
          "loader": loader, "files": sorted(placed),
          "helixsr_files": sorted(helixsr_files),
          "backup": backed,
-         "launch_options": _scaler_launch_options(loader)}, indent=1) + "\n")
+         "launch_options": lo}, indent=1) + "\n")
     lines.append(f"  installed in {t}")
-    lines.append(f"  Steam launch options (paste per game): {_scaler_launch_options(loader)}")
+    if lo:
+        lines.append(f"  Steam launch options (paste per game): {lo}")
+    else:
+        lines.append("  no Steam launch options needed (dxgi.dll loads by itself)")
     return "\n".join(lines)
 
 
 def _scaler_uninstall_game(g) -> str:
-    """Remove this plugin's Scaler install: recorded files go, backups and
-    foreign files stay. Returns a log."""
+    """Remove a scaler install: recorded files go, backups and foreign files
+    stay. Handles this plugin's record and, as a fallback, upstream's manifest
+    (so installs from any version or tooling uninstall cleanly). Returns a log."""
     rec = _read_scaler_marker(g)
-    if not rec:
-        return f"{g.name}: no scaler install found"
     t = g.target
+    if not rec:
+        if t is None:
+            return f"{g.name}: no scaler install found"
+        up = _read_upstream_scaler_record(t)
+        if up is None:
+            return f"{g.name}: no scaler install found"
+        # Upstream layout: manifest files + runtime-made files go, the backup
+        # dir restores, remover script and manifest go last.
+        lines = []
+        victims = list(dict.fromkeys(
+            up["files"] + list(UPSTREAM_SCALER_MADE)))
+        for rel in victims:
+            if rel.startswith("/") or ".." in Path(rel).parts:
+                continue
+            try:
+                if (t / rel).is_file() and not (t / rel).is_symlink():
+                    (t / rel).unlink()
+            except OSError as e:  # noqa: BLE001
+                lines.append(f"  could not remove {rel}: {e}")
+        backup = t / UPSTREAM_SCALER_BACKUP
+        if backup.is_dir():
+            for f in sorted(backup.rglob("*")):
+                if not f.is_file() and not f.is_symlink():
+                    continue
+                dst = t / f.relative_to(backup)
+                try:
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    if not dst.exists():
+                        os.replace(f, dst)
+                except OSError as e:  # noqa: BLE001
+                    lines.append(f"  could not restore {f.name}: {e}")
+            shutil.rmtree(backup, ignore_errors=True)
+        for n in (UPSTREAM_SCALER_MANIFEST, UPSTREAM_SCALER_REMOVER):
+            try:
+                (t / n).unlink(missing_ok=True)
+            except OSError:
+                pass
+        for rel in victims:
+            parent = t / rel
+            for _ in range(max(1, len(Path(rel).parts))):
+                parent = parent.parent
+                if parent == t:
+                    break
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+        lines.append(f"  scaler removed from {t} (take its launch options back out of Steam)")
+        return "\n".join(lines)
     folder = t / helixscan.FOLDER
     lines = []
     victims = list(dict.fromkeys(
@@ -993,7 +1121,7 @@ def _repair_direct(g, here):
 
 
 class Plugin:
-    async def get_releases(self) -> dict:
+    async def get_releases(self, include_prereleases: bool = False) -> dict:
         def _fetch():
             try:
                 data = _fetch_json(RELEASES_URL)
@@ -1013,6 +1141,10 @@ class Plugin:
                 return {"releases": [], "error": err}
             out = []
             for r in data:
+                if not isinstance(r, dict) or r.get("draft"):
+                    continue
+                if r.get("prerelease") and not include_prereleases:
+                    continue
                 tag = r.get("tag_name", "")
                 a = _helixsr_asset(r, tag)
                 if not tag or a is None:
@@ -1038,6 +1170,7 @@ class Plugin:
                                  "dll_version": dll_version,
                                  "layout": helixref.layout_of(d),
                                  "fg_built": _fg_built(d),
+                                 "fg_available": helixref.fg_engine_available(d),
                                  "size_mb": round(_dir_size_cached(d) / 1e6, 1)})
             return {"active_tag": self.settings.getSetting("active_tag", ""),
                     "versions": versions, "root": str(_helixsr_root()),
@@ -1159,7 +1292,7 @@ class Plugin:
     async def get_download_status(self) -> dict:
         return dict(self._dl)
 
-    async def get_scaler_releases(self) -> dict:
+    async def get_scaler_releases(self, include_prereleases: bool = False) -> dict:
         """HelixSR Scaler releases (separate repo): Linux tarballs for Deck."""
         def _fetch():
             try:
@@ -1170,6 +1303,10 @@ class Plugin:
                 return {"releases": [], "error": err}
             out = []
             for r in data:
+                if not isinstance(r, dict) or r.get("draft"):
+                    continue
+                if r.get("prerelease") and not include_prereleases:
+                    continue
                 tag = r.get("tag_name", "")
                 a = _scaler_asset(r)
                 if not tag or a is None:
@@ -1300,7 +1437,7 @@ class Plugin:
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
         best = None
         for r in data:
-            if not isinstance(r, dict) or r.get("draft"):
+            if not isinstance(r, dict) or r.get("draft") or r.get("prerelease"):
                 continue
             tag = str(r.get("tag_name") or "")
             asset = _largest_zip(r)
@@ -1338,15 +1475,23 @@ class Plugin:
             return {"ok": False, "error": check.get("error") or "update check failed"}
         if not check.get("update_available"):
             return {"ok": False, "error": "already on the newest version"}
-        self._pu = {"running": True, "done": False, "ok": False, "error": "",
+        self._pu = {"running": True, "done": False, "ok": False, "cancelled": False, "error": "",
                     "version": check["latest"], "url": check["url"],
                     "downloaded": 0, "total": check.get("size", 0) or 0,
                     "mode": "", "path": ""}
+        self._pu_stop.clear()
         threading.Thread(target=self._plugin_update_run, daemon=True).start()
         return {"ok": True, "version": check["latest"]}
 
     async def get_plugin_update_status(self) -> dict:
         return dict(self._pu)
+
+    async def cancel_plugin_update(self) -> dict:
+        """Ask a running plugin update to stop; poll get_plugin_update_status()."""
+        if not self._pu["running"]:
+            return {"ok": False, "error": "no update running"}
+        self._pu_stop.set()
+        return {"ok": True}
 
     def _plugin_update_run(self):
         st = self._pu
@@ -1372,11 +1517,18 @@ class Plugin:
                     while True:
                         if not self._alive:
                             return
+                        if self._pu_stop.is_set():
+                            break
                         chunk = r.read(1 << 20)
                         if not chunk:
                             break
                         f.write(chunk)
                         st["downloaded"] += len(chunk)
+            if self._pu_stop.is_set():
+                tmp.unlink(missing_ok=True)
+                st["cancelled"] = True
+                st["error"] = "update cancelled"
+                return
             if st["total"] and st["downloaded"] != st["total"]:
                 raise OSError(f"incomplete download: got {st['downloaded']} of {st['total']} bytes")
             if inplace:
@@ -1511,6 +1663,10 @@ class Plugin:
             return {"ok": False, "error": "no HelixSR version downloaded", "checks": []}
         if fg and helixref.layout_of(d) != "modern":
             return {"ok": False, "error": "frame generation needs HelixSR 1.9.0+", "checks": []}
+        if fg and not helixref.fg_engine_available(d):
+            return {"ok": False, "error": "this HelixSR has no frame generation engine "
+                                          "(withdrawn in 1.9.3+; alternative providers live in Scaler)",
+                    "checks": []}
         return await asyncio.to_thread(self._check_build_ready_run, d, bool(fg))
 
     def _check_build_ready_run(self, d: Path, fg: bool = False) -> dict:
@@ -1640,7 +1796,7 @@ class Plugin:
                         installed = g.installed()
                     except Exception:  # noqa: BLE001
                         installed = False
-                    sc = _read_scaler_marker(g)
+                    sc = _scaler_install_info(g)
                     if not installed and not sc:
                         continue
                     have = _marker_versions(g)
@@ -1656,12 +1812,8 @@ class Plugin:
                     st["current_name"] = g.name
                     decky.logger.info(f"HelixSR migrating {g.name} to {target_tag}")
                     try:
-                        if _read_scaler_marker(g):
-                            sdir, err = self._scaler_dir_or_error()
-                            if err:
-                                raise OSError(err)
-                            stag = self.settings.getSetting("scaler_tag", "")
-                            detail = _scaler_install_game(g, sdir, target, stag, target_version)
+                        if _scaler_install_info(g):
+                            detail = self._scaler_install_one(g, target)
                         else:
                             detail = helixref.uninstall(g, target) + "\n" + helixref.install(g, target)
                         results.append({"name": g.name, "ok": True, "detail": detail[-2000:]})
@@ -1760,17 +1912,17 @@ class Plugin:
                     old = g.old_install() if callable(getattr(g, "old_install", None)) else None
                     if not old:
                         routes = ["scaler"]
-                sc = _read_scaler_marker(g)
+                sc = _scaler_install_info(g)
                 launch_options = ""
                 if sc:
-                    # This plugin's Scaler install: upstream objects don't see
-                    # it (own marker), so overlay the installed state here.
+                    # A scaler install, ours or upstream's (upstream objects
+                    # don't report it): overlay the installed state here.
                     # installed_versions carries the HelixSR build (migration
                     # matching) plus the scaler tag (display).
                     inst = True
                     status = "HelixSR Scaler installed"
                     routes = ["scaler"]
-                    launch_options = sc.get("launch_options", "")
+                    launch_options = sc.get("launch_options") or ""
                 if sc:
                     iv = ([sc["helixsr"]] if sc.get("helixsr") else []
                           + [f"scaler-{sc['scaler']}" if sc.get("scaler") else "scaler"])
@@ -1931,26 +2083,89 @@ class Plugin:
             return None, "the network is not built: run Build first"
         return d, ""
 
-    def _scaler_install_run(self, d, indices, extra):
-        sdir, err = self._scaler_dir_or_error()
-        if err:
-            return {"ok": False, "output": err}
+    def _scaler_install_one(self, g, d):
+        """Install (or refresh) scaler into one resolved game, +, returns log.
+        Versions with upstream scaler support (1.9.3+) use the reference
+        installer (route forced to scaler: anti-cheat refusals, loader choice,
+        manifest and remover included); older ones use this plugin's own
+        installer, preferring the version's bundled helixsr-scaler/ over the
+        separate Scaler download. Raises."""
+        mod = helixref.install_module(d)
+        if hasattr(mod, "install_scaler"):
+            c = copy.copy(g)
+            c.route = "scaler"
+            return helixref.install(c, d)
+        bundled = Path(d) / "helixsr-scaler"
+        if (bundled / "OptiScaler.dll").is_file():
+            sdir, stag = bundled, self.settings.getSetting("scaler_tag", "") or "bundled"
+        else:
+            sdir, err = self._scaler_dir_or_error()
+            if err:
+                raise OSError(err)
+            stag = self.settings.getSetting("scaler_tag", "")
         here, err = self._scaler_helixsr_check(d)
         if err:
-            return {"ok": False, "output": err}
+            raise OSError(err)
         try:
             hver = helixscan.version_of(here / "amd_fidelityfx_dx12.dll")
         except OSError:
             hver = "?"
-        stag = self.settings.getSetting("scaler_tag", "")
+        return _scaler_install_game(g, sdir, here, stag, hver)
+
+    def _scaler_uninstall_one(self, g, d):
+        """Remove a scaler install, ours or upstream's. Returns the log."""
+        if _read_scaler_marker(g):
+            return _scaler_uninstall_game(g)
+        mod = helixref.install_module(d)
+        if hasattr(mod, "uninstall_scaler") and g.target is not None:
+            return helixref.uninstall_upstream_scaler(g.target, d)
+        return _scaler_uninstall_game(g)
+
+    @staticmethod
+    def _pick_targets(gl, indices):
+        """Index validation shared by game ops (no lock: caller holds _ops_lock)."""
+        targets = []
+        for i in indices:
+            if not 1 <= i <= len(gl):
+                return None, f"not a game number: {i} (scan found {len(gl)})"
+            targets.append(gl[i - 1])
+        return targets, ""
+
+    def _scaler_install_run(self, d, indices, extra):
+        mod = helixref.install_module(d)
+        if hasattr(mod, "install_scaler"):
+            # Upstream owns the flow (anti-cheat refusals, loader choice,
+            # manifest/remover, switching): validate and dispatch per game.
+            try:
+                with self._ops_lock:
+                    if not helixscan.network_ready(d):
+                        return {"ok": False, "output": "the network is not built: run Build first"}
+                    gl = self._resolve_games(d, extra or [])
+                    targets, err = self._pick_targets(gl, indices)
+                    if err:
+                        return {"ok": False, "output": err}
+                    logs = []
+                    for g in targets:
+                        decky.logger.info(f"HelixSR scaler install {g.name} (route scaler)")
+                        try:
+                            logs.append(self._scaler_install_one(g, d))
+                        except (OSError, SystemExit) as e:
+                            return {"ok": False, "output": f"{g.name}: {e}"}
+                    self._update_scan_file([(g.name, str(g.folder)) for g in targets], True)
+                    return {"ok": True, "output": "\n".join(logs)[-8000:]}
+            except SystemExit as e:
+                return {"ok": False, "output": str(e) or "aborted"}
+            except Exception as e:  # noqa: BLE001
+                decky.logger.error(f"HelixSR scaler install failed: {e}")
+                return {"ok": False, "output": f"{type(e).__name__}: {e}"}
+        # Older modern versions (1.9.0-1.9.2) have no upstream scaler flow:
+        # eligibility plus this plugin's own installer (separate download).
         try:
             with self._ops_lock:
                 gl = self._resolve_games(d, extra or [])
-                targets = []
-                for i in indices:
-                    if not 1 <= i <= len(gl):
-                        return {"ok": False, "output": f"not a game number: {i} (scan found {len(gl)})"}
-                    targets.append(gl[i - 1])
+                targets, err = self._pick_targets(gl, indices)
+                if err:
+                    return {"ok": False, "output": err}
                 logs, skipped = [], []
                 for g in targets:
                     if getattr(g, "fsr_targets", None):
@@ -1961,10 +2176,9 @@ class Plugin:
                         continue
                     decky.logger.info(f"HelixSR scaler install {g.name}")
                     try:
-                        out = _scaler_install_game(g, sdir, here, stag, hver)
+                        logs.append(self._scaler_install_one(g, d))
                     except (OSError, SystemExit) as e:
                         return {"ok": False, "output": f"{g.name}: {e}"}
-                    logs.append(out)
                 if not logs:
                     return {"ok": False, "output": "\n".join(skipped)}
                 if skipped:
@@ -1987,11 +2201,9 @@ class Plugin:
                 if not helixscan.network_ready(d):
                     return {"ok": False, "output": "the network is not built: run Build first"}
                 gl = self._resolve_games(d, extra or [])
-                targets = []
-                for i in indices:
-                    if not 1 <= i <= len(gl):
-                        return {"ok": False, "output": f"not a game number: {i} (scan found {len(gl)})"}
-                    targets.append(gl[i - 1])
+                targets, err = self._pick_targets(gl, indices)
+                if err:
+                    return {"ok": False, "output": err}
                 modern = helixref.layout_of(d) != "legacy"
                 if op == "install" and route is not None and modern:
                     # Modern installs the drop-in only (legacy installs switch
@@ -2009,52 +2221,42 @@ class Plugin:
                         except Exception:  # noqa: BLE001
                             why = "not supported by the drop-in"
                         return {"ok": False, "output": f"{g.name}: {why}"}
-                if op == "install" and route is not None and not modern:
-                        picked = []
-                        for g in targets:
-                            if route not in helixscan.available_routes(g, d):
-                                return {"ok": False, "output":
-                                        f"{g.name} cannot use route '{route}'"}
-                            # Same as the reference's per-game question: switch
-                            # routes (install() removes the old way first) and
-                            # remember OptiScaler where picked. A shallow copy
-                            # keeps the scan cache pristine on success and failure.
-                            c = copy.copy(g)
-                            c.route = route
-                            c.chosen = route == "optiscaler" and g.can_opti
-                            picked.append(c)
-                        targets = picked
                 skipped: list = []
+                if op == "install" and route is not None and not modern:
+                    picked = []
+                    for g in targets:
+                        if route not in helixscan.available_routes(g, d):
+                            skipped.append(f"{g.name} cannot use route '{route}'")
+                            continue
+                        # Same as the reference's per-game question: switch
+                        # routes (install() removes the old way first) and
+                        # remember OptiScaler where picked. A shallow copy
+                        # keeps the scan cache pristine on success and failure.
+                        c = copy.copy(g)
+                        c.route = route
+                        c.chosen = route == "optiscaler" and g.can_opti
+                        picked.append(c)
+                    if not picked:
+                        return {"ok": False, "output": skipped[0] if skipped else "nothing to install"}
+                    targets = picked
                 if op == "install" and modern:
                     # Batch installs include listed-but-unsupported games; skip
                     # them with a note instead of aborting the whole batch.
                     keep = [g for g in targets if getattr(g, "fsr_targets", None)]
-                    skipped = [g.name for g in targets if not getattr(g, "fsr_targets", None)]
+                    skipped += [f"{g.name}: no FSR 3.1 (drop-in needs it)"
+                                for g in targets if not getattr(g, "fsr_targets", None)]
                     targets = keep
                     if not targets:
-                        return {"ok": False, "output":
-                                f"no FSR 3.1 games selected ({', '.join(skipped)})"}
+                        return {"ok": False, "output": "skipped: " + "; ".join(skipped)}
                 logs = []
                 for g in targets:
                     decky.logger.info(f"HelixSR {op} {g.name} (route {g.route})")
                     if op == "install":
                         logs.append(helixref.install(g, d))
                     elif op == "repair":
-                        if _read_scaler_marker(g):
-                            sdir, err = self._scaler_dir_or_error()
-                            if err:
-                                return {"ok": False, "output": err}
-                            here, err = self._scaler_helixsr_check(d)
-                            if err:
-                                return {"ok": False, "output": err}
+                        if _scaler_install_info(g):
                             try:
-                                hver = helixscan.version_of(here / "amd_fidelityfx_dx12.dll")
-                            except OSError:
-                                hver = "?"
-                            stag = self.settings.getSetting("scaler_tag", "")
-                            try:
-                                logs.append(_scaler_install_game(
-                                    g, sdir, here, stag, hver))
+                                logs.append(self._scaler_install_one(g, d))
                             except (OSError, SystemExit) as e:
                                 return {"ok": False, "output": f"{g.name}: {e}"}
                         elif g.route == "direct":
@@ -2063,8 +2265,8 @@ class Plugin:
                         else:
                             logs.append(helixref.install(g, d))
                     else:
-                        if _read_scaler_marker(g):
-                            logs.append(_scaler_uninstall_game(g))
+                        if _scaler_install_info(g):
+                            logs.append(self._scaler_uninstall_one(g, d))
                         else:
                             logs.append(helixref.uninstall(g, d))
                 # Note: the cache is intentionally NOT invalidated here. Cached
@@ -2074,7 +2276,7 @@ class Plugin:
                 self._update_scan_file([(g.name, str(g.folder)) for g in targets],
                                        op == "install")
                 if skipped:
-                    logs.append(f"skipped (no FSR 3.1): {', '.join(skipped)}")
+                    logs.append("skipped: " + "; ".join(skipped))
                 return {"ok": True, "output": "\n".join(logs)[-8000:]}
         except SystemExit as e:
             return {"ok": False, "output": str(e) or "aborted"}
@@ -2178,7 +2380,7 @@ class Plugin:
             for name in ("helixsr.log", "helixsr_loader.log"):
                 if (g.target / name).is_file():
                     paths.append(g.target / name)
-            if _read_scaler_marker(g) and (g.target / "OptiScaler.log").is_file():
+            if _scaler_install_info(g) and (g.target / "OptiScaler.log").is_file():
                 paths.append(g.target / "OptiScaler.log")
         for t in g.fsr_targets:
             p = t.parent / "helixsr.log"
@@ -2215,7 +2417,7 @@ class Plugin:
                         tail = f"<unreadable: {e}>"
                     logs.append({"path": str(p), "tail": tail})
                 blob = "\n".join(l["tail"] for l in logs).lower()
-                if _read_scaler_marker(g):
+                if _scaler_install_info(g):
                     # Scaler settings live in OptiScaler.ini [HelixSR], not
                     # helixsr.ini: show the logs, offer no ini fixes.
                     return {"ok": True, "name": g.name, "logs": logs, "fixes": []}
@@ -2509,7 +2711,7 @@ class Plugin:
     def _install_traces(self, g) -> bool:
         """Marker/backup files proving HelixSR was installed here, even if the
         live files no longer qualify (e.g. a Steam update replaced the DLL)."""
-        if _read_scaler_marker(g):
+        if _scaler_install_info(g):
             return True
         if g.target is not None and (g.target / helixscan.FOLDER / helixscan.MARKER).is_file():
             return True
@@ -2530,7 +2732,7 @@ class Plugin:
                         installed = g.installed()
                     except Exception:  # noqa: BLE001
                         installed = False
-                    sc = _read_scaler_marker(g)
+                    sc = _scaler_install_info(g)
                     if sc:
                         installed = True
                     if not installed and not self._install_traces(g):
@@ -2547,7 +2749,7 @@ class Plugin:
 
     def _verify_game(self, g) -> list:
         problems = []
-        sc = _read_scaler_marker(g)
+        sc = _scaler_install_info(g)
         if sc:
             if g.target is None:
                 return ["game folder not found anymore"]
@@ -2689,6 +2891,9 @@ class Plugin:
             return {"ok": False, "error": "no HelixSR version downloaded"}
         if fg and helixref.layout_of(d) != "modern":
             return {"ok": False, "error": "frame generation needs HelixSR 1.9.0+"}
+        if fg and not helixref.fg_engine_available(d):
+            return {"ok": False, "error": "this HelixSR has no frame generation engine "
+                                          "(withdrawn in 1.9.3+; alternative providers live in Scaler)"}
         if not rebuild and helixscan.network_ready(d):
             return {"ok": False, "error": "the network is already built — nothing to do"}
         thread_alive = bool(self._build_thread and self._build_thread.is_alive())
@@ -2978,9 +3183,10 @@ class Plugin:
         self._scan = _new_scan_state()
         self._mig = _new_mig_state()
         self._update_check = {"at": 0.0, "result": {"ok": True, "update_available": False}}
-        self._pu = {"running": False, "done": False, "ok": False, "error": "",
+        self._pu = {"running": False, "done": False, "ok": False, "cancelled": False, "error": "",
                     "version": "", "url": "", "downloaded": 0, "total": 0,
                     "mode": "", "path": ""}
+        self._pu_stop = threading.Event()
         self._update_pending = ""
         self._scan_stop = threading.Event()
         self._scan_cache = _empty_scan_cache()

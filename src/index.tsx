@@ -41,6 +41,7 @@ import {
   apiApplyIniPreset,
   apiApplyLogFix,
   apiCancelDownload,
+  apiCancelPluginUpdate,
   apiCancelScan,
   apiCancelScalerDownload,
   apiCheckBuildReady,
@@ -124,11 +125,13 @@ const SCALER_SETTING_LABELS: Record<string, string> = {
   Int8: "Speed boost — faster int8 math (auto decides; off if the picture shimmers)",
   WaveSize: "Wave size — 64 for RX 7000 / 9000 if the picture is broken",
   FrameGeneration: "Frame generation — needs an FG build (off if crashes or stutters)",
+  QuickFlow: "FG quality — Best, Fast or Fastest (auto is Best)",
 };
 const SCALER_SETTING_OPTIONS: Record<string, [string, string][]> = {
   Int8: [["auto", "Auto"], ["on", "On"], ["off", "Off"]],
   WaveSize: [["auto", "Auto"], ["64", "64"], ["32", "32"]],
   FrameGeneration: [["auto", "Auto"], ["on", "On"], ["off", "Off"]],
+  QuickFlow: [["auto", "Auto"], ["off", "Best"], ["on", "Fast"], ["fastest", "Fastest"]],
 };
 
 function Content() {
@@ -150,6 +153,8 @@ function Content() {
   const [scalerPicked, setScalerPicked] = useState<string>("");
   const [scalerDownloading, setScalerDownloading] = useState<boolean>(false);
   const [scDl, setScDl] = useState<ScalerDownloadStatus | null>(null);
+  const [scDlRate, setScDlRate] = useState<string>("");
+  const scPrev = useRef<{ t: number; bytes: number } | null>(null);
   const [scIniFor, setScIniFor] = useState<number | null>(null);
   const [scIni, setScIni] = useState<ScalerSettings | null>(null);
   const [scIniPath, setScIniPath] = useState<string>("");
@@ -168,6 +173,7 @@ function Content() {
   const [logFixes, setLogFixes] = useState<LogFix[]>([]);
   const [verify, setVerify] = useState<VerifyResult[] | null>(null);
   const [filter, setFilter] = useState<string>("");
+  const [showPrereleases, setShowPrereleases] = useState<boolean>(false);
   const [showAllReleases, setShowAllReleases] = useState<boolean>(false);
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
   const [showMode, setShowMode] = useState<string>("all");
@@ -180,6 +186,8 @@ function Content() {
   const [checkingUpdate, setCheckingUpdate] = useState<boolean>(false);
   const [updating, setUpdating] = useState<boolean>(false);
   const [pu, setPu] = useState<PluginUpdateStatus | null>(null);
+  const [puRate, setPuRate] = useState<string>("");
+  const puPrev = useRef<{ t: number; bytes: number } | null>(null);
   const [confirm, setConfirm] = useState<string>("");
   const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -212,7 +220,7 @@ function Content() {
 
   const refreshReleases = async () => {
     try {
-      const relsRes = await apiGetReleases();
+      const relsRes = await apiGetReleases(showPrereleases);
       setReleases(relsRes.releases);
       if (!picked) setPicked(relsRes.releases[0]?.tag || "");
       if (relsRes.error) {
@@ -240,7 +248,7 @@ function Content() {
 
   const refreshScalerReleases = async () => {
     try {
-      const r = await apiGetScalerReleases();
+      const r = await apiGetScalerReleases(showPrereleases);
       setScalerReleases(r.releases);
       if (!scalerPicked) setScalerPicked(r.releases[0]?.tag || "");
       if (r.error) setOutput(`Failed to load Scaler releases: ${r.error}`);
@@ -248,6 +256,20 @@ function Content() {
     } catch (e) {
       console.error("[helixsr] get_scaler_releases failed", e);
       return null;
+    }
+  };
+
+  const onTogglePrereleases = async (c: boolean) => {
+    setShowPrereleases(c);
+    try {
+      const [relsRes, scalerRes] = await Promise.all([apiGetReleases(c), apiGetScalerReleases(c)]);
+      setReleases(relsRes.releases);
+      setScalerReleases(scalerRes.releases);
+      if (!relsRes.releases.some((r) => r.tag === picked)) setPicked(relsRes.releases[0]?.tag || "");
+      if (!scalerRes.releases.some((r) => r.tag === scalerPicked)) setScalerPicked(scalerRes.releases[0]?.tag || "");
+      if (relsRes.error) setOutput(`Failed to load HelixSR releases: ${relsRes.error}`);
+    } catch (e) {
+      console.error("[helixsr] prerelease toggle failed", e);
     }
   };
 
@@ -368,8 +390,19 @@ function Content() {
       try {
         const st = await apiGetScalerDownloadStatus();
         setScDl(st);
+        const now = Date.now();
+        const prev = scPrev.current;
+        scPrev.current = { t: now, bytes: st.downloaded };
+        if (prev && now > prev.t && st.downloaded >= prev.bytes && !st.done) {
+          const speed = ((st.downloaded - prev.bytes) * 1000) / (now - prev.t);
+          if (speed > 0) {
+            const left = st.total > st.downloaded ? (st.total - st.downloaded) / speed : 0;
+            setScDlRate(`${fmtSize(speed)}/s${st.total ? ` — ~${Math.max(1, Math.ceil(left))}s left` : ""}`);
+          }
+        }
         if (st.done) {
           setScalerDownloading(false);
+          setScDlRate("");
           if (st.cancelled) {
             setOutput("Scaler download cancelled.");
           } else if (st.ok) {
@@ -428,8 +461,20 @@ function Content() {
       try {
         const st = await apiGetPluginUpdateStatus();
         setPu(st);
+        const now = Date.now();
+        const prev = puPrev.current;
+        puPrev.current = { t: now, bytes: st.downloaded };
+        if (prev && now > prev.t && st.downloaded >= prev.bytes && !st.done) {
+          const speed = ((st.downloaded - prev.bytes) * 1000) / (now - prev.t);
+          if (speed > 0) {
+            const left = st.total > st.downloaded ? (st.total - st.downloaded) / speed : 0;
+            setPuRate(`${fmtSize(speed)}/s${st.total ? ` — ~${Math.max(1, Math.ceil(left))}s left` : ""}`);
+          }
+        }
         if (st.done) {
           setUpdating(false);
+          setPuRate("");
+          puPrev.current = null;
           if (st.ok) {
             if (st.mode === "manual") {
               setOutput(`Update v${st.version} downloaded to:\n${st.path}\n\nInstall it via Decky > Settings > Developer > Install Plugin from ZIP File, then restart Decky.`);
@@ -568,6 +613,8 @@ function Content() {
       return;
     }
     setScDl(null);
+    setScDlRate("");
+    scPrev.current = null;
     try {
       const r = await apiStartScalerDownload(rel.tag, rel.tar_url);
       if (!r.ok) {
@@ -955,7 +1002,8 @@ function Content() {
     try {
       const r = await apiInstallGames(targets.map((g) => g.index), "");
       setOutput(r.output);
-      toaster.toast({ title: r.ok ? `Installed in ${targets.length} game(s)` : "Install failed", body: r.ok ? "" : r.output.slice(-200) });
+      const note = r.output.includes("skipped") || !r.ok ? r.output.slice(-200) : "";
+      toaster.toast({ title: r.ok ? `Installed in ${targets.length} game(s)` : "Install failed", body: note });
       if (r.ok) {
         setGames((gs) => gs.map((x) => (x.installed ? x : { ...x, installed: true, status: "HelixSR installed" })));
         refreshState();
@@ -1131,6 +1179,8 @@ function Content() {
       }
       setUpdating(true);
       setPu(null);
+      setPuRate("");
+      puPrev.current = null;
       setOutput(`Downloading plugin update v${r.version} ...`);
     } catch (e) {
       console.error("[helixsr] start_plugin_update failed", e);
@@ -1164,6 +1214,8 @@ function Content() {
     await bridge.call("utilities/install_plugin", url, "HelixSR Muse Plugin", tag, "", 2);
     setUpdating(true);
     setPu(null);
+    setPuRate("");
+    puPrev.current = null;
     setOutput(`Confirm Decky's install popup for ${tag} ...`);
     const deadline = Date.now() + 10 * 60 * 1000;
     while (Date.now() < deadline) {
@@ -1388,6 +1440,11 @@ function Content() {
               <PagedText text={output.slice(-4000)} pageSize={40} maxHeight={240} />
             </Card>
           </PanelSectionRow>
+          <PanelSectionRow>
+            <MButton variant="text" onClick={() => setOutput("")}>
+              Clear log
+            </MButton>
+          </PanelSectionRow>
         </PanelSection>
       )}
       <PanelSection title="1 · Version">
@@ -1445,6 +1502,14 @@ function Content() {
           </MButton>
         </PanelSectionRow>
         <PanelSectionRow>
+          <ToggleField
+            label="Include prereleases"
+            description="Show prerelease builds (may be unstable)"
+            checked={showPrereleases}
+            onChange={(c: boolean) => onTogglePrereleases(c)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
           <MButton
             
             disabled={busy !== "" || downloading || !picked}
@@ -1500,7 +1565,7 @@ function Content() {
             Check build readiness
           </MButton>
         </PanelSectionRow>
-        {activeVersion?.layout === "modern" && (
+        {activeVersion?.layout === "modern" && activeVersion?.fg_available !== false && (
         <PanelSectionRow>
           <ToggleField
             label="Frame generation (experimental)"
@@ -1753,6 +1818,15 @@ function Content() {
                 </MButton>
               </PanelSectionRow>
             )}
+            {g.installed && g.route === "scaler" && !g.launch_options ? (
+              <PanelSectionRow>
+                <Card tone="neutral" radius={M3.shape.md} style={{ background: M3.color.surfaceContainerLow, width: "100%" }}>
+                  <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
+                    No Steam launch options needed (dxgi.dll loads by itself).
+                  </div>
+                </Card>
+              </PanelSectionRow>
+            ) : null}
             {g.launch_options ? (
               <PanelSectionRow>
                 <Card tone="neutral" radius={M3.shape.md} style={{ background: M3.color.surfaceContainerLow, width: "100%" }}>
@@ -1940,11 +2014,13 @@ function Content() {
                     </div>
                   </PanelSectionRow>
                 )}
+                {trimmedPresetName !== "" && (
                 <PanelSectionRow>
-                  <MButton disabled={busy !== "" || !trimmedPresetName} variant="tonal" onClick={onSavePreset}>
+                  <MButton disabled={busy !== ""} variant="tonal" onClick={onSavePreset}>
                     {overwriteTarget ? `Overwrite "${overwriteTarget}"` : "Save preset"}
                   </MButton>
                 </PanelSectionRow>
+                )}
                 <PanelSectionRow>
                   <MButton  disabled={busy !== ""} variant="filled" onClick={onSaveIni}>
                     Save settings
@@ -1962,7 +2038,7 @@ function Content() {
                 <PanelSectionRow>
                   <div style={{ fontSize: 12 }}>{scIniPath}</div>
                 </PanelSectionRow>
-                {(["Int8", "WaveSize", "FrameGeneration"] as const).map((key) => (
+                {(["Int8", "WaveSize", "FrameGeneration", "QuickFlow"] as const).map((key) => (
                   <PanelSectionRow key={key}>
                     <div style={{ width: "100%" }}>
                       <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
@@ -1999,10 +2075,30 @@ function Content() {
             )}
           </Fragment>
         ))}
+        <PanelSectionRow>
+          <TextField
+            label="Extra game folder"
+            description="A game outside Steam libraries (also: drag its folder onto a manual setup run)"
+            value={folderInput}
+            onChange={(e) => setFolderInput((e.target as HTMLInputElement).value)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <MButton  disabled={busy !== "" || !folderInput.trim()} variant="tonal" onClick={onAddFolder}>
+            Add folder
+          </MButton>
+        </PanelSectionRow>
+        {(state?.extra_folders || []).map((f) => (
+          <PanelSectionRow key={f}>
+            <MButton  disabled={busy !== ""} variant="text" description={f} onClick={() => onRemoveFolder(f)}>
+              Remove folder
+            </MButton>
+          </PanelSectionRow>
+        ))}
         </>
       </PanelSection>
       )}
-      <PanelSection title="4 · HelixSR Scaler">
+      <PanelSection title="HelixSR Scaler">
         <>
         <PanelSectionRow>
           <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
@@ -2040,6 +2136,14 @@ function Content() {
           </MButton>
         </PanelSectionRow>
         <PanelSectionRow>
+          <ToggleField
+            label="Include prereleases"
+            description="Show prerelease builds (may be unstable)"
+            checked={showPrereleases}
+            onChange={(c: boolean) => onTogglePrereleases(c)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
           <MButton
             disabled={busy !== "" || scalerDownloading || !scalerPicked}
             variant="filled" onClick={onScalerDownload}
@@ -2053,8 +2157,8 @@ function Content() {
               <ProgressBar nProgress={scDl && scDl.total > 0 ? Math.min(100, (100 * scDl.downloaded) / scDl.total) : 0} nTransitionSec={M3.motion.bar} />
               <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.xs, fontVariantNumeric: M3.tabular }}>
                 {scDl && scDl.total > 0
-                  ? `${fmtSize(scDl.downloaded)} / ${fmtSize(scDl.total)} (${Math.floor((100 * scDl.downloaded) / scDl.total)}%)`
-                  : scDl ? `${fmtSize(scDl.downloaded)} downloaded ...` : "Starting scaler download ..."}
+                  ? `${fmtSize(scDl.downloaded)} / ${fmtSize(scDl.total)} (${Math.floor((100 * scDl.downloaded) / scDl.total)}%)${scDlRate ? ` — ${scDlRate}` : ""}`
+                  : scDl ? `${fmtSize(scDl.downloaded)} downloaded ...${scDlRate ? ` — ${scDlRate}` : ""}` : "Starting scaler download ..."}
               </div>
             </div>
           </PanelSectionRow>
@@ -2068,34 +2172,9 @@ function Content() {
         )}
         </>
       </PanelSection>
-      {hasVersions && (
-      <PanelSection title="Folders">
+      <PanelSection title="System">
         <>
-        <PanelSectionRow>
-          <TextField
-            label="Extra game folder"
-            description="A game outside Steam libraries (also: drag its folder onto a manual setup run)"
-            value={folderInput}
-            onChange={(e) => setFolderInput((e.target as HTMLInputElement).value)}
-          />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <MButton  disabled={busy !== "" || !folderInput.trim()} variant="tonal" onClick={onAddFolder}>
-            Add folder
-          </MButton>
-        </PanelSectionRow>
-        {(state?.extra_folders || []).map((f) => (
-          <PanelSectionRow key={f}>
-            <MButton  disabled={busy !== ""} variant="text" description={f} onClick={() => onRemoveFolder(f)}>
-              Remove folder
-            </MButton>
-          </PanelSectionRow>
-        ))}
-        </>
-      </PanelSection>
-      )}
-      {hasVersions && (
-      <PanelSection title="Storage">
+        {hasVersions && (
         <>
         <PanelSectionRow>
           <div style={{ ...M3.type.title }}>Total {totalMB.toFixed(1)} MB in {downloadedVersions.length} version(s)</div>
@@ -2121,10 +2200,7 @@ function Content() {
           </MButton>
         </PanelSectionRow>
         </>
-      </PanelSection>
-      )}
-      <PanelSection title="Health">
-        <>
+        )}
         <PanelSectionRow>
           <MButton  disabled={busy !== ""} variant="tonal" onClick={onHealth}>
             Run health check
@@ -2182,10 +2258,24 @@ function Content() {
               <ProgressBar nProgress={pu && pu.total > 0 ? Math.min(100, (100 * pu.downloaded) / pu.total) : 0} nTransitionSec={M3.motion.bar} />
               <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.xs, fontVariantNumeric: M3.tabular }}>
                 {pu && pu.total > 0
-                  ? `${fmtSize(pu.downloaded)} / ${fmtSize(pu.total)} (${Math.floor((100 * pu.downloaded) / pu.total)}%)`
+                  ? `${fmtSize(pu.downloaded)} / ${fmtSize(pu.total)} (${Math.floor((100 * pu.downloaded) / pu.total)}%)${puRate ? ` — ${puRate}` : ""}`
                   : "Starting update ..."}
               </div>
             </div>
+          </PanelSectionRow>
+        )}
+        {updating && pu?.running && (
+          <PanelSectionRow>
+            <MButton  variant="text" onClick={async () => {
+              try {
+                const r = await apiCancelPluginUpdate();
+                if (!r.ok) setOutput(r.error || "update not cancelled");
+              } catch (e) {
+                console.error("[helixsr] cancel_plugin_update failed", e);
+              }
+            }}>
+              Cancel update
+            </MButton>
           </PanelSectionRow>
         )}
         {!updating && (
