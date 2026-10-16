@@ -1401,7 +1401,7 @@ function Content() {
         )}
         <PanelSectionRow>
           <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
-            {activeVersion ? `Active: ${activeVersion.tag} (network ${activeVersion.network_built ? "built" : "NOT built"})` : "No version downloaded yet"}
+            {activeVersion ? `Active: ${activeVersion.tag} (network ${activeVersion.network_built ? "built" : "NOT built"}${activeVersion.layout === "modern" ? `, FG ${activeVersion.fg_built ? "built" : "not built"}` : ""})` : "No version downloaded yet"}
           </div>
         </PanelSectionRow>
         {listedReleases.map((r) => {

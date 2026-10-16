@@ -435,6 +435,17 @@ def _plugin_version() -> str:
     return "?"
 
 
+def _fg_built(d: Path) -> bool:
+    """Whether this version was built with frame generation: upstream writes
+    helixsr_fg_setup.json next to the DLL on every FG build. Missing or
+    unreadable means not built (or built before this check existed)."""
+    try:
+        rec = json.loads((d / "helixsr_fg_setup.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(rec, dict)
+
+
 def _new_dl_state(tag: str = "") -> dict:
     return {"running": False, "done": False, "ok": False, "cancelled": False, "error": "",
             "tag": tag, "downloaded": 0, "total": 0,
@@ -1026,6 +1037,7 @@ class Plugin:
                                  "network_built": helixscan.network_ready(d),
                                  "dll_version": dll_version,
                                  "layout": helixref.layout_of(d),
+                                 "fg_built": _fg_built(d),
                                  "size_mb": round(_dir_size_cached(d) / 1e6, 1)})
             return {"active_tag": self.settings.getSetting("active_tag", ""),
                     "versions": versions, "root": str(_helixsr_root()),
@@ -1554,8 +1566,9 @@ class Plugin:
                        "detail": detail})
         if helixref.layout_of(d) == "modern":
             checks.append({"name": "Frame generation", "ok": True,
-                           "detail": "skipped (--no-fg): the plugin installs the FSR drop-in only"
-                           if not fg else "requested: DLSS-G downloads on build, NGX core via the setup"})
+                           "detail": f"{'built' if _fg_built(d) else 'not built'}"
+                           + (" (--no-fg): the plugin installs the FSR drop-in only"
+                              if not fg else ": DLSS-G downloads on build, NGX core via the setup")})
         if fg:
             dlssg = d / DLSSG_FILE
             if dlssg.is_file() and _sha256_file(dlssg) == DLSSG_SHA256:
@@ -2942,7 +2955,8 @@ class Plugin:
         d = await self._active_dir()
         return {"running": running, "log": tail,
                 "log_path": str(self._build_log) if self._build_log else "",
-                "network_built": bool(d and helixscan.network_ready(d))}
+                "network_built": bool(d and helixscan.network_ready(d)),
+                "fg_built": bool(d and _fg_built(d))}
 
     # Asyncio-compatible long-running code, executed in a task when the plugin is loaded
     # MUST NOT BLOCK - spawn tasks for long work.

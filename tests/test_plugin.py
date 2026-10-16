@@ -340,6 +340,33 @@ class PluginCase(unittest.TestCase):
             self.assertFalse(missing["ok"])
         asyncio.run(go())
 
+    def test_fg_built_indicator(self):
+        import json as _json
+        base = Path(tempfile.mkdtemp(prefix="hxfg-"))
+        self.addCleanup(shutil.rmtree, base, True)
+        d = base / "HelixSR-1.9.0"
+        (d / "setup").mkdir(parents=True)
+        (d / "setup/helixsr_setup.py").write_text("# layout marker\n")
+        (d / "helixsr-setup.sh").write_text("#!/bin/sh\n")
+        (d / "amd_fidelityfx_dx12.dll").write_bytes(b"\x00HelixSR 1.9.0\x00" + b"\x00" * 100)
+        self.assertFalse(main._fg_built(d))
+        (d / "helixsr_fg_setup.json").write_text("not json{{")
+        self.assertFalse(main._fg_built(d))
+        (d / "helixsr_fg_setup.json").write_text(_json.dumps({"files": 1}))
+        self.assertTrue(main._fg_built(d))
+        root = Path(os.environ["DECKY_PLUGIN_RUNTIME_DIR"]) / "helixsr"
+        root.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(d, root / "HelixSR-1.9.0", dirs_exist_ok=True)
+        p = self._plugin(active="v1.9.0")
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            s = await p.get_state()
+            v = next(x for x in s["versions"] if x["tag"] == "v1.9.0")
+            self.assertTrue(v["fg_built"])
+            self.assertEqual(v["layout"], "modern")
+        asyncio.run(go())
+
     def test_build_args_and_ready_modern(self):
         legacy = self._version_dir(tag="9.9.8")
         base = Path(tempfile.mkdtemp(prefix="hxmodern-"))
@@ -365,6 +392,9 @@ class PluginCase(unittest.TestCase):
         self.assertNotIn("Frame generation", names)
         names = [c["name"] for c in p._check_build_ready_run(modern)["checks"]]
         self.assertIn("Frame generation", names)
+        fg_row = next(c for c in p._check_build_ready_run(modern)["checks"]
+                      if c["name"] == "Frame generation")
+        self.assertIn("not built", fg_row["detail"])
         names = [c["name"] for c in p._check_build_ready_run(modern, fg=True)["checks"]]
         self.assertIn("DLSS Frame Generation DLL", names)
         self.assertIn("NGX core prerequisites", names)

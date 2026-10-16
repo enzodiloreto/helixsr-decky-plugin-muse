@@ -18,6 +18,7 @@ export interface HelixVersion {
   network_built: boolean;
   dll_version: string;
   layout?: string;
+  fg_built?: boolean;
   size_mb: number;
 }
 
