@@ -3,18 +3,19 @@
 ![HelixSR Muse Plugin banner](assets/helixsr_muse_banner_main.png)
 
 A [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) plugin that manages
-[HelixSR](https://github.com/lonewolf0622/HelixSR) (upscaling on AMD GPUs, built from
-NVIDIA's DLSS model): pick a release, download it with a progress bar, build its
-network (optionally with frame generation), and install it into compatible games —
-FSR 3.1 titles get the drop-in, DLSS/XeSS/FSR2-only titles get HelixSR Scaler —
-all from the Quick Access menu. Works with HelixSR 1.9.0+ and older releases;
-each game's settings follow the HelixSR that installed it.
+[HelixSR](https://github.com/lonewolf0622/HelixSR) **2.0 and newer** (upscaling on AMD
+GPUs, built from NVIDIA's DLSS model): pick a release, download it with a progress bar,
+build its network (optionally with frame generation), and install it into compatible
+games — FSR 3.1 titles get the FSR drop-in, DLSS/XeSS/FSR2-only titles get HelixSR
+Scaler — all from the Quick Access menu. The Scaler ships **inside** the 2.0 release
+zip, version-paired with the release it belongs to, so there is no separate Scaler
+download.
 
-Game detection and install/uninstall run HelixSR's own reference logic: releases
-up to 1.8.1 use the vendored copy in `py_modules/helixscan.py` (Apache-2.0),
-while 1.9.0+ runs its own unmodified `setup/helixsr_install.py` from the
-downloaded version (its Freeware license forbids vendoring). The network build
-runs each release's own `helixsr-setup.sh` unmodified.
+**HelixSR 2.0+ only.** The plugin talks to the 2.0 release's own
+`setup/helixsr_bridge.py` for every game operation (scan, install, remove, repair,
+verify, settings, logs). The bridge runs as a subprocess and the plugin never
+imports upstream files, so upstream code cannot take the plugin backend down
+(HelixSR's Freeware license also forbids vendoring it).
 
 Tested on Steam Deck LCD running CachyOS and Steam Machine Running SteamOS.
 
@@ -35,79 +36,99 @@ automatically on first run. Then uninstall the old entry.
 
 ## Use
 
-The panel walks Version → Build → Games → Scaler, with a status line and current step shown on top:
+The panel has five sections — Version, Build, Games, Storage & updates, Output — and
+every long action runs in the background while the panel stays responsive.
 
-1. **Version** — pick a HelixSR release (update badge + release notes included),
-   **Download** it (progress bar with MB/MB, %, speed and ETA), then **Switch to** /
-   **Remove** it. **Reload releases** retries failed fetches.
-2. **Network build** — **Check build readiness** first (Proton/Wine, Python + numpy,
-   disk space; runs automatically before every build), then **Build network** or
-   **Rebuild network**. The build downloads NVIDIA's DLSS DLL once (~56 MB, used to
-   generate the network, then deleted), then compiles shaders through Proton/Wine's
-   DXC — expect several minutes; the Log streams progress with a % bar, and the
-   build can be cancelled. On 1.9.0+
-   an experimental **frame generation** toggle adds the FG build (extra ~400 MB of
-   SDK/driver downloads, needs `zstd` or Python 3.14); without it FG is skipped.
-   On builds without the FG engine (1.9.3+) the toggle is shown disabled with the
-   reason. The version line reports whether FG is actually built.
-3. **Games** — **Scan games** walks your Steam libraries (1.9.0+ also covers other
-   stores) for DLSS / XeSS / FSR titles (the last scan is remembered, incl. install
-   states; scans run in the background and can be cancelled). On older HelixSR, pick
-   the install way per game (FSR 3.1 drop-in, OptiScaler, or the experimental DLSS
-   loader); on 1.9.0+ the drop-in is the only way and the picker hides for
-   single-option games. **Install in / Remove from** each game, **Install/Remove
-   all** at once (games without FSR 3.1 are skipped with a note instead of aborting
-   the batch), or **Migrate** every outdated game to the active build in one go
-   (scaler installs migrate too); the list updates instantly after each
-   install/uninstall from the persisted scan (only **Scan games** re-walks the
-   libraries). Per-game **Settings** edit `helixsr.ini` inline —
-   the editor follows the installing HelixSR's template (1.9.0+: no game slider,
-   `WaveSize` auto, Sharpness default 0.1) — with named **presets** (save/apply/
-   delete with two-tap delete, plus a built-in **Default** that resets to defaults;
-   presets translate across HelixSR generations) and a per-game **Log** viewer
-   offering one-tap fixes for known patterns. **Verify installs** detects games a
-   Steam update broke, with one-tap **Repair**. A filter narrows big libraries,
-   collapsible Installed / Not-installed groups keep long lists manageable, and a
-   status filter (incl. Needs repair) jumps straight to them. Per-game **Details**
-   show folder, detected inputs, FSR DLLs, exe folder and installed builds. Extra
-   non-Steam folders can be added by path.
-4. **HelixSR Scaler** — for games with DLSS/XeSS/FSR2 but no FSR 3.1: download the
-   Scaler (~132 MB, its own releases), then install it per eligible game (two-tap
-   confirm — never in online games or games with anti-cheat). The panel shows the
-   per-game Steam launch options with a copy button (paste them yourself: Steam
-   offers no API for that); the in-game menu opens with Insert (map a Deck back
-   button to it). Scaler settings (`Int8`, `WaveSize`, `FrameGeneration`) get their
-   own mini-editor; its log (`OptiScaler.log`) joins the per-game Log viewer.
-5. **Storage** — per-version disk use, remove-all-except-active (refuses versions
-   games still use), clear cached SDK files, and full **Reset everything**.
-6. **Health** — one screen for releases reachable, versions healthy, games
-   verified, disk space and plugin update state.
-7. **Log** — every failure surfaces its actual reason here instead of failing
-   silently; destructive actions ask for a second tap to confirm.
+### Version
+
+The HelixSR release feed (newest first; prereleases stay hidden unless you show
+them). Pick a release and **Download** it: the progress bar shows MB/MB, %, speed
+and ETA, and the release notes are shown before the download starts. Downloads are
+disk-gated — the plugin refuses when the free space cannot hold the zip plus its
+extraction — and a half-extracted version is cleaned up when a download fails.
+Downloaded versions are listed with their DLL version, disk use, network state, FG
+state and bundled Scaler version; **Use** switches to one, **Remove** deletes it
+(two-tap confirm). **Reload releases** retries a failed fetch.
+
+### Build
+
+The network (the shader network HelixSR installs into games) is built by the
+release's own setup script, run directly by the plugin — never through the
+release's `--yes` wrapper, which would also install the game behind your back.
+
+- **Check readiness** — toolchain, Python + numpy, disk space and the memory the
+  shader compile may need (the compile fans out one worker per CPU thread).
+- **Build** / **Rebuild** — the log streams with a parsed % bar, and **Cancel
+  build** stops the whole process group (no orphaned workers left behind).
+- **Frame generation** toggle — adds the FG build (extra downloads; close the game
+  first). A build whose shader compile does not fit in the free memory is refused
+  up front, with the reason.
+
+### Games
+
+**Scan games** walks your Steam libraries (plus any folder you add by hand) with the
+release's own scanner, in the background: it can be cancelled, and the last scan is
+remembered and reused. Each game card shows its state, the inputs it was detected
+with, anti-cheat markers and the Steam launch options, and offers:
+
+- the **way** picker — **Recommended** (HelixSR picks the game's best way),
+  **HelixSR Scaler** (pick DLSS in the game's graphics menu; Insert opens its
+  menu) or **FSR drop-in** (pick AMD FSR in the game). Your pick survives re-scans,
+  and installing with a different way switches the game (the other install is
+  removed first) — the button then reads *Switch to …*.
+- **Install**, **Update**, **Switch to …**, **Remove**, **Repair** (a clean
+  re-install of the same way), **Roll back** (restore the previous install),
+  **FG on/off** (Scaler games on an FG build), **Settings** and **Log**.
+- Anti-cheat games warn before a Scaler install (two-tap): that install is for
+  offline / single-player use only.
+- **Verify installs** checks the install markers *and* the files, so a Steam update
+  that replaced the drop-ins is detected; affected games get a one-tap **Repair**.
+- **Settings** edits the game's own ini inline (the editor follows the kind of
+  settings the installed way uses) with named **presets** (save, apply, delete) and
+  a **Defaults** reset. **Log** shows the game's log files with one-tap fixes for
+  the known patterns.
+
+### Storage & updates
+
+Per-version disk use, **Remove old versions** (keeps the active version),
+**Factory reset** (uninstalls HelixSR everywhere and wipes the downloaded versions
+and caches, keeping your presets), and **Health check**: GitHub reachable, versions
+healthy, games verified, disk space and update state. The plugin's own update lives
+here too — **Check for update**, then **Update to vX.Y.Z** (Decky's installer with
+its consent popup, then a hot reload; the download can be cancelled). The panel
+shows the running plugin version.
+
+### Output
+
+Every failure surfaces its actual reason here instead of failing silently, and
+destructive actions (remove, repair, reset, install into an anti-cheat game) ask
+for a second tap to confirm.
 
 Requirements for building: any Proton installed in Steam (for the shader compiler)
 and ~1 GB free (~1.5 GB with frame generation). Game installs only touch files
-inside each game's folder (originals are kept as `*.original.dll` / `HelixSR/backup`).
+inside each game's folder (the originals are kept as backups).
 
 ## Troubleshooting
 
-- **Empty release list**: the Log shows why (no network, GitHub rate limit, TLS
-  error). **Reload releases** retries without reopening the panel.
+- **Empty release list**: the Output section shows why (no network, GitHub rate
+  limit, TLS error). **Reload releases** retries without reopening the panel.
 - **"UI vX but backend vY" warning**: a partial update — tap **Reload plugin**
-  in the banner first (heals it without reinstalling in most cases); if it
+  in the banner first (it heals it without reinstalling in most cases); if it
   persists, reinstall the zip and restart Decky.
-- **Build fails**: the Log names the step. Handled automatically so far: a system
+- **Build fails**: the log names the step. Handled automatically so far: a system
   Python without SSL support (the plugin downloads NVIDIA's DLL itself and passes
   it via `--dlss`), missing executable bits on extracted files (repaired).
+- **Frame generation build refused**: the shader compile needs more memory than
+  the readiness check found. Close the game and retry, or build without FG.
+- **Download refused**: not enough free disk for the zip plus its extraction (on a
+  full Deck the Steam client itself crashes).
 - **Scan takes minutes**: normal on large libraries; backgrounded, cancellable,
-  and reused for installs for 5 minutes. Rescan after adding games, switching
-  versions, or changing anything outside the plugin.
-- **Decky's install popup stalls mid-update**: Decky reports install progress to a
-  plugin-store counter first; if that request hangs, the popup parks and never
-  finishes. Dismiss it and retry — or use the plugin's own backend update flow.
-- **Scaler: no menu on Insert**: the Steam launch options are missing or mistyped
-  (copy them from the game's card). On Deck, map a back button to Insert in the
-  game's controller settings. Never use Scaler in online or anti-cheat games.
+  and the last scan is reused. Re-scan after adding games or switching versions.
+- **Steam update broke an install**: the drop-ins are replaced silently. Run
+  **Verify installs** and **Repair** the affected games.
+- **Scaler: no menu on Insert**: the Steam launch options are missing (they are
+  shown on the game's card). On Deck, map a back button to Insert in the game's
+  controller settings. Never use Scaler in online or anti-cheat games.
 
 ## Develop
 
@@ -119,5 +140,5 @@ pnpm test              # backend unittest (stdlib only) + frontend UI tests
 
 Release zips (`out/helixsr-muse-plugin-vX.Y.Z.zip`) contain exactly:
 `LICENSE`, `README.md`, `dist/index.js`, `main.py`, `package.json`, `plugin.json`,
-`py_modules/` (`.keep`, `cacert.pem`, `helixscan.py`, `helixref.py`, `settings.py` —
-no sourcemaps, no tests). Bump `package.json` before every release.
+`py_modules/` (`.keep`, `bridge.py`, `cacert.pem`, `settings.py` — no sourcemaps,
+no tests). Bump `package.json` before every release.

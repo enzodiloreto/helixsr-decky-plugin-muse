@@ -1,130 +1,120 @@
 # HelixSR Muse Plugin — Feature Catalog
 
-Every user-facing capability of the plugin (v0.4.1), grouped by panel section.
-Backend: `main.py` + `py_modules/helixscan.py` + `py_modules/helixref.py`.
-Frontend: `src/index.tsx` (+ api).
+Every user-facing capability of the plugin (v0.6.2), grouped by panel section.
+Backend: `main.py` + `py_modules/bridge.py` (client for the release's own
+`setup/helixsr_bridge.py`).
+Frontend: `src/index.tsx` (+ `src/services/api.ts`).
 
-## Status hero
+HelixSR **2.0+ only**: 1.x support, the separate Scaler feed and the migration
+flow are gone. Every game operation runs the downloaded release's own bridge as a
+subprocess; upstream files are never imported.
 
-- One-line live summary: active version, network state, installed/found games,
-  disk use.
-- 4-step progress stepper (Download → Build → Scan → Install) with the current
-  step highlighted and named.
-- State chips: network built / NOT built, games count + scanned tag, total MB,
-  update availability.
-- **Live operation bar**: whatever is running (release download, network build,
-  game scan, migration, plugin update) shows a progress bar + label in the
-  hero, visible from every section.
-- **Next-step button**: the hero offers the current step's action directly
-  (Build network now / Scan games now), so the obvious move doesn't require
-  scrolling to its section.
-- **Restart needed** banner after a self-update (persists until Decky restarts).
-- **Partial update** banner on UI/backend version skew, with in-panel
-  **Reload plugin** (falls back to reinstall + restart advice).
+## Version (HelixSR releases)
 
-## 1 · Version (HelixSR releases)
+- Release feed from the HelixSR GitHub API (newest first, zip assets only), the
+  three newest visible with a **Show all N releases** expander. Prereleases stay
+  hidden until **Show prereleases** is toggled. Failures surface the actual
+  reason (network, rate limit, TLS) instead of an empty list; **Reload releases**
+  retries without reopening the panel.
+- **Download** with a live progress bar (MB/MB, %, speed, ETA), cancellable
+  mid-extraction. The download is **disk-gated**: it is refused when the free
+  space cannot hold the zip plus its extraction, and a half-extracted version is
+  removed when the download fails (a previous good install of the same tag is
+  kept).
+- The release notes are shown before a download starts.
+- Downloaded versions are listed with their DLL stamp, disk use, network state, FG
+  state and bundled Scaler version. **Use** switches to one, **Remove** deletes it
+  (two-tap confirm, heals the active version when it is removed).
+- The release's `--status` probe (hashes NVIDIA's DLLs, reads the FG archives) runs
+  **once per release and is cached for 5 minutes**; the cache is cleared after
+  builds, downloads and removals.
 
-- Release list from the HelixSR GitHub API (newest first, zip assets only),
-  compacted to downloaded versions plus the newest few behind an expander;
-  failures surface the actual reason (network, rate limit, TLS) instead of an
-  empty list. **Reload releases** retries without reopening the panel.
-  **Include prereleases** toggle covers both the HelixSR and Scaler lists.
-- Old releases (e.g. 1.4.x) download and work: missing scripts tolerated,
-  layouts validated, OptiScaler withheld where the release doesn't ship it.
-- **Update available** badge with numeric tag comparison; release notes preview
-  before downloading.
-- **Download** with live progress bar (MB/MB, %, speed, ETA), cancellable;
-  incomplete downloads are detected and partials cleaned. **Switch to** swaps
-  the active version; **Remove** deletes files (two-tap confirm).
-- Switching/removing versions clears the stale games list.
+## Build (the shader network)
 
-## 2 · Network build
+- **Check readiness** runs automatically before every build and reports:
+  *Python 3 + numpy* (a note, not a gate — the plugin downloads a portable Python
+  during the build), *Proton/Wine (shader compiler)*, *Disk space*, *Network /
+  frame generation*. With FG enabled it adds *Shader compile memory*, *DLSS Frame
+  Generation DLLs* (two NVIDIA Streamline archives) and *NGX core prerequisites*
+  (`zstd` or Python 3.14).
+- **Build** / **Rebuild** (two-tap) run the release's own
+  `setup/helixsr_setup.py` directly — never the release's `--yes` wrapper, which
+  would also install the game behind the user's back. Exit code 3 (upscaling built,
+  FG failed) counts as success.
+- The build provisions what the release's own setup script would: a portable
+  Python with numpy, the pinned Windows DXC and a `dxc-wine.sh` shim.
+- The build log streams with a parsed % bar and a memory line (free memory and
+  swap) at the start, after every toolchain download and every 30 s — the trail
+  used to diagnose the OOM that killed Steam's UI.
+- **Cancel build** kills the whole process group; a plugin reload reaps an
+  orphaned build left behind by a previous session.
+- **Frame generation** toggle adds the FG build (extra downloads; close the game
+  first). The FG shader compile fans out one worker per CPU thread, so a build
+  whose compile does not fit in the free memory is refused up front.
+- Download and build are mutually exclusive (both have memory-heavy phases).
 
-- **Check build readiness** (auto-runs before every build): Python + numpy,
-  Proton/Wine shader compiler, disk space, DLSS status — fail fast with reasons.
-- **Build / Rebuild network**: downloads NVIDIA's DLSS DLL itself (hash-pinned,
-  works around system Pythons without SSL), verifies it, hands it to HelixSR's
-  own `helixsr-setup.sh` via `--dlss`; restores lost executable bits first.
-  Build log streams with a parsed % progress bar; the once-used DLL is deleted
-  after success, kept for retry after failure. Hung builds time out after 4h.
-  **Cancel build** stops the DLL pre-download or terminates the setup script.
-- **Frame generation** (1.9.0–1.9.2 with the FG engine shipped): build the FG
-  DLLs in as well (~400 MB extra, extra checks in readiness); newer versions
-  report FG as withdrawn and steer Scaler/FG installs accordingly. On builds
-  without the engine the toggle stays visible but disabled, with the reason
-  inline, and the flag resets when switching versions.
+## Games
 
-## 3 · Games
+- **Scan games** walks the Steam libraries (plus hand-added folders) with the
+  release's own scanner. Backgrounded, cancellable, per-folder failure isolation.
+  The last scan is cached for 5 minutes and reused across panel opens, with the
+  scan age and the scanned version shown.
+- Each game card shows: name, state chip (installed way + version, the
+  recommended way, or the pending switch), folder, detected inputs, anti-cheat
+  markers, FG state (Scaler games), Steam launch options and whether a previous
+  install is kept for a rollback.
+- **Way picker** per game: **Recommended** (HelixSR picks the game's best way),
+  **HelixSR Scaler** (pick DLSS in the game's graphics menu; Insert opens its
+  menu) or **FSR drop-in** (pick AMD FSR in the game). The pick survives
+  re-scans; the install action uses the picked way, and switching ways removes
+  the other install first (the button reads *Switch to …*).
+- **Install**, **Update**, **Switch to …**, **Remove**, **Repair** (remove +
+  reinstall of the same way), **Roll back** (restore the previous install),
+  **FG on/off** (Scaler games on an FG build), **Settings**, **Log**. Anti-cheat
+  games get a two-tap warning: a Scaler install there is for offline /
+  single-player use only.
+- **Verify installs** checks the install markers *and* the files (loader, HelixSR
+  DLL, scaler ini for Scaler; marker + log/backup for the drop-in), so a Steam
+  update that replaced the drop-ins is detected and can be repaired.
+- **Settings** editor: the game's own ini, inline. The editor follows the kind of
+  settings the installed way uses (`helixsr` — Sharpening/Compatibility — or
+  `scaler` — `HelixSR.*`), with labelled options, a Sharpness slider, free-text
+  keys and a list of the other keys in the file. Named **presets** (save, apply,
+  delete) plus a built-in **Default**; the bridge validates the values.
+- **Log** viewer: the game's log files with line counts, paged tails, the
+  important lines and one-tap fixes for known patterns (the pattern is
+  re-verified before anything is written).
+- Extra non-Steam folders can be added and removed by path.
 
-- **Scan games**: walks every Steam library (plus Heroic/Lutris and hand-added
-  folders) for DLSS / XeSS / FSR titles using HelixSR's own detection logic.
-  Backgrounded with progress, cancellable, per-folder failure isolation, results
-  persisted across panel opens (with age note), reused for installs for 5 min.
-- Text filter plus one-tap segmented status filter (All / Installed /
-  Available / Needs repair). Every selection control is a one-tap button
-  (release, route, settings, presets) — no dropdowns anywhere.
-- Per-game **install route choice**: FSR 3.1 drop-in, OptiScaler, or experimental
-  DLSS loader (validated; route switching handled, OptiScaler preference kept).
-- **Install / Remove** per game, **Install/Remove all** (visible subset; on
-  1.9.0+ it only lists games the drop-in can install into, others get a skip
-  note), **Migrate** every outdated game to the active build in one background
-  pass with per-game results.
-- Inline per-game **Settings** editor for `helixsr.ini` (Sharpener, Sharpness
-  slider, game-slider toggle, WaveSize) with named **presets** (save/apply/delete).
-- Inline per-game **Log** viewer (`helixsr.log` tails) with one-tap fixes for
-  known patterns (e.g. wave32 → WaveSize 64, re-verified before writing).
-- Per-game **Details**: folder, detected inputs, FSR DLLs, exe folder, installed
-  builds. **Verify installs** detects Steam-update breakage (markers/backups,
-  not just live files) with one-tap **Repair** (refreshes the game's backup).
-- **No forced rescan**: install/uninstall results update the games list
-  immediately from the persisted scan; only **Scan games** re-walks the
-  libraries. Groups auto-open when they're the only non-empty one.
-- **Folders**: add non-Steam game folders by path (validated, persisted).
+## Storage & updates
 
-## HelixSR Scaler
+- Per-version disk use and total.
+- **Remove old versions** keeps the active one and reports the freed space.
+- **Factory reset** uninstalls HelixSR from every installed game (via the
+  bridge) and wipes the downloaded versions and caches; the ini presets are kept.
+  Two-tap confirm, every step reported.
+- **Health check**: GitHub reachable (TCP probe), versions healthy (DLL present +
+  network built), games verified, free disk space and the plugin update state.
+- **Plugin update**: automatic check on panel open (6 h cache) + **Check for
+  update**. **Update to vX.Y.Z** downloads the release zip and installs it through
+  Decky's own installer (native consent popup, privileged install, hot reload); it
+  falls back to an in-place swap or a manual-zip flow when Decky's installer is
+  unreachable. The download is cancellable, and the panel shows the running plugin
+  version and a restart banner when an update still needs a Decky restart.
 
-- For DLSS/XeSS/FSR2-only games (no FSR 3.1): OptiScaler with a built HelixSR
-  inside. Its own releases feed (Linux tarballs) with prerelease support;
-  per-version disk use shown. Download (~132 MB) with the same progress bar,
-  speed/ETA, cancel and incomplete-detection as version downloads.
-- Per-game install with a two-tap anti-cheat/online warning, loader choice
-  handled (dxgi.dll needs no Steam launch options, other loaders get a copy
-  button for `WINEDLLOVERRIDES`). Uses the release's own installer on 1.9.3+
-  (loader choice, manifest + remover), the plugin's own flow on 1.9.0–1.9.2.
-- Per-game **Scaler settings** editor (`OptiScaler.ini [HelixSR]`: Int8,
-  WaveSize, FrameGeneration, QuickFlow) and its `OptiScaler.log` in the
-  per-game Log viewer. Installs made by HelixSR itself are recognized,
-  verified and uninstallable too.
+## Output
 
-## Storage
+- Every failure surfaces its actual reason here (network, TLS, rate limit, bridge
+  error, missing file) instead of failing silently.
+- Destructive actions (remove, repair, factory reset, install into an anti-cheat
+  game) use two-tap confirm-arming with a 15 s expiry.
 
-- Per-version disk usage (mtime-cached), total, remove-all-except-active
-  (refuses versions games still use, naming them), clear cached SDK DLLs with
-  freed-MB reporting, and full **factory reset** (uninstalls everywhere, wipes
-  versions/caches/settings, keeps ini presets — all reported, two-tap confirm).
+## Panel behaviour
 
-## Health
-
-- One screen: GitHub reachability (TCP probe, no API quota), version health
-  (DLL present + network built), game verification, disk space on both
-  filesystems, plugin update state.
-
-## Plugin update (self-update)
-
-- Automatic check on panel open (6h cache) + manual **Check for updates**.
-- One-tap update through Decky's own installer: native consent popup,
-  privileged install (works for root-owned setups), hot-reload — no Developer
-  settings trip, no restart. Falls back to in-place swap or a validated manual
-  zip where Decky's installer is unreachable; the download phase is
-  cancellable. Refuses while tasks run; legacy old-name installs block with
-  guidance instead of duplicating.
-
-## Log & navigation
-
-- Single Log section under the hero; paged viewer (newest auto-scroll, **Show
-  older** buttons) readable with gamepad only, no touch scrolling, no sideways
-  overflow. Monospace, anywhere-wrapping.
-- Destructive actions use two-tap confirm-arming (15s expiry). Disabled buttons
-  explain why. Long ops toast on completion even with the panel closed, and
-  resume polling when reopened. In-progress backend work is killed, never
-  orphaned, on plugin unload/reload.
+- Long work runs in daemon threads; the panel polls the backend and never blocks.
+  A build that finishes while the panel is closed raises a toast.
+- The panel keeps native Steam controls (dropdowns, sliders, toggles, text fields)
+  for gamepad editing; the custom chrome (cards, chips, buttons) follows Material
+  You.
+- Disabled buttons explain why (not supported, busy, no version downloaded).
+- A UI/backend version skew shows a banner with an in-panel **Reload plugin**.
