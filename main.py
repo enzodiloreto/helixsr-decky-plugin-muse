@@ -454,6 +454,46 @@ def _ensure_g3_toolchain(d: Path, line, cancel) -> tuple[str, Path]:
     return py, shim
 
 
+def _mem_available_mb() -> int:
+    """MemAvailable in MB (0 when unreadable)."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def _compile_jobs_env() -> dict:
+    """HELIXSR_SETUP_JOBS for the build spawn: the setup's shader-compile
+    fan-out measures MemAvailable once and assumes ~600 MB per DXC/Wine
+    worker — it does not account for the Steam UI's own footprint growing
+    into the compile (when it overflows, the OOM killer takes steamwebhelper
+    down: the whole Steam UI restarts). Reserve headroom for it. An explicit
+    user setting wins."""
+    env = {}
+    if not os.environ.get("HELIXSR_SETUP_JOBS"):
+        cpus = os.cpu_count() or 4
+        env["HELIXSR_SETUP_JOBS"] = str(max(2, min(cpus, (_mem_available_mb() - 1500) // 900)))
+    return env
+
+
+def _fg_compile_fits() -> tuple[bool, str]:
+    """(ok, detail): the FG compile runs one DXC/Wine worker per CPU thread
+    with no memory cap (fg_setup.py); refuse it when the memory headroom is
+    gone (a suspended game + Steam UI + ~700 MB per worker)."""
+    workers = os.cpu_count() or 4
+    have = _mem_available_mb()
+    need = workers * 700 + 1500
+    if have >= need:
+        return True, f"{have // 1024} GB free"
+    return False, (f"the FG shader compile runs {workers} DXC/Wine workers at once "
+                   f"(~{workers * 700 // 1024} GB) and needs headroom for the Steam UI: "
+                   f"{have // 1024} GB free. Close the game and retry, or build without FG")
+
+
 def _free_bytes(p: Path) -> int:
     q = p
     while not q.exists():
@@ -2038,6 +2078,9 @@ class Plugin:
                            + (" (--no-fg): the plugin installs the FSR drop-in only"
                               if not fg else ": DLSS-G downloads on build, NGX core via the setup")})
         if fg:
+            ok_mem, mem_detail = _fg_compile_fits()
+            checks.append({"name": "Shader compile memory", "ok": ok_mem,
+                           "detail": mem_detail})
             gen3 = helixref.generation(d) == 3
             fg_dlls = [(DLSSG_FILE, DLSSG_SHA256)] + ([(DLSSG2_FILE, DLSSG2_SHA256)] if gen3 else [])
             have = [name for name, sha in fg_dlls
@@ -3299,6 +3342,10 @@ class Plugin:
         net = _network_built(d)
         if not rebuild and net and (_fg_built(d) or not fg):
             return {"ok": False, "error": "the network is already built — nothing to do"}
+        if fg:
+            ok, detail = _fg_compile_fits()
+            if not ok:
+                return {"ok": False, "error": detail}
         # A 2.0+ release's bridge caches its --status verdicts for the life
         # of the module: drop it so the gates see the build's result.
         helixref.reset_bridge(d)
@@ -3546,11 +3593,16 @@ class Plugin:
             args = [bash, script] + self._build_args(d, rebuild, dlss, dlssg)
         if "--no-fg" in args:
             self._build_log_line(log, "[helixsr] frame generation skipped (--no-fg): drop-in only")
+        env = _compile_jobs_env()
+        if env:
+            self._build_log_line(log, f"[helixsr] capping shader-compile workers at "
+                                      f"{env['HELIXSR_SETUP_JOBS']} (HELIXSR_SETUP_JOBS, Steam UI headroom)")
         try:
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=open(log, "a"), stderr=subprocess.STDOUT,
+                env={**os.environ, **env},
                 cwd=str(d))
         except Exception as e:  # noqa: BLE001
             self._build_log_line(log, f"[helixsr] could not start build: {type(e).__name__}: {e}")
@@ -3630,8 +3682,12 @@ class Plugin:
         tail = ""
         if self._build_log and self._build_log.exists():
             try:
-                data = self._build_log.read_bytes()[-6000:]
-                tail = data.decode("utf-8", errors="replace")
+                # seek-based tail: the log grows to many MB during a build
+                size = self._build_log.stat().st_size
+                with open(self._build_log, "rb") as f:
+                    if size > 6000:
+                        f.seek(size - 6000)
+                    tail = f.read(6000).decode("utf-8", errors="replace")
             except OSError:
                 pass
         d = await self._active_dir()

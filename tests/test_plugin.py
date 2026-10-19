@@ -644,7 +644,8 @@ class PluginCase(unittest.TestCase):
             (d / main.DLSSG_FILE).write_bytes(dg1)
             (d / main.DLSSG2_FILE).write_bytes(dg2)
             # 2. FG build: --dlssg twice, no --no-fg
-            with mock.patch.object(main, "DLSS_SHA256", digest), \
+            with mock.patch.object(main, "_mem_available_mb", return_value=24 * 1024), \
+                    mock.patch.object(main, "DLSS_SHA256", digest), \
                     mock.patch.object(main, "DLSSG_SHA256",
                                       hashlib.sha256(dg1).hexdigest()), \
                     mock.patch.object(main, "DLSSG2_SHA256",
@@ -668,7 +669,8 @@ class PluginCase(unittest.TestCase):
                 'Path(str(__file__) + ".args.json").write_text(json.dumps(sys.argv))\n'
                 'raise SystemExit(3)')
             setup_py.write_text(fake3)
-            with mock.patch.object(main, "DLSS_SHA256", digest), \
+            with mock.patch.object(main, "_mem_available_mb", return_value=24 * 1024), \
+                    mock.patch.object(main, "DLSS_SHA256", digest), \
                     mock.patch.object(main, "DLSSG_SHA256",
                                       hashlib.sha256(dg1).hexdigest()), \
                     mock.patch.object(main, "DLSSG2_SHA256",
@@ -2540,6 +2542,50 @@ def uninstall(g):
             checks = p._check_build_ready_run(modern)["checks"]
         row = next(c for c in checks if c["name"] == "Python 3 + numpy")
         self.assertFalse(row["ok"], row)
+
+    def test_g3_compile_memory_guard(self):
+        """The FG shader compile fans out one ~600 MB DXC/Wine worker per
+        CPU thread (fg_setup.py, no memory cap): the gate refuses it when
+        MemAvailable can't hold the fan-out plus the Steam UI, and the
+        network compile is capped via HELIXSR_SETUP_JOBS."""
+        p = self._plugin()
+        with mock.patch.object(main, "_mem_available_mb", return_value=24 * 1024):
+            ok, detail = main._fg_compile_fits()
+            self.assertTrue(ok, detail)
+            env = main._compile_jobs_env()
+            self.assertLessEqual(int(env["HELIXSR_SETUP_JOBS"]), os.cpu_count() or 4)
+        # a suspended game's worth of memory gone: FG refused, build without FG allowed
+        with mock.patch.object(main, "_mem_available_mb", return_value=5 * 1024):
+            ok, detail = main._fg_compile_fits()
+            self.assertFalse(ok)
+            self.assertIn("Close the game", detail)
+            env = main._compile_jobs_env()
+            self.assertEqual(env["HELIXSR_SETUP_JOBS"], "4")  # (5120-1500)//900, floor 2
+        # an explicit user setting wins untouched
+        os.environ["HELIXSR_SETUP_JOBS"] = "7"
+        try:
+            self.assertEqual(main._compile_jobs_env(), {})
+        finally:
+            del os.environ["HELIXSR_SETUP_JOBS"]
+        # start_build enforces the gate
+        d = self._g3_dir(tag="2.0.5", network=False)
+        (d / "setup/helixsr_setup.py").write_text(
+            'import sys\n'
+            'if "--status" in sys.argv:\n'
+            '    print("network=0 fg=0")\n')
+        digest = self._seed_dlss(d)
+        p2 = self._plugin(active="v2.0.5")
+
+        async def go():
+            p2.loop = asyncio.get_event_loop()
+            with mock.patch.object(main, "_mem_available_mb", return_value=4 * 1024), \
+                    mock.patch.object(main, "DLSS_SHA256", digest):
+                r = await p2.start_build(False, True)
+                self.assertFalse(r["ok"])
+                self.assertIn("Close the game", r["error"])
+                r = await p2.start_build(False, False)   # no FG: allowed
+                self.assertTrue(r["ok"], r)
+        asyncio.run(go())
 
     def test_generation_dispatch(self):
         helixref = main.helixref
