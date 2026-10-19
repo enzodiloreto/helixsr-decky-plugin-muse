@@ -122,6 +122,8 @@ const DEFAULT_PRESET_NAME = "Default";
 
 // HelixSR Scaler settings (OptiScaler.ini [HelixSR]): the only place to
 // change them besides the in-game menu (Insert). Sharpening is OptiScaler's.
+// 2.0+'s Scaler 1.1.0 renamed FrameGeneration to a preset (FGPreset: c =
+// NVIDIA's light mode, the file's auto default) and re-spelled QuickFlow.
 const SCALER_SETTING_LABELS: Record<string, string> = {
   Int8: "Speed boost — faster int8 math (auto decides; off if the picture shimmers)",
   WaveSize: "Wave size — 64 for RX 7000 / 9000 if the picture is broken",
@@ -133,6 +135,18 @@ const SCALER_SETTING_OPTIONS: Record<string, [string, string][]> = {
   WaveSize: [["auto", "Auto"], ["64", "64"], ["32", "32"]],
   FrameGeneration: [["auto", "Auto"], ["on", "On"], ["off", "Off"]],
   QuickFlow: [["auto", "Auto"], ["off", "Best"], ["on", "Fast"], ["fastest", "Fastest"]],
+};
+const SCALER_SETTING_LABELS_G3: Record<string, string> = {
+  Int8: "Speed boost — faster int8 math (auto decides; off if the picture shimmers)",
+  WaveSize: "Wave size — 64 for RX 7000 / 9000 if the picture is broken",
+  FGPreset: "Frame generation — Light (NVIDIA's light mode, fast) or Full",
+  QuickFlow: "FG motion estimate — runs with Full only",
+};
+const SCALER_SETTING_OPTIONS_G3: Record<string, [string, string][]> = {
+  Int8: [["auto", "Auto"], ["on", "On"], ["off", "Off"]],
+  WaveSize: [["auto", "Auto"], ["64", "64"], ["32", "32"]],
+  FGPreset: [["auto", "Auto (Light)"], ["c", "Light"], ["full", "Full"]],
+  QuickFlow: [["auto", "Auto"], ["off", "Off"], ["fast", "Fast"], ["fastest", "Fastest"]],
 };
 
 function Content() {
@@ -159,8 +173,10 @@ function Content() {
   const [scIniFor, setScIniFor] = useState<number | null>(null);
   const [scIni, setScIni] = useState<ScalerSettings | null>(null);
   const [scIniPath, setScIniPath] = useState<string>("");
+  const [scSchema, setScSchema] = useState<string>("legacy");
   const [scanning, setScanning] = useState<boolean>(false);
   const [routes, setRoutes] = useState<Record<number, string>>({});
+  const [fgWithScaler, setFgWithScaler] = useState<boolean>(true);
   const [iniFor, setIniFor] = useState<number | null>(null);
   const [ini, setIni] = useState<GameSettings | null>(null);
   const [iniSchema, setIniSchema] = useState<string>("legacy");
@@ -647,6 +663,7 @@ function Content() {
       }
       setScIni(r.values);
       setScIniPath(r.path || "");
+      setScSchema(r.schema || "legacy");
       setScIniFor(g.index);
     } finally {
       setBusy("");
@@ -1303,14 +1320,20 @@ function Content() {
   const onInstall = async (g: HelixGame) => {
     const route = pickedRoute(g);
     if (route === "scaler") {
+      const fgNote = activeVersion?.generation === 3
+        ? (fgWithScaler && activeVersion?.fg_built
+          ? " Frame generation goes in with it."
+          : (activeVersion?.fg_built ? "" : " (No FG built: upscaling only.)"))
+        : "";
       await armOrRun(`install scaler ${g.index}`,
-        `Tap again to confirm installing HelixSR Scaler in "${g.name}". Not for online games or games with anti-cheat (ban risk). You must also paste its Steam launch options by hand.`,
+        `Tap again to confirm installing HelixSR Scaler in "${g.name}". Not for online games or games with anti-cheat (ban risk).${fgNote} Steam launch options only if the game's row below says so.`,
         async () => {
           setBusy(`game-${g.index}`);
           try {
-            const r = await apiInstallGames([g.index], route);
+            const fg = activeVersion?.generation === 3 ? fgWithScaler : undefined;
+            const r = await apiInstallGames([g.index], route, fg);
             setOutput(r.output);
-            toaster.toast({ title: r.ok ? `Scaler installed in ${g.name}` : "Install failed", body: r.ok ? "Paste its Steam launch options" : r.output.slice(-200) });
+            toaster.toast({ title: r.ok ? `Scaler installed in ${g.name}` : "Install failed", body: r.ok ? (fg ? "" : "Scaler installed (frame generation off)") : r.output.slice(-200) });
             if (r.ok && !(await refreshGamesFromCache())) onScan();
           } finally {
             setBusy("");
@@ -1641,7 +1664,7 @@ function Content() {
             label="Frame generation (experimental)"
             description={activeVersion?.fg_available === false
               ? "No FG engine in this HelixSR build (withdrawn in 1.9.3+ — Scaler's providers cover FG)"
-              : "Builds FG into the DLL for Scaler games (~400 MB extra downloads, longer build)"}
+              : "Builds the FG engine for Scaler games; 2.0+ installs it with every Scaler (~400 MB extra downloads, longer build)"}
             checked={fgBuild}
             disabled={activeVersion?.fg_available === false}
             onChange={(c: boolean) => setFgBuild(c)}
@@ -1679,6 +1702,19 @@ function Content() {
             {scanning ? "Scanning ..." : `Scan games${gamesTag ? ` (${gamesTag})` : ""}`}
           </MButton>
         </PanelSectionRow>
+        {activeVersion?.generation === 3 && (
+        <PanelSectionRow>
+          <ToggleField
+            label="Install frame generation with Scaler"
+            description={activeVersion?.fg_built
+              ? "2.0+ Scaler games get DLSS frame generation (turn it on in the game; change quality in Scaler settings)"
+              : "No FG built — run the network build with frame generation first"}
+            checked={fgWithScaler && !!activeVersion?.fg_built}
+            disabled={!activeVersion?.fg_built}
+            onChange={(c: boolean) => setFgWithScaler(c)}
+          />
+        </PanelSectionRow>
+        )}
         {scanning && (
           <PanelSectionRow>
             <MButton  variant="text" onClick={onCancelScan}>
@@ -1990,7 +2026,7 @@ function Content() {
                     onChange={(v: number) => setIni({ ...ini, Sharpness: String(Math.round(v * 100) / 100) })}
                   />
                 </PanelSectionRow>
-                {iniSchema === "legacy" && (
+                {(iniSchema === "legacy" || iniSchema === "g3") && (
                 <PanelSectionRow>
                   <ToggleField
                     label="Use game slider"
@@ -2010,7 +2046,9 @@ function Content() {
                     <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
                       {((iniSchema === "modern"
                         ? [["auto", "Auto"], ["64", "64"], ["32", "32"]]
-                        : [["default", "Default"], ["64", "64"], ["32", "32"]]) as [string, string][]).map(([v, label]) => (
+                        : iniSchema === "g3"
+                          ? [["auto", "Auto"], ["default", "Default"], ["64", "64"], ["32", "32"]]
+                          : [["default", "Default"], ["64", "64"], ["32", "32"]]) as [string, string][]).map(([v, label]) => (
                         <MButton
                           key={v}
                           variant={ini.WaveSize === v ? "filled" : "outlined"}
@@ -2023,6 +2061,85 @@ function Content() {
                     </div>
                   </div>
                 </PanelSectionRow>
+                {iniSchema === "g3" && (
+                <PanelSectionRow>
+                  <div style={{ width: "100%" }}>
+                    <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
+                      Int8 — faster int8 math (auto decides; off if the picture shimmers)
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
+                      {([["auto", "Auto"], ["on", "On"], ["off", "Off"]] as [string, string][]).map(([v, label]) => (
+                        <MButton
+                          key={v}
+                          variant={(ini.Int8 || "auto") === v ? "filled" : "outlined"}
+                          onClick={() => setIni({ ...ini, Int8: v })}
+                          style={{ flex: "1 1 40%", minWidth: 0 }}
+                        >
+                          {label}
+                        </MButton>
+                      ))}
+                    </div>
+                  </div>
+                </PanelSectionRow>
+                )}
+                {iniSchema === "g3" && (
+                <PanelSectionRow>
+                  <div style={{ width: "100%" }}>
+                    <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
+                      NetworkResolution — Ultra Performance (fast, default) vs the sharpest image (full)
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
+                      {([["fast", "Fast"], ["full", "Full"]] as [string, string][]).map(([v, label]) => (
+                        <MButton
+                          key={v}
+                          variant={(ini.NetworkResolution || "fast") === v ? "filled" : "outlined"}
+                          onClick={() => setIni({ ...ini, NetworkResolution: v })}
+                          style={{ flex: "1 1 40%", minWidth: 0 }}
+                        >
+                          {label}
+                        </MButton>
+                      ))}
+                    </div>
+                  </div>
+                </PanelSectionRow>
+                )}
+                {iniSchema === "g3" && (
+                <PanelSectionRow>
+                  <div style={{ width: "100%" }}>
+                    <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
+                      DLSS frame generation (needs an FG build)
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
+                      {([["c", "Light"], ["full", "Full"]] as [string, string][]).map(([v, label]) => (
+                        <MButton
+                          key={v}
+                          variant={(ini.FgPreset || "c") === v ? "filled" : "outlined"}
+                          disabled={ini.FgEnabled === "false"}
+                          onClick={() => setIni({ ...ini, FgPreset: v })}
+                          style={{ flex: "1 1 40%", minWidth: 0 }}
+                        >
+                          {label}
+                        </MButton>
+                      ))}
+                      <MButton
+                        variant={ini.FgMemory === "system" ? "filled" : "outlined"}
+                        disabled={ini.FgEnabled === "false"}
+                        onClick={() => setIni({ ...ini, FgMemory: ini.FgMemory === "system" ? "auto" : "system" })}
+                        style={{ flex: "1 1 40%", minWidth: 0 }}
+                      >
+                        {ini.FgMemory === "system" ? "Memory: system" : "Memory: auto"}
+                      </MButton>
+                      <MButton
+                        variant={ini.FgEnabled === "false" ? "outlined" : "filled"}
+                        onClick={() => setIni({ ...ini, FgEnabled: ini.FgEnabled === "false" ? "true" : "false" })}
+                        style={{ flex: "1 1 40%", minWidth: 0 }}
+                      >
+                        {ini.FgEnabled === "false" ? "FG off" : "FG on"}
+                      </MButton>
+                    </div>
+                  </div>
+                </PanelSectionRow>
+                )}
                 {allPresetNames.length === 0 && (
                   <PanelSectionRow>
                     <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
@@ -2112,14 +2229,17 @@ function Content() {
                 <PanelSectionRow>
                   <div style={{ fontSize: 12 }}>{scIniPath}</div>
                 </PanelSectionRow>
-                {(["Int8", "WaveSize", "FrameGeneration", "QuickFlow"] as const).map((key) => (
+                {(scSchema === "g3"
+                  ? (["Int8", "WaveSize", "FGPreset", "QuickFlow"] as const)
+                  : (["Int8", "WaveSize", "FrameGeneration", "QuickFlow"] as const)
+                ).map((key) => (
                   <PanelSectionRow key={key}>
                     <div style={{ width: "100%" }}>
                       <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
-                        {key} — {SCALER_SETTING_LABELS[key]}
+                        {key} — {(scSchema === "g3" ? SCALER_SETTING_LABELS_G3 : SCALER_SETTING_LABELS)[key]}
                       </div>
                       <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
-                        {SCALER_SETTING_OPTIONS[key].map(([v, label]) => (
+                        {((scSchema === "g3" ? SCALER_SETTING_OPTIONS_G3 : SCALER_SETTING_OPTIONS)[key]).map(([v, label]) => (
                           <MButton
                             key={v}
                             variant={scIni[key] === v ? "filled" : "outlined"}
@@ -2174,6 +2294,14 @@ function Content() {
       )}
       <PanelSection title="HelixSR Scaler">
         <>
+        {activeVersion?.generation === 3 ? (
+        <PanelSectionRow>
+          <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
+            Scaler is bundled with HelixSR 2.0+ — installing a game brings it (and frame generation) automatically.
+            The download below is only for 1.9.x versions.
+          </div>
+        </PanelSectionRow>
+        ) : (
         <PanelSectionRow>
           <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
             For games with DLSS/XeSS/FSR2 but no FSR 3.1: OptiScaler with HelixSR built in (Insert for the menu).
@@ -2181,11 +2309,14 @@ function Content() {
             options per game. About 132 MB to download, plus copies in each game.
           </div>
         </PanelSectionRow>
+        )}
+        {activeVersion?.generation !== 3 && (
         <PanelSectionRow>
           <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
             {scalerState?.tag ? `Downloaded: ${scalerState.tag} (${scalerState.size_mb} MB on disk)` : "Not downloaded yet"}
           </div>
         </PanelSectionRow>
+        )}
         {scalerReleases.map((r) => (
           <PanelSectionRow key={r.tag}>
             <MButton

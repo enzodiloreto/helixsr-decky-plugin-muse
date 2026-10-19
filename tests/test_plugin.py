@@ -398,7 +398,7 @@ class PluginCase(unittest.TestCase):
                       if c["name"] == "Frame generation")
         self.assertIn("not built", fg_row["detail"])
         names = [c["name"] for c in p._check_build_ready_run(modern, fg=True)["checks"]]
-        self.assertIn("DLSS Frame Generation DLL", names)
+        self.assertIn("DLSS Frame Generation DLLs", names)
         self.assertIn("NGX core prerequisites", names)
         # FG engine gate: this fixture has no setup/fg (1.9.3-style)
         self.assertFalse(main.helixref.fg_engine_available(modern))
@@ -601,6 +601,86 @@ class PluginCase(unittest.TestCase):
                         break
                     await asyncio.sleep(0.05)
                 self.assertEqual(proc.returncode, -15)
+        asyncio.run(go())
+
+    def test_g3_build_spawn_direct(self):
+        """2.0+ builds run setup/helixsr_setup.py directly (no bash wrapper,
+        no game step): --fg-only mirrors the wrapper, --dlssg twice for FG,
+        exit 3 (FG failed, upscaling built) counts as success."""
+        import sys as _sys
+        d = self._g3_dir(tag="2.0.3", network=False)
+        digest = self._seed_dlss(d)
+        dg1, dg2 = b"fake-dlssg", b"fake-dlssg2"
+        (d / main.DLSSG_FILE).write_bytes(dg1)
+        (d / main.DLSSG2_FILE).write_bytes(dg2)
+        setup_py = d / "setup" / "helixsr_setup.py"
+        setup_py.write_text(
+            'import json, sys\n'
+            'from pathlib import Path\n'
+            'if "--status" in sys.argv:\n'
+            '    net = "1" if Path(__file__).with_name("net.txt").exists() else "0"\n'
+            '    print(f"network={net} fg=0")\n'
+            'else:\n'
+            '    Path(str(__file__) + ".args.json").write_text(json.dumps(sys.argv))\n')
+        p = self._plugin(active="v2.0.3")
+        tool = (_sys.executable, Path("/bin/true"))
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            # 1. plain build: --no-fg, no --fg-only, one --dlss
+            with mock.patch.object(main, "DLSS_SHA256", digest), \
+                    mock.patch.object(main, "_ensure_g3_toolchain", return_value=tool):
+                r = await p.start_build()
+                self.assertTrue(r["ok"], r)
+                await self._wait_build(p)
+            self.assertEqual(emitted[-1], ("helixsr_build_done", True, 0))
+            args = json.loads(Path(str(setup_py) + ".args.json").read_text())
+            self.assertIn("--yes", args)
+            self.assertIn("--no-fg", args)
+            self.assertNotIn("--fg-only", args)
+            self.assertNotIn("--dlssg", args)
+            self.assertEqual(args[args.index("--dlss") + 1], str(d / main.DLSS_FILE))
+            # a successful build deletes the once-used cached DLLs: re-seed
+            self._seed_dlss(d)
+            (d / main.DLSSG_FILE).write_bytes(dg1)
+            (d / main.DLSSG2_FILE).write_bytes(dg2)
+            # 2. FG build: --dlssg twice, no --no-fg
+            with mock.patch.object(main, "DLSS_SHA256", digest), \
+                    mock.patch.object(main, "DLSSG_SHA256",
+                                      hashlib.sha256(dg1).hexdigest()), \
+                    mock.patch.object(main, "DLSSG2_SHA256",
+                                      hashlib.sha256(dg2).hexdigest()), \
+                    mock.patch.object(main, "_ensure_g3_toolchain", return_value=tool):
+                r = await p.start_build(rebuild=True, fg=True)
+                self.assertTrue(r["ok"], r)
+                await self._wait_build(p)
+            args = json.loads(Path(str(setup_py) + ".args.json").read_text())
+            self.assertNotIn("--no-fg", args)
+            self.assertEqual(args.count("--dlssg"), 2)
+            self.assertIn(str(d / main.DLSSG_FILE), args)
+            self.assertIn(str(d / main.DLSSG2_FILE), args)
+            # 3. built network + FG: --fg-only; exit 3 still ok=True
+            (d / "setup" / "net.txt").write_text("built\n")
+            self._seed_dlss(d)
+            (d / main.DLSSG_FILE).write_bytes(dg1)
+            (d / main.DLSSG2_FILE).write_bytes(dg2)
+            fake3 = setup_py.read_text().replace(
+                'Path(str(__file__) + ".args.json").write_text(json.dumps(sys.argv))',
+                'Path(str(__file__) + ".args.json").write_text(json.dumps(sys.argv))\n'
+                'raise SystemExit(3)')
+            setup_py.write_text(fake3)
+            with mock.patch.object(main, "DLSS_SHA256", digest), \
+                    mock.patch.object(main, "DLSSG_SHA256",
+                                      hashlib.sha256(dg1).hexdigest()), \
+                    mock.patch.object(main, "DLSSG2_SHA256",
+                                      hashlib.sha256(dg2).hexdigest()), \
+                    mock.patch.object(main, "_ensure_g3_toolchain", return_value=tool):
+                r = await p.start_build(False, True)
+                self.assertTrue(r["ok"], r)
+                await self._wait_build(p)
+            self.assertEqual(emitted[-1], ("helixsr_build_done", True, 3))
+            args = json.loads(Path(str(setup_py) + ".args.json").read_text())
+            self.assertIn("--fg-only", args)
+            self.assertNotIn("--no-fg", args)
         asyncio.run(go())
 
     def test_cancel_build(self):
@@ -2164,6 +2244,302 @@ def uninstall(g):
         mod = main.helixref.install_module(d)
         self.assertEqual(mod.CALLS, [("GameD", "scaler")])
         self.assertEqual(p._scaler_uninstall_one(g, d).strip(), "[helixsr-setup] scaler removed")
+
+    # --- HelixSR 2.0+ (generation 3) ----------------------------------------
+
+    def _g3_dir(self, tag="2.0.0", network=True):
+        """Fake 2.0+ version dir: the DLL under HelixSR-fsrfg/, the installer
+        split into setup/helixsr_games.py + setup/helixsr_bridge.py."""
+        root = Path(os.environ["DECKY_PLUGIN_RUNTIME_DIR"]) / "helixsr"
+        here = make_helixsr_dir(root, tag=tag, network=network)
+        fsrfg = here / "HelixSR-fsrfg"
+        fsrfg.mkdir()
+        (here / "amd_fidelityfx_dx12.dll").rename(fsrfg / "amd_fidelityfx_dx12.dll")
+        (here / "setup").mkdir(exist_ok=True)
+        (here / "setup/helixsr_install.py").write_text("# gen3 marker\n")
+        (here / "setup/helixsr_games.py").write_text("# gen3 games\n")
+        (here / "setup/helixsr_bridge.py").write_text("# gen3 bridge\n")
+        (here / "setup/fg").mkdir()
+        (here / "setup/fg/fg_setup.py").write_text("# gen3 fg engine\n")
+        return here
+
+    def test_g3_generation_and_dispatch(self):
+        helixref = main.helixref
+        d = self._g3_dir(tag="2.0.0", network=False)
+        self.assertEqual(helixref.generation(d), 3)
+        self.assertEqual(helixref.layout_of(d), "modern")
+        self.assertEqual(helixref.dll_parent(d), d / "HelixSR-fsrfg")
+        # synthetic games module (our own code, not upstream's): the 2.0+
+        # dispatch loads it and hands install the DLL's folder.
+        (d / "setup/helixsr_games.py").write_text(
+            'MARKER = "helixsr-install.json"\n'
+            'LOADER_NAMES = ("dxgi.dll",)\n'
+            'HERE = None\n'
+            'def games(extra):\n'
+            '    print("[helixsr-setup] scanned")\n'
+            '    return []\n'
+            'def install(g, here):\n'
+            '    global HERE\n'
+            '    HERE = here\n'
+            '    print("[helixsr-setup] installed")\n'
+            'def uninstall(g):\n'
+            '    print("[helixsr-setup] uninstalled")\n')
+        mod = helixref.install_module(d)
+        self.assertTrue(mod.__name__.startswith("helixsr_install_"))
+        self.assertIs(helixref.install_module(d), mod)
+        gl, skipped, log = helixref.scan(d, ["/tmp"])
+        self.assertEqual((gl, skipped), ([], 0))
+        self.assertIn("scanned", log)
+        self.assertIn("installed", helixref.install(object(), d))
+        self.assertEqual(mod.HERE, d / "HelixSR-fsrfg")
+        self.assertIn("uninstalled", helixref.uninstall(object(), d))
+        self.assertEqual(helixref.loader_name(d), "dxgi.dll")
+        self.assertTrue(helixref.fg_engine_available(d))
+        # the vendored check cannot see into HelixSR-fsrfg/: _network_built
+        # consults the release's --status instead (see the status test).
+
+    def test_g3_setup_status_and_state(self):
+        d = self._g3_dir(tag="2.0.1", network=False)
+        (d / "setup/helixsr_setup.py").write_text(
+            'import sys\n'
+            'if "--status" in sys.argv:\n'
+            '    print("network=1 fg=1")\n')
+        (d / "HelixSR-fsrfg" / "helixsr-fg").mkdir()
+        self.assertEqual(main._setup_status(d), (True, True))
+        self.assertTrue(main._network_built(d))
+        self.assertTrue(main._fg_built(d))
+        p = self._plugin(active="v2.0.1")
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            s = await p.get_state()
+            v = s["versions"][0]
+            self.assertEqual(v["layout"], "modern")
+            self.assertTrue(v["network_built"])
+            self.assertTrue(v["fg_built"])
+            self.assertTrue(v["fg_available"])
+            self.assertEqual(v["dll_version"], "2.0.1")
+        asyncio.run(go())
+
+    def test_g3_download_fsrfg_layout(self):
+        root = Path(os.environ["DECKY_PLUGIN_RUNTIME_DIR"])
+        src = self.tmp / "src" / "HelixSR-2.0.2"
+        src.mkdir(parents=True)
+        (src / "helixsr-setup.sh").write_text("#!/bin/sh\n")
+        (src / "helixsr-uninstall.sh").write_text("#!/bin/sh\n")
+        (src / "setup").mkdir()
+        (src / "setup/helixsr_setup.py").write_text("# layout marker\n")
+        (src / "setup/helixsr_install.py").write_text("# layout marker\n")
+        (src / "setup/helixsr_games.py").write_text("# layout marker\n")
+        (src / "setup/helixsr_bridge.py").write_text("# layout marker\n")
+        fsrfg = src / "HelixSR-fsrfg"
+        fsrfg.mkdir()
+        dll = (make_helixsr_dir(self.tmp / "pkg", tag="2.0.2") / "amd_fidelityfx_dx12.dll").read_bytes()
+        (fsrfg / "amd_fidelityfx_dx12.dll").write_bytes(dll)
+        zp = self.tmp / "rel3.zip"
+        with zipfile.ZipFile(zp, "w") as z:
+            for f in sorted(src.rglob("*")):
+                if f.is_file():
+                    z.write(f, f.relative_to(src.parent))
+        p = self._plugin()
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            r = await p.start_download("v2.0.2", zp.as_uri())
+            self.assertEqual(r, {"ok": True})
+            st = await self._wait_done(p.get_download_status)
+            self.assertTrue(st["ok"], st.get("error"))
+            self.assertFalse(st["network_built"])
+            s = await p.get_state()
+            v = next(x for x in s["versions"] if x["tag"] == "v2.0.2")
+            self.assertEqual(v["layout"], "modern")
+            self.assertFalse(v["network_built"])
+        asyncio.run(go())
+
+    def test_g3_scaler_via_bridge(self):
+        d = self._g3_dir(tag="2.0.0", network=False)
+        (d / "setup/helixsr_setup.py").write_text(
+            'import sys\n'
+            'if "--status" in sys.argv:\n'
+            '    print("network=1 fg=0")\n')
+        (d / "helixsr-scaler").mkdir()
+        (d / "helixsr-scaler" / "OptiScaler.dll").write_bytes(b"OptiScaler fake")
+        (d / "setup/helixsr_bridge.py").write_text(
+            'CALLS = []\n'
+            '_messages = []\n'
+            'INSTALLED_BY = ""\n'
+            'def scaler_pkg_version(pkg):\n'
+            '    return (1, 1, 0)\n'
+            'def cmd_install(hi, release, a):\n'
+            '    CALLS.append(("install", dict(a)))\n'
+            '    _messages.append("installed " + a["game"])\n'
+            'def cmd_remove(hi, release, a):\n'
+            '    CALLS.append(("remove", dict(a)))\n'
+            '    _messages.append("removed " + a["game"])\n')
+        ga = self._stub_json_game("BridgeGame", inputs=["DLSS"])
+        p = self._plugin(active="v2.0.0")
+        p.settings.setSetting("extra_folders", [ga])
+        # the scan resolves games through the games module (the real one is
+        # upstream code; this synthetic stand-in lists the stub game)
+        (d / "setup/helixsr_games.py").write_text(self.SCALER_GAME_MODULE)
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            st = await self._rescan(p)
+            self.assertTrue(st["ok"], st.get("error"))
+            idx = {g["name"]: g["index"] for g in st["games"]}
+            r = await p.install_games([idx["BridgeGame"]], "scaler")
+            self.assertTrue(r["ok"], r["output"])
+            self.assertIn("installed", r["output"])
+            b, _hi = main.helixref.bridge(d)
+            kind, a = b.CALLS[-1]
+            self.assertEqual(kind, "install")
+            self.assertEqual(a["way"], "scaler")
+            self.assertEqual(a["scaler"], str(d / "helixsr-scaler"))
+            self.assertEqual(a["scaler-version"], "1.1.0")
+            self.assertEqual(a["fg"], "off")
+            self.assertNotIn("anticheat-ok", a)
+            self.assertEqual(b.INSTALLED_BY, "the HelixSR Muse plugin")
+            # explicit passthrough of the panel's FG toggle
+            r = await p.install_games([idx["BridgeGame"]], "scaler", True)
+            self.assertTrue(r["ok"], r["output"])
+            self.assertEqual(b.CALLS[-1][1]["fg"], "on")
+            r = await p.install_games([idx["BridgeGame"]], "scaler", False)
+            self.assertEqual(b.CALLS[-1][1]["fg"], "off")
+            # a bridge-installed game carries the upstream manifest, not the
+            # plugin's marker: removal routes through cmd_remove
+            exe = Path(ga)
+            (exe / "HelixSR-fsrfg").mkdir()
+            (exe / "HelixSR-fsrfg" / "amd_fidelityfx_dx12.dll").write_bytes(b"DLL")
+            (exe / "dxgi.dll").write_bytes(b"loader")
+            (exe / "HelixSR-Scaler.files").write_text(
+                "# HelixSR Scaler, installed by the HelixSR Muse plugin\n"
+                "# version=1.1.0\nname=dxgi.dll\ndxgi.dll\n")
+            r = await p.uninstall_games([idx["BridgeGame"]])
+            self.assertTrue(r["ok"], r["output"])
+            self.assertIn("removed", r["output"])
+            kind, a = b.CALLS[-1]
+            self.assertEqual(kind, "remove")
+            self.assertEqual(a["game"], ga)
+        asyncio.run(go())
+
+    def test_g3_ini_schema(self):
+        self.assertEqual(main._schema_defaults("g3"), main.INI_DEFAULTS_G3)
+        norm, err = main._normalize_ini_values(
+            {"UseGameSlider": "true", "WaveSize": "default", "Int8": "on",
+             "NetworkResolution": "full", "FgPreset": "full", "FgMemory": "video",
+             "FgEnabled": True}, "g3")
+        self.assertEqual(err, "")
+        self.assertEqual(norm, {"UseGameSlider": "true", "WaveSize": "default",
+                                "Int8": "on", "NetworkResolution": "full",
+                                "FgPreset": "full", "FgMemory": "video",
+                                "FgEnabled": "true"})
+        bad, err = main._normalize_ini_values({"FgPreset": "bogus"}, "g3")
+        self.assertIn("bad FgPreset", err)
+        bad, err = main._normalize_ini_values({"NetworkResolution": "fast"}, "modern")
+        self.assertIn("unknown setting", err)
+        # read: template defaults fill the new keys, valid values override
+        p = self.tmp / "helixsr.ini"
+        p.write_text("[Upscaling]\nInt8 = on\n[DlssFrameGeneration]\nPreset = full\n")
+        vals, _ = main._read_ini_values(p, "g3")
+        self.assertEqual(vals["Int8"], "on")
+        self.assertEqual(vals["FgPreset"], "full")
+        self.assertEqual(vals["FgMemory"], "auto")
+        self.assertEqual(vals["WaveSize"], "auto")
+        # cross-schema presets: modern applies to g3, g3 extras drop for modern
+        full, err = main._translate_ini_values({"Sharpener": "rcas", "Int8": "off"}, "modern")
+        self.assertEqual(err, "")
+        self.assertNotIn("Int8", full)
+        full, err = main._translate_ini_values(main.INI_DEFAULTS, "g3")
+        self.assertEqual(err, "")
+        self.assertEqual(full["Int8"], "auto")
+
+    def test_g3_scaler_settings_schema(self):
+        d = self._g3_dir(tag="2.0.0", network=False)
+        ga = self._stub_json_game("G3ScalerGame", inputs=["DLSS"])
+        (Path(ga) / "HelixSR-fsrfg").mkdir()
+        (Path(ga) / "OptiScaler.ini").write_text(
+            "[HelixSR]\nInt8=off\nFGPreset=full\nQuickFlow=fastest\n")
+        # the games module is loaded from setup/helixsr_games.py on 2.0+
+        (d / "setup/helixsr_games.py").write_text(self.SCALER_GAME_MODULE)
+        p = self._plugin(active="v2.0.0")
+        p.settings.setSetting("extra_folders", [ga])
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            st = await self._rescan(p)
+            self.assertTrue(st["ok"], st.get("error"))
+            idx = {g["name"]: g["index"] for g in st["games"]}
+            s = await p.get_scaler_settings(idx["G3ScalerGame"])
+            self.assertTrue(s["ok"], s.get("error"))
+            self.assertEqual(s["schema"], "g3")
+            self.assertEqual(s["values"]["Int8"], "off")
+            self.assertEqual(s["values"]["FGPreset"], "full")
+            self.assertEqual(s["values"]["QuickFlow"], "fastest")
+            w = await p.set_scaler_settings(idx["G3ScalerGame"], {"FGPreset": "c"})
+            self.assertTrue(w["ok"], w.get("output"))
+            # the release's own rule: QuickFlow only with the full preset
+            bad = await p.set_scaler_settings(idx["G3ScalerGame"], {"QuickFlow": "fast"})
+            self.assertFalse(bad["ok"])
+            bad = await p.set_scaler_settings(idx["G3ScalerGame"], {"FrameGeneration": "on"})
+            self.assertFalse(bad["ok"])
+        asyncio.run(go())
+
+    def test_g3_verify_upstream_install(self):
+        import types
+        t = self.tmp / "GameG3V"
+        (t / "HelixSR-fsrfg" / "helixsr-fg").mkdir(parents=True)
+        (t / "dxgi.dll").write_bytes(b"upstream scaler loader")
+        (t / "OptiScaler.ini").write_text("[HelixSR]\nInt8=auto\n")
+        (t / "HelixSR-fsrfg" / "amd_fidelityfx_dx12.dll").write_bytes(
+            b"\x00HelixSR 2.0.0\x00" + b"\x00" * 100)
+        (t / "HelixSR-Scaler.files").write_text(
+            "# HelixSR Scaler, installed by the HelixSR Muse plugin\n# version=1.1.0\nname=dxgi.dll\n"
+            "dxgi.dll\nOptiScaler.ini\n")
+        g = types.SimpleNamespace(target=t, fsr_targets=[], folder=t, name="GameG3V")
+        info = main._scaler_install_info(g)
+        self.assertEqual(info["kind"], "upstream")
+        self.assertEqual(info["scaler"], "1.1.0")
+        self.assertEqual(info["helixsr"], "2.0.0")
+        self.assertEqual(main._marker_versions(g), {"2.0.0"})
+        p = self._plugin()
+        self.assertEqual(p._verify_game(g), [])
+        (t / "HelixSR-fsrfg" / "amd_fidelityfx_dx12.dll").unlink()
+        problems = p._verify_game(g)
+        self.assertTrue(any("HelixSR DLL missing" in x for x in problems), problems)
+
+    def test_g3_readiness_softgate(self):
+        """2.0+: no numpy Python is a note, not a gate — the plugin
+        downloads the setup's portable Python during the build."""
+        d = self._g3_dir(tag="2.0.4", network=False)
+        p = self._plugin()
+
+        class _R:
+            def __init__(self, rc):
+                self.returncode = rc
+                self.stdout = ""
+                self.stderr = ""
+
+        def fake_run(cmd, **kw):
+            return _R(1)  # every probe fails: no numpy, no Python 3.14
+
+        with mock.patch.object(main.subprocess, "run", side_effect=fake_run):
+            checks = p._check_build_ready_run(d)["checks"]
+        row = next(c for c in checks if c["name"] == "Python 3 + numpy")
+        self.assertTrue(row["ok"], row)
+        self.assertIn("portable Python", row["detail"])
+        # gen2 keeps the hard gate
+        base = Path(tempfile.mkdtemp(prefix="hxready-"))
+        self.addCleanup(shutil.rmtree, base, True)
+        modern = base / "HelixSR-1.9.0"
+        (modern / "setup").mkdir(parents=True)
+        (modern / "setup/helixsr_setup.py").write_text("# layout marker\n")
+        (modern / "helixsr-setup.sh").write_text("#!/bin/sh\n")
+        (modern / "amd_fidelityfx_dx12.dll").write_bytes(b"DLL")
+        with mock.patch.object(main.subprocess, "run", side_effect=fake_run):
+            checks = p._check_build_ready_run(modern)["checks"]
+        row = next(c for c in checks if c["name"] == "Python 3 + numpy")
+        self.assertFalse(row["ok"], row)
 
     def test_generation_dispatch(self):
         helixref = main.helixref

@@ -18,6 +18,7 @@ export interface HelixVersion {
   network_built: boolean;
   dll_version: string;
   layout?: string;
+  generation?: number;
   fg_built?: boolean;
   fg_available?: boolean;
   size_mb: number;
@@ -104,7 +105,8 @@ export interface ScalerDownloadStatus {
 export interface ScalerSettings {
   Int8: string;
   WaveSize: string;
-  FrameGeneration: string;
+  FrameGeneration?: string;
+  FGPreset?: string;
   QuickFlow: string;
 }
 
@@ -119,6 +121,11 @@ export interface GameSettings {
   Sharpness: string;
   UseGameSlider?: string;
   WaveSize: string;
+  Int8?: string;
+  NetworkResolution?: string;
+  FgEnabled?: string;
+  FgPreset?: string;
+  FgMemory?: string;
 }
 
 export interface DownloadStatus {
@@ -207,14 +214,14 @@ export const apiStartScan = callable<[], { ok: boolean; error?: string }>("start
 export const apiCancelScan = callable<[], { ok: boolean; error?: string }>("cancel_scan");
 export const apiGetScanStatus = callable<[], ScanStatus>("get_scan_status");
 export const apiGetLastScan = callable<[], ScanCache>("get_last_scan");
-export const apiInstallGames = callable<[indices: number[], route: string], { ok: boolean; output: string; rc?: number }>("install_games");
+export const apiInstallGames = callable<[indices: number[], route: string, fg?: boolean], { ok: boolean; output: string; rc?: number }>("install_games");
 export const apiGetScalerReleases = callable<[include_prereleases?: boolean], { releases: ScalerRelease[]; error: string }>("get_scaler_releases");
 export const apiGetScalerState = callable<[], ScalerState>("get_scaler_state");
 export const apiStartScalerDownload = callable<[tag: string, tar_url: string], { ok: boolean; error?: string }>("start_scaler_download");
 export const apiCancelScalerDownload = callable<[], { ok: boolean; error?: string }>("cancel_scaler_download");
 export const apiCancelPluginUpdate = callable<[], { ok: boolean; error?: string }>("cancel_plugin_update");
 export const apiGetScalerDownloadStatus = callable<[], ScalerDownloadStatus>("get_scaler_download_status");
-export const apiGetScalerSettings = callable<[index: number], { ok: boolean; path?: string; values?: ScalerSettings; error?: string }>("get_scaler_settings");
+export const apiGetScalerSettings = callable<[index: number], { ok: boolean; path?: string; values?: ScalerSettings; schema?: string; note?: string; error?: string }>("get_scaler_settings");
 export const apiSetScalerSettings = callable<[index: number, values: ScalerSettings], { ok: boolean; output?: string; path?: string }>("set_scaler_settings");
 export const apiRepairGames = callable<[indices: number[]], { ok: boolean; output: string }>("repair_games");
 export const apiVerifyInstalls = callable<[], { ok: boolean; games: VerifyResult[]; error?: string }>("verify_installs");

@@ -7,6 +7,7 @@ import re
 import shutil
 import ssl
 import subprocess
+import sys
 import tarfile
 import tempfile
 import threading
@@ -35,9 +36,15 @@ SCALER_RELEASES_URL = f"https://api.github.com/repos/{SCALER_REPO}/releases?per_
 # the DLSS pin below). Downloaded with this plugin's TLS because the setup's
 # Python may not do HTTPS; each file is hash-verified before use.
 DLSSG_SL_URL = "https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.8.0/streamline-sdk-v2.8.0.zip"
+DLSSG2_SL_URL = "https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.14.16/streamline-sdk-v2.14.16.zip"
 DLSSG_ENTRY = "bin/x64/nvngx_dlssg.dll"
 DLSSG_SHA256 = "0a6212a33ebaa708e7907468db7345c92cfdc6f8dd29c6e1248f32dbea4bcdaf"
 DLSSG_FILE = "nvngx_dlssg.dll"
+# HelixSR 2.0+ builds DLSS frame generation from TWO Streamline DLLs
+# (310.3 for full mode, 310.9.16 for NVIDIA's light mode). Same entry, a
+# newer Streamline release; recognized by checksum like the first.
+DLSSG2_SHA256 = "8d59d49b36410dd6b62fef2503a5871d347415bd85d943fa0848563a95dd50c7"
+DLSSG2_FILE = "nvngx_dlssg_310.9.16.dll"
 XESS_URL = "https://github.com/intel/xess/releases/download/v3.0.2/XeSS_SDK_3.0.2.zip"
 XESS_ENTRY = "bin/libxell.dll"
 XESS_SHA256 = "d2030dcd694fda8f2ec7e044b13e6db8f0b56d4ba9113a5efad334e3f3ded8c7"
@@ -170,6 +177,55 @@ def _dir_for_tag(tag: str) -> Path | None:
     return None
 
 
+def _release_dll(d: Path) -> Path:
+    """The release's HelixSR DLL: HelixSR-fsrfg/ on 2.0+, the zip root
+    before. The legacy default keeps error messages working for bad dirs."""
+    for p in (d / "HelixSR-fsrfg" / "amd_fidelityfx_dx12.dll", d / "amd_fidelityfx_dx12.dll"):
+        if p.is_file():
+            return p
+    return d / "amd_fidelityfx_dx12.dll"
+
+
+_setup_status_cache: dict = {}
+
+
+def _setup_status(d: Path):
+    """(network, fg) as the release's own setup reports (`helixsr_setup.py
+    --status`, 2.0+; it checksums NVIDIA's files), else None. Cached per
+    dir mtime like the size cache."""
+    if helixref.generation(d) != 3:
+        return None
+    key = str(d)
+    try:
+        mtime = d.stat().st_mtime_ns
+    except OSError:
+        return None
+    hit = _setup_status_cache.get(key)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    st = None
+    try:
+        p = subprocess.run([sys.executable, "-I", str(d / "setup" / "helixsr_setup.py"),
+                            str(d), "--status"],
+                           capture_output=True, text=True, timeout=300)
+        m = re.search(r"network=([01])\s+fg=([01])", p.stdout or "")
+        if m:
+            st = (m.group(1) == "1", m.group(2) == "1")
+    except (OSError, subprocess.SubprocessError):
+        pass
+    _setup_status_cache[key] = (mtime, st)
+    return st
+
+
+def _network_built(d: Path) -> bool:
+    """Whether the network is built: the release's own --status on 2.0+
+    (its DLL lives in HelixSR-fsrfg/), the vendored check before."""
+    st = _setup_status(d)
+    if st is not None:
+        return st[0]
+    return helixscan.network_ready(d)
+
+
 # NVIDIA's DLSS SDK DLL that HelixSR builds its network from, verified by hash.
 # Same file and hash as the reference setup/helixsr_setup.py downloads
 # (Apache-2.0, (c) lonewolf0622). The plugin fetches it with its own TLS
@@ -180,7 +236,7 @@ DLSS_SHA256 = 'be6e434a94ca32499515eb62ca0e6c274526055d568d0426e4c652dcdfb6ee6e'
 DLSS_LICENSE = 'https://github.com/NVIDIA/DLSS/blob/v310.7.0/LICENSE.txt'
 DLSS_FILE = 'nvngx_dlss.dll'
 
-for _pin in (DLSS_SHA256, DLSSG_SHA256, XESS_SHA256):
+for _pin in (DLSS_SHA256, DLSSG_SHA256, DLSSG2_SHA256, XESS_SHA256):
     assert len(_pin) == 64 and all(c in "0123456789abcdef" for c in _pin), \
         "hash pin malformed (must be 64 hex chars)"
 del _pin
@@ -230,6 +286,174 @@ def _repair_exec_bits(d: Path) -> list[str]:
     return fixed
 
 
+# --- 2.0+ build toolchain (what the release's helixsr-setup.sh would set up:
+# a Python 3 with numpy and the Windows DXC shader compiler through Wine) ----
+
+G3_PY_URL = ("https://github.com/astral-sh/python-build-standalone/releases/download/"
+             "20261003/cpython-3.12.15%2B20261003-x86_64-unknown-linux-gnu-install_only.tar.gz")
+G3_PY_SHA = "f937814031eab4698ca6d07ec606ede1825768f3f3e99af76d9db3900bee03c5"
+G3_DXC_URL = ("https://github.com/microsoft/DirectXShaderCompiler/releases/download/"
+              "v1.9.2607/dxc_2026_07_29.zip")
+G3_DXC_SHA = "a1dfb116ba3eeae6a1582291b53a8e7bf65ad760676bd3194685c8f7367cd241"
+
+
+def _g3_pins(d: Path) -> dict:
+    """URL/hash pins the release's own helixsr-setup.sh carries (parsed, so a
+    newer release updates them), falling back to the known constants."""
+    pins = {"PY_URL": G3_PY_URL, "PY_SHA": G3_PY_SHA,
+            "DXCWIN_URL": G3_DXC_URL, "DXCWIN_SHA": G3_DXC_SHA}
+    try:
+        text = (d / "helixsr-setup.sh").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return pins
+    for name in list(pins):
+        m = re.search(rf"^{name}='([^']+)'$", text, re.M)
+        if m:
+            pins[name] = m.group(1)
+    return pins
+
+
+def _download_for_setup(url: str, dest: Path, sha: str, line, cancel) -> None:
+    """Stream a pinned download for the 2.0+ build (plugin's own TLS, cancel
+    checks, progress lines). Raises OSError on any failure; leaves no file."""
+    line(f"[helixsr] downloading {dest.name} from {url}")
+    req = urllib.request.Request(url, headers={"User-Agent": "helixsr-decky-plugin"})
+    try:
+        r = urllib.request.urlopen(req, timeout=120, context=_ssl_context())
+    except Exception as e:  # noqa: BLE001
+        raise OSError(f"{dest.name}: {type(e).__name__}: {e}") from e
+    try:
+        total = int(r.headers.get("Content-Length") or 0)
+    except (TypeError, ValueError):
+        total = 0
+    got, last_pct = 0, -1
+    try:
+        with r, open(dest, "wb") as f:
+            while True:
+                if cancel.is_set():
+                    raise OSError("cancelled")
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+                got += len(chunk)
+                pct = int(100 * got / total) if total else -1
+                if pct >= last_pct + 5:
+                    last_pct = pct
+                    if total:
+                        line(f"[helixsr] downloading {dest.name} {got >> 20}/{total >> 20} MB ({pct}%)")
+                    else:
+                        line(f"[helixsr] downloading {dest.name} {got >> 20} MB ...")
+    except OSError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise OSError(f"{dest.name}: {type(e).__name__}: {e}") from e
+    finally:
+        pass
+    if total and got != total:
+        dest.unlink(missing_ok=True)
+        raise OSError(f"incomplete {dest.name} download: got {got >> 20} of {total >> 20} MB")
+    if _sha256_file(dest) != sha:
+        dest.unlink(missing_ok=True)
+        raise OSError(f"{dest.name}: checksum mismatch (not the expected file)")
+    line(f"[helixsr] {dest.name} downloaded and verified ({got >> 20} MB)")
+
+
+def _g3_data_dir() -> Path:
+    home = Path(os.environ.get("DECKY_USER_HOME") or Path.home())
+    return (Path(os.environ.get("XDG_DATA_HOME") or home / ".local" / "share")
+            / "HelixSR")
+
+
+def _find_wine(home: Path) -> str:
+    """Proton/Wine with the same search order as helixsr-setup.sh."""
+    import glob as _glob
+    for pat in ("./local/share/Steam/steamapps/common/Proton*/files/bin/wine",
+                ".steam/steam/steamapps/common/Proton*/files/bin/wine",
+                "./local/share/Steam/compatibilitytools.d/*/files/bin/wine",
+                ".steam/root/compatibilitytools.d/*/files/bin/wine"):
+        for p in sorted(_glob.glob(str(home / pat))):
+            if os.access(p, os.X_OK):
+                return p
+    return shutil.which("wine") or ""
+
+
+def _has_numpy(py: str) -> bool:
+    try:
+        p = subprocess.run([py, "-c", "import numpy, sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)"],
+                           capture_output=True, timeout=90)
+        return p.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _ensure_g3_toolchain(d: Path, line, cancel) -> tuple[str, Path]:
+    """A (python, dxc-wine shim) for running a 2.0+ release's setup directly:
+    mirrors helixsr-setup.sh's own provisioning (portable/system Python with
+    numpy, pinned Windows DXC unpacked and wrapped through Wine)."""
+    data = _g3_data_dir()
+    data.mkdir(parents=True, exist_ok=True)
+    pins = _g3_pins(d)
+    py = ""
+    portable = data / "python" / "bin" / "python3"
+    for c in ([str(portable)] if portable.is_file() else []) + ["python3"]:
+        if _has_numpy(c):
+            py = c
+            break
+        line(f"[helixsr] {c}: no numpy, trying the next Python")
+    if not py:
+        line(f"[helixsr] using a portable Python in {data}/python (one-time download, ~67 MB)")
+        tar = data / "python.tar.gz"
+        try:
+            _download_for_setup(pins["PY_URL"], tar, pins["PY_SHA"], line, cancel)
+            import tarfile
+            with tarfile.open(tar) as t:
+                t.extractall(data)
+        finally:
+            tar.unlink(missing_ok=True)
+        p = subprocess.run([str(portable), "-m", "pip", "install", "--quiet",
+                            "--disable-pip-version-check", "numpy"],
+                           capture_output=True, timeout=600)
+        if p.returncode != 0 or not _has_numpy(str(portable)):
+            raise OSError("numpy install into the portable Python failed")
+        py = str(portable)
+    line(f"[helixsr] python: {py}")
+    dxcwin = data / "dxc-win"
+    if not (dxcwin / "bin" / "x64" / "dxc.exe").is_file():
+        z = data / "dxc-win.zip"
+        try:
+            _download_for_setup(pins["DXCWIN_URL"], z, pins["DXCWIN_SHA"], line, cancel)
+            # (the zip stores Windows paths: bin\x64\dxc.exe)
+            with zipfile.ZipFile(z) as archive:
+                for info in archive.infolist():
+                    t = info.filename.replace("\\", "/")
+                    if t.startswith("bin/x64/") and not t.endswith("/"):
+                        dest = dxcwin / t
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        with archive.open(info) as src, open(dest, "wb") as out:
+                            shutil.copyfileobj(src, out)
+        finally:
+            z.unlink(missing_ok=True)
+        if not (dxcwin / "bin" / "x64" / "dxc.exe").is_file():
+            raise OSError("could not unpack the shader compiler")
+    wine = _find_wine(Path(os.environ.get("DECKY_USER_HOME") or Path.home()))
+    if not wine:
+        raise OSError("no Proton or Wine found (needed to run the shader compiler); "
+                      "install Proton in Steam or Wine")
+    shim = data / "dxc-wine.sh"
+    shim.write_text(
+        "#!/usr/bin/env bash\n"
+        "# DXC through Wine: absolute Linux paths become Z:\\ paths\n"
+        "args=()\n"
+        "for a in \"$@\"; do case \"$a\" in /*) args+=(\"Z:$(printf '%s' \"$a\" | tr / '\\\\')\") ;; "
+        "*) args+=(\"$a\") ;; esac; done\n"
+        f"WINEPREFIX=\"{data}/wineprefix\" WINEDEBUG=-all exec \"{wine}\" "
+        f"\"{dxcwin}/bin/x64/dxc.exe\" \"${{args[@]}}\"\n", encoding="utf-8")
+    shim.chmod(0o755)
+    line(f"[helixsr] shader compiler: Windows DXC through {wine}")
+    return py, shim
+
+
 def _free_bytes(p: Path) -> int:
     q = p
     while not q.exists():
@@ -253,18 +477,23 @@ def _status_for(route, inputs):
         return f"{have} only: not supported by the drop-in (needs HelixSR Scaler)"
     if route == "optiscaler":
         return " / ".join(inputs) + " (through OptiScaler: select DLSS in the game)"
+    if route == "blocked":
+        return " / ".join(inputs) + " (anti-cheat: nothing is installed, needs the FSR drop-in)"
     return route or "compatible"
 
 
 def _marker_versions(g) -> set:
     """HelixSR versions recorded in a game's install markers (per route),
-    including this plugin's scaler marker. The installed helixsr.dll itself
-    is also read: it carries the build version no matter what installed it."""
+    including this plugin's scaler marker. The installed HelixSR DLL itself
+    is also read: it carries the build version no matter what installed it
+    (HelixSR-fsrfg/amd_fidelityfx_dx12.dll on 2.0+, HelixSR/helixsr.dll
+    before)."""
     out = set()
     paths = []
     if g.target is not None:
-        paths.append(g.target / helixscan.FOLDER / helixscan.MARKER)
-        paths.append(g.target / helixscan.FOLDER / SCALER_MARKER)
+        for folder in (g.target / "HelixSR-fsrfg", g.target / helixscan.FOLDER):
+            paths.append(folder / helixscan.MARKER)
+            paths.append(folder / SCALER_MARKER)
     for t in g.fsr_targets:
         paths.append(t.parent / helixscan.MARKER)
     for p in paths:
@@ -275,13 +504,16 @@ def _marker_versions(g) -> set:
         if isinstance(rec, dict) and rec.get("helixsr"):
             out.add(str(rec["helixsr"]))
     if g.target is not None:
-        hp = g.target / helixscan.FOLDER / "helixsr.dll"
-        try:
-            v = helixscan.version_of(hp) if hp.is_file() else "?"
-        except OSError:
-            v = "?"
-        if v and v != "?":
-            out.add(v)
+        for hp in (g.target / "HelixSR-fsrfg" / "amd_fidelityfx_dx12.dll",
+                   g.target / helixscan.FOLDER / "helixsr.dll"):
+            if not hp.is_file():
+                continue
+            try:
+                v = helixscan.version_of(hp)
+            except OSError:
+                v = "?"
+            if v and v != "?":
+                out.add(v)
     return out
 
 
@@ -445,14 +677,22 @@ def _plugin_version() -> str:
 
 
 def _fg_built(d: Path) -> bool:
-    """Whether this version was built with frame generation: upstream writes
-    helixsr_fg_setup.json next to the DLL on every FG build. Missing or
-    unreadable means not built (or built before this check existed)."""
-    try:
-        rec = json.loads((d / "helixsr_fg_setup.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    return isinstance(rec, dict)
+    """Whether this version was built with frame generation. 2.0+: the
+    release's own --status (fg=1) with the helixsr-fg folder present.
+    1.9.x: upstream writes helixsr_fg_setup.json next to the DLL on every
+    FG build. Missing or unreadable means not built (or built before this
+    check existed)."""
+    st = _setup_status(d)
+    if st is not None:
+        return st[1] and (d / "HelixSR-fsrfg" / "helixsr-fg").is_dir()
+    for base in (d,):
+        try:
+            rec = json.loads((base / "helixsr_fg_setup.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict):
+            return True
+    return False
 
 
 def _new_dl_state(tag: str = "") -> dict:
@@ -548,7 +788,22 @@ INI_DEFAULTS = {"Sharpener": "off", "Sharpness": "0.5",
 # 1.9.0+ settings: no game slider, WaveSize auto instead of default,
 # Sharpness default 0.1 (range and Sharpener unchanged).
 INI_DEFAULTS_MODERN = {"Sharpener": "off", "Sharpness": "0.1", "WaveSize": "auto"}
-INI_WAVES = {"legacy": ("default", "64", "32"), "modern": ("auto", "64", "32")}
+# 2.0+ settings: the game slider is back (2.0's own form has it), WaveSize
+# accepts default again, and the ini template grew sections the DLL reads
+# (Int8/NetworkResolution for upscaling, the DlssFrameGeneration block).
+INI_SECTIONS_G3 = dict(INI_SECTIONS, Int8="Upscaling", NetworkResolution="Upscaling",
+                       FgEnabled="DlssFrameGeneration", FgPreset="DlssFrameGeneration",
+                       FgMemory="DlssFrameGeneration")
+INI_DEFAULTS_G3 = {"Sharpener": "off", "Sharpness": "0.5", "UseGameSlider": "false",
+                   "WaveSize": "auto", "Int8": "auto", "NetworkResolution": "fast",
+                   "FgEnabled": "true", "FgPreset": "c", "FgMemory": "auto"}
+INI_CHOICES_G3 = {"Int8": ("auto", "on", "off"), "NetworkResolution": ("fast", "full"),
+                  "FgEnabled": ("true", "false"), "FgPreset": ("c", "full"),
+                  "FgMemory": ("auto", "video", "system")}
+# The DlssFrameGeneration keys' ini spellings differ from the flat key names.
+INI_OPTION_G3 = {"FgEnabled": "Enabled", "FgPreset": "Preset", "FgMemory": "Memory"}
+INI_WAVES = {"legacy": ("default", "64", "32"), "modern": ("auto", "64", "32"),
+             "g3": ("auto", "default", "64", "32")}
 BUILTIN_DEFAULT_PRESET = "Default"
 MAX_INI_PRESETS = 20
 # HelixSR Scaler settings: OptiScaler.ini [HelixSR] (the synced
@@ -560,6 +815,13 @@ SCALER_INI_SETTINGS = {"Int8": ("auto", "on", "off"),
                        "QuickFlow": ("auto", "off", "on", "fastest")}
 SCALER_INI_DEFAULTS = {"Int8": "auto", "WaveSize": "auto", "FrameGeneration": "auto",
                        "QuickFlow": "auto"}
+# 2.0+ Scaler (1.1.0): frame generation quality is a preset now (c = NVIDIA's
+# light mode, the file's default), QuickFlow runs only with full.
+SCALER_INI_SETTINGS_G3 = {"Int8": ("auto", "on", "off"),
+                          "WaveSize": ("auto", "64", "32"),
+                          "FGPreset": ("auto", "c", "full"),
+                          "QuickFlow": ("auto", "off", "fast", "fastest")}
+SCALER_INI_DEFAULTS_G3 = {k: "auto" for k in SCALER_INI_SETTINGS_G3}
 
 
 def _find_ini(g, create=False):
@@ -567,9 +829,12 @@ def _find_ini(g, create=False):
     install marker points at. With create=True, the default location for a
     game that lost its file (caller must ensure the game is installed)."""
     if g.target is not None:
-        folder = g.target / helixscan.FOLDER
-        if (folder / helixscan.MARKER).is_file():
-            return folder / helixscan.INI
+        # 2.0+ installs keep HelixSR (and its ini) in HelixSR-fsrfg/.
+        for folder in (g.target / "HelixSR-fsrfg", g.target / helixscan.FOLDER):
+            if (folder / helixscan.MARKER).is_file():
+                return folder / helixscan.INI
+        if (g.target / "HelixSR-fsrfg" / helixscan.INI).is_file():
+            return g.target / "HelixSR-fsrfg" / helixscan.INI
         if (g.target / helixscan.INI).is_file():
             return g.target / helixscan.INI
     for t in g.fsr_targets:
@@ -589,6 +854,8 @@ def _find_ini(g, create=False):
 
 
 def _schema_defaults(schema: str) -> dict:
+    if schema == "g3":
+        return dict(INI_DEFAULTS_G3)
     if schema == "modern":
         return dict(INI_DEFAULTS_MODERN)
     return dict(INI_DEFAULTS)
@@ -615,12 +882,20 @@ def _read_ini_values(p: Path, schema: str = "legacy"):
             f = float(cp.get("Sharpening", "Sharpness").strip())
             if 0.0 <= f <= 1.0:
                 vals["Sharpness"] = str(round(f, 2))
-        if schema == "legacy" and cp.has_option("Sharpening", "UseGameSlider"):
+        if schema in ("legacy", "g3") and cp.has_option("Sharpening", "UseGameSlider"):
             vals["UseGameSlider"] = "true" if cp.getboolean("Sharpening", "UseGameSlider") else "false"
         if cp.has_option("Compatibility", "WaveSize"):
             v = cp.get("Compatibility", "WaveSize").strip()
             if v in waves:
                 vals["WaveSize"] = v
+        if schema == "g3":
+            for key in ("Int8", "NetworkResolution", "FgEnabled", "FgPreset", "FgMemory"):
+                section = INI_SECTIONS_G3[key]
+                opt = INI_OPTION_G3.get(key, key)
+                if cp.has_option(section, opt):
+                    v = cp.get(section, opt).strip().lower()
+                    if v in INI_CHOICES_G3[key]:
+                        vals[key] = v
     except (ValueError, configparser.Error):
         pass
     return vals, ""
@@ -632,11 +907,12 @@ def _normalize_ini_values(values: dict, schema: str = "legacy"):
     Keys outside the schema are rejected."""
     norm = {}
     waves = INI_WAVES.get(schema, INI_WAVES["legacy"])
+    sections = INI_SECTIONS_G3 if schema == "g3" else INI_SECTIONS
     for key, v in values.items():
-        if key not in INI_SECTIONS:
+        if key not in sections:
             return None, f"unknown setting: {key}"
         if schema == "modern" and key == "UseGameSlider":
-            return None, "UseGameSlider was removed in HelixSR 1.9.0"
+            return None, "UseGameSlider was removed in HelixSR 1.9.0 (2.0+ has it back)"
         if key == "Sharpener":
             if not isinstance(v, str) or v.lower() not in ("off", "nvidia", "rcas"):
                 return None, f"bad Sharpener: {v!r} (off, nvidia, rcas)"
@@ -661,17 +937,29 @@ def _normalize_ini_values(values: dict, schema: str = "legacy"):
             if s not in waves:
                 return None, f"bad WaveSize: {v!r} ({', '.join(waves)})"
             norm[key] = s
+        elif schema == "g3" and key in INI_CHOICES_G3:
+            if isinstance(v, bool):
+                s = "true" if v else "false"
+            else:
+                s = str(v).lower()
+            if s not in INI_CHOICES_G3[key]:
+                return None, f"bad {key}: {v!r} ({', '.join(INI_CHOICES_G3[key])})"
+            norm[key] = s
     return norm, ""
 
 
 def _translate_ini_values(values: dict, schema: str):
     """Map a stored preset to a schema: WaveSize default<->auto, the game
-    slider dropped (modern) or defaulted (legacy). Returns a full snapshot
-    for the schema, or (None, err) for corrupt values."""
+    slider dropped (modern) or defaulted (legacy/g3), keys the target schema
+    doesn't know (2.0+'s extra keys on older games) skipped. Returns a full
+    snapshot for the schema, or (None, err) for corrupt values."""
     if not isinstance(values, dict):
         return None, "bad settings"
+    sections = INI_SECTIONS_G3 if schema == "g3" else INI_SECTIONS
     mapped = {}
     for key, v in values.items():
+        if key not in sections:
+            continue
         if key == "UseGameSlider" and schema == "modern":
             continue
         if key == "WaveSize":
@@ -695,7 +983,8 @@ def _installed_helixsr_version(g) -> str:
     if folder is not None:
         candidates.append(Path(folder) / helixscan.FOLDER / helixscan.MARKER)
     if g.target is not None:
-        candidates.append(g.target / helixscan.FOLDER / helixscan.MARKER)
+        for mfolder in (g.target / "HelixSR-fsrfg", g.target / helixscan.FOLDER):
+            candidates.append(mfolder / helixscan.MARKER)
     for t in g.fsr_targets:
         candidates.append(t.parent / helixscan.MARKER)
     for p in candidates:
@@ -705,7 +994,30 @@ def _installed_helixsr_version(g) -> str:
             continue
         if isinstance(rec, dict) and rec.get("helixsr"):
             return str(rec["helixsr"])
+    # No marker: read the installed DLL itself (2.0+ Scaler installs don't
+    # keep a helixsr-install.json, their manifest carries the scaler only).
+    if g.target is not None:
+        for hp in (g.target / "HelixSR-fsrfg" / "amd_fidelityfx_dx12.dll",
+                   g.target / helixscan.FOLDER / "helixsr.dll"):
+            if not hp.is_file():
+                continue
+            try:
+                v = helixscan.version_of(hp)
+            except OSError:
+                continue
+            if v and v != "?":
+                return v
     return ""
+
+
+def _schema_of(d) -> str:
+    """Settings schema of a version dir: 'g3' for 2.0+, else its layout."""
+    try:
+        if helixref.generation(d) == 3:
+            return "g3"
+    except Exception:  # noqa: BLE001
+        return "legacy"
+    return helixref.layout_of(d)
 
 
 def _ini_layout_for(g, d) -> str:
@@ -717,15 +1029,15 @@ def _ini_layout_for(g, d) -> str:
         if want and want != "?":
             for vd in _version_dirs():
                 try:
-                    got = helixscan.version_of(vd / "amd_fidelityfx_dx12.dll")
+                    got = helixscan.version_of(_release_dll(vd))
                 except OSError:
                     continue
                 if got == want:
-                    return helixref.layout_of(vd)
+                    return _schema_of(vd)
     except Exception:  # noqa: BLE001
         pass
     try:
-        return helixref.layout_of(d)
+        return _schema_of(d)
     except Exception:  # noqa: BLE001
         return "legacy"
 
@@ -857,13 +1169,17 @@ def _scaler_install_info(g):
         return None
     helixsr = ""
     if g.target is not None:
-        hp = Path(g.target) / helixscan.FOLDER / "helixsr.dll"
-        try:
-            helixsr = helixscan.version_of(hp) if hp.is_file() else ""
-        except OSError:
-            helixsr = ""
-        if helixsr == "?":
-            helixsr = ""
+        for hp in (g.target / "HelixSR-fsrfg" / "amd_fidelityfx_dx12.dll",
+                   g.target / helixscan.FOLDER / "helixsr.dll"):
+            if not hp.is_file():
+                continue
+            try:
+                helixsr = helixscan.version_of(hp)
+            except OSError:
+                helixsr = ""
+            if helixsr == "?":
+                helixsr = ""
+            break
     return {"kind": "upstream", "scaler": up["version"], "helixsr": helixsr,
             "loader": up["name"], "files": list(up["files"]),
             "launch_options": _scaler_launch_options(up["name"])}
@@ -1162,13 +1478,14 @@ class Plugin:
             versions = []
             for d in _version_dirs():
                 try:
-                    dll_version = helixscan.version_of(d / "amd_fidelityfx_dx12.dll")
+                    dll_version = helixscan.version_of(_release_dll(d))
                 except OSError:
                     dll_version = "?"
                 versions.append({"tag": _tag_of_dir(d), "dir": d.name,
-                                 "network_built": helixscan.network_ready(d),
+                                 "network_built": _network_built(d),
                                  "dll_version": dll_version,
                                  "layout": helixref.layout_of(d),
+                                 "generation": helixref.generation(d),
                                  "fg_built": _fg_built(d),
                                  "fg_available": helixref.fg_engine_available(d),
                                  "size_mb": round(_dir_size_cached(d) / 1e6, 1)})
@@ -1264,8 +1581,8 @@ class Plugin:
                 _restore_zip_modes(z, root)
             tmp.unlink(missing_ok=True)
             d = root / top
-            if not d.is_dir() or not (d / "amd_fidelityfx_dx12.dll").is_file():
-                raise OSError(f"not a HelixSR release layout (no {top}/amd_fidelityfx_dx12.dll)")
+            if not d.is_dir() or not _release_dll(d).is_file():
+                raise OSError(f"not a HelixSR release layout (no HelixSR DLL in {top})")
             for name in ("helixsr-setup.sh", "helixsr-uninstall.sh"):
                 p = d / name
                 if p.is_file():
@@ -1274,7 +1591,7 @@ class Plugin:
                     # Older releases (e.g. 1.4.3) ship no uninstaller.
                     decky.logger.debug(f"HelixSR {tag}: no {name} in this release")
             st["dir"] = top
-            st["network_built"] = helixscan.network_ready(d)
+            st["network_built"] = _network_built(d)
         except Exception as e:  # noqa: BLE001
             decky.logger.error(f"download {tag} failed: {e}")
             st["error"] = str(e)
@@ -1599,7 +1916,7 @@ class Plugin:
         """Names of installed games whose markers record this version's DLL.
         Call with _ops_lock held. Unknown DLL version matches nothing."""
         try:
-            want = helixscan.version_of(d / "amd_fidelityfx_dx12.dll")
+            want = helixscan.version_of(_release_dll(d))
         except OSError:
             return []
         if want == "?":
@@ -1693,23 +2010,18 @@ class Plugin:
                 py_detail = f"{c}: not usable"
         if py:
             checks.append({"name": "Python 3 + numpy", "ok": True, "detail": py})
+        elif helixref.generation(d) == 3:
+            # The plugin provisions the setup's portable Python itself
+            # during a 2.0+ build (the wrapper would do the same): not a
+            # gate, just a note. Wine/disk/DLSS rows stay hard gates.
+            checks.append({"name": "Python 3 + numpy", "ok": True,
+                           "detail": f"{py_detail or 'none found'} — a portable Python "
+                                     "(~67 MB) will be downloaded during the build"})
         else:
             checks.append({"name": "Python 3 + numpy", "ok": False,
                            "detail": py_detail or "none found (setup downloads a portable Python)"})
         # Shader compiler: Proton/Wine, same search order as helixsr-setup.sh.
-        wine = ""
-        for pat in ("./local/share/Steam/steamapps/common/Proton*/files/bin/wine",
-                    ".steam/steam/steamapps/common/Proton*/files/bin/wine",
-                    "./local/share/Steam/compatibilitytools.d/*/files/bin/wine",
-                    ".steam/root/compatibilitytools.d/*/files/bin/wine"):
-            for p in sorted(glob.glob(str(home / pat))):
-                if os.access(p, os.X_OK):
-                    wine = p
-                    break
-            if wine:
-                break
-        if not wine:
-            wine = shutil.which("wine") or ""
+        wine = _find_wine(home)
         checks.append({"name": "Proton/Wine (shader compiler)", "ok": bool(wine),
                        "detail": wine or "install Proton in Steam or Wine"})
         # Disk space on both filesystems the setup writes to.
@@ -1726,13 +2038,18 @@ class Plugin:
                            + (" (--no-fg): the plugin installs the FSR drop-in only"
                               if not fg else ": DLSS-G downloads on build, NGX core via the setup")})
         if fg:
-            dlssg = d / DLSSG_FILE
-            if dlssg.is_file() and _sha256_file(dlssg) == DLSSG_SHA256:
-                checks.append({"name": "DLSS Frame Generation DLL", "ok": True,
+            gen3 = helixref.generation(d) == 3
+            fg_dlls = [(DLSSG_FILE, DLSSG_SHA256)] + ([(DLSSG2_FILE, DLSSG2_SHA256)] if gen3 else [])
+            have = [name for name, sha in fg_dlls
+                    if (d / name).is_file() and _sha256_file(d / name) == sha]
+            if len(have) == len(fg_dlls):
+                checks.append({"name": "DLSS Frame Generation DLLs", "ok": True,
                                "detail": "cached, verified"})
             else:
-                checks.append({"name": "DLSS Frame Generation DLL", "ok": True,
-                               "detail": "will download ~8 MB on build (NVIDIA Streamline SDK)"})
+                sizes = "~8 MB" if len(fg_dlls) == 1 else "~8 MB each of 2"
+                checks.append({"name": "DLSS Frame Generation DLLs", "ok": True,
+                               "detail": f"will download {sizes} on build "
+                                         "(NVIDIA Streamline SDK)"})
             zstd = shutil.which("zstd") or ""
             py314 = ""
             for c in ([str(portable)] if portable.is_file() else []) + ["python3"]:
@@ -1763,10 +2080,10 @@ class Plugin:
         target = _dir_for_tag(target_tag)
         if target is None:
             return {"ok": False, "error": f"not downloaded: {target_tag}"}
-        if not helixscan.network_ready(target):
+        if not _network_built(target):
             return {"ok": False, "error": f"the network is not built for {target_tag}: run Build first"}
         try:
-            target_version = helixscan.version_of(target / "amd_fidelityfx_dx12.dll")
+            target_version = helixscan.version_of(_release_dll(target))
         except OSError:
             target_version = "?"
         self._mig = _new_mig_state()
@@ -2062,8 +2379,11 @@ class Plugin:
         st["games"] = list(st["games"])
         return st
 
-    async def install_games(self, indices: list[int], route: str | None = None) -> dict:
-        return await self._game_op("install", indices, route)
+    async def install_games(self, indices: list[int], route: str | None = None,
+                            fg: bool | None = None) -> dict:
+        """route "" = default; fg (2.0+ Scaler installs only): None auto (on
+        when built, the release's default), else on/off."""
+        return await self._game_op("install", indices, route, fg)
 
     async def uninstall_games(self, indices: list[int]) -> dict:
         return await self._game_op("uninstall", indices)
@@ -2086,7 +2406,8 @@ class Plugin:
                             "extra": list(extra), "time": time.monotonic()}
         return gl
 
-    async def _game_op(self, op: str, indices: list[int], route: str | None = None) -> dict:
+    async def _game_op(self, op: str, indices: list[int], route: str | None = None,
+                       fg: bool | None = None) -> dict:
         d = await self._active_dir()
         if d is None:
             return {"ok": False, "output": "no HelixSR version downloaded"}
@@ -2096,10 +2417,12 @@ class Plugin:
             return {"ok": False, "output": f"bad game numbers: {indices}"}
         if route is not None and not isinstance(route, str):
             return {"ok": False, "output": f"bad route: {route}"}
+        if fg is not None and not isinstance(fg, bool):
+            return {"ok": False, "output": f"bad fg flag: {fg!r}"}
         route = route or None
         extra = self._extra_folders()
         if op == "install" and route == "scaler":
-            return await asyncio.to_thread(self._scaler_install_run, d, clean, extra)
+            return await asyncio.to_thread(self._scaler_install_run, d, clean, extra, fg)
         return await asyncio.to_thread(self._game_op_run, op, d, clean, route, extra)
 
     def _scaler_dir_or_error(self):
@@ -2113,17 +2436,24 @@ class Plugin:
         """(dir, error): scaler installs need a built modern HelixSR."""
         if helixref.layout_of(d) != "modern":
             return None, "activate a downloaded HelixSR 1.9.0+ version first"
-        if not helixscan.network_ready(d):
+        if not _network_built(d):
             return None, "the network is not built: run Build first"
         return d, ""
 
-    def _scaler_install_one(self, g, d):
+    def _scaler_install_one(self, g, d, fg: bool | None = None):
         """Install (or refresh) scaler into one resolved game, +, returns log.
-        Versions with upstream scaler support (1.9.3+) use the reference
-        installer (route forced to scaler: anti-cheat refusals, loader choice,
+        2.0+ releases install through their own bridge (bundled Scaler with
+        frame generation, pairing checks, manifest and remover); versions
+        with upstream scaler support (1.9.3+) use the reference installer
+        (route forced to scaler: anti-cheat refusals, loader choice,
         manifest and remover included); older ones use this plugin's own
         installer, preferring the version's bundled helixsr-scaler/ over the
         separate Scaler download. Raises."""
+        if helixref.generation(d) == 3:
+            # fg: None auto = on when built (the release's own default:
+            # Enter = yes); the games panel's toggle passes true/false.
+            return helixref.g3_install(g, d, way="scaler",
+                                       fg=_fg_built(d) if fg is None else fg)
         mod = helixref.install_module(d)
         if hasattr(mod, "install_scaler"):
             c = copy.copy(g)
@@ -2141,13 +2471,17 @@ class Plugin:
         if err:
             raise OSError(err)
         try:
-            hver = helixscan.version_of(here / "amd_fidelityfx_dx12.dll")
+            hver = helixscan.version_of(_release_dll(here))
         except OSError:
             hver = "?"
         return _scaler_install_game(g, sdir, here, stag, hver)
 
     def _scaler_uninstall_one(self, g, d):
         """Remove a scaler install, ours or upstream's. Returns the log."""
+        if helixref.generation(d) == 3 and g.target is not None and g.target.is_dir():
+            # 2.0+ installs (ours = via the bridge) carry the upstream
+            # manifest, not this plugin's marker: let the bridge remove it.
+            return helixref.g3_remove(g, d)
         if _read_scaler_marker(g):
             return _scaler_uninstall_game(g)
         mod = helixref.install_module(d)
@@ -2165,14 +2499,16 @@ class Plugin:
             targets.append(gl[i - 1])
         return targets, ""
 
-    def _scaler_install_run(self, d, indices, extra):
+    def _scaler_install_run(self, d, indices, extra, fg: bool | None = None):
         mod = helixref.install_module(d)
-        if hasattr(mod, "install_scaler"):
+        if hasattr(mod, "install_scaler") or helixref.generation(d) == 3:
             # Upstream owns the flow (anti-cheat refusals, loader choice,
             # manifest/remover, switching): validate and dispatch per game.
+            # 2.0+ goes through its bundled Scaler via the bridge instead of
+            # the reference's install_scaler, same dispatch.
             try:
                 with self._ops_lock:
-                    if not helixscan.network_ready(d):
+                    if not _network_built(d):
                         return {"ok": False, "output": "the network is not built: run Build first"}
                     gl = self._resolve_games(d, extra or [])
                     targets, err = self._pick_targets(gl, indices)
@@ -2182,7 +2518,7 @@ class Plugin:
                     for g in targets:
                         decky.logger.info(f"HelixSR scaler install {g.name} (route scaler)")
                         try:
-                            logs.append(self._scaler_install_one(g, d))
+                            logs.append(self._scaler_install_one(g, d, fg))
                         except (OSError, SystemExit) as e:
                             return {"ok": False, "output": f"{g.name}: {e}"}
                     self._update_scan_file([(g.name, str(g.folder)) for g in targets], True)
@@ -2234,7 +2570,7 @@ class Plugin:
         Reuses a fresh scan so every click doesn't re-walk the libraries."""
         try:
             with self._ops_lock:
-                if not helixscan.network_ready(d):
+                if not _network_built(d):
                     return {"ok": False, "output": "the network is not built: run Build first"}
                 gl = self._resolve_games(d, extra or [])
                 targets, err = self._pick_targets(gl, indices)
@@ -2388,8 +2724,9 @@ class Plugin:
                         return {"ok": False, "output": "cannot locate settings file for this game"}
                     helixref.install_module(d).make_ini(p.parent, None)
                 text = p.read_text(encoding="utf-8", errors="replace") if p.is_file() else ""
+                sections = INI_SECTIONS_G3 if schema == "g3" else INI_SECTIONS
                 for key, val in norm.items():
-                    text = _set_ini_value(text, INI_SECTIONS[key], key, val)
+                    text = _set_ini_value(text, sections[key], INI_OPTION_G3.get(key, key), val)
                 p.write_text(text, encoding="utf-8")
                 return {"ok": True, "output": f"saved {p}", "path": str(p)}
         except OSError as e:
@@ -2410,9 +2747,9 @@ class Plugin:
     def _game_log_paths(self, g) -> list:
         paths = []
         if g.target is not None:
-            folder = g.target / helixscan.FOLDER
-            if (folder / "helixsr.log").is_file():
-                paths.append(folder / "helixsr.log")
+            for folder in (g.target / "HelixSR-fsrfg", g.target / helixscan.FOLDER):
+                if (folder / "helixsr.log").is_file():
+                    paths.append(folder / "helixsr.log")
             for name in ("helixsr.log", "helixsr_loader.log"):
                 if (g.target / name).is_file():
                     paths.append(g.target / name)
@@ -2484,8 +2821,10 @@ class Plugin:
         return await asyncio.to_thread(self._game_settings_run, "set", d, idx, dict(fix["settings"]))
 
     def _scaler_settings_run(self, op: str, d: Path, index: int, values: dict | None) -> dict:
-        """Read/write a scaler game's OptiScaler.ini [HelixSR] (Int8, WaveSize,
-        FrameGeneration). Partial-update semantics like helixsr.ini."""
+        """Read/write a scaler game's OptiScaler.ini [HelixSR] (Int8, WaveSize
+        and the frame-generation keys). Partial-update semantics like
+        helixsr.ini. 2.0+'s Scaler renamed FrameGeneration to a preset
+        (FGPreset: c = light mode) and re-spelled QuickFlow."""
         try:
             with self._ops_lock:
                 gl = self._resolve_games(d, self._extra_folders())
@@ -2500,36 +2839,58 @@ class Plugin:
                 if not p.is_file():
                     return {"ok": False, "error" if op == "get" else "output":
                             "no OptiScaler.ini found: install HelixSR Scaler in this game first"}
+                schema = "g3" if (g.target / "HelixSR-fsrfg").is_dir() else "legacy"
+                allowed = SCALER_INI_SETTINGS_G3 if schema == "g3" else SCALER_INI_SETTINGS
+                defaults = SCALER_INI_DEFAULTS_G3 if schema == "g3" else SCALER_INI_DEFAULTS
                 if op == "get":
-                    vals = dict(SCALER_INI_DEFAULTS)
+                    vals = dict(defaults)
                     try:
                         text = p.read_text(encoding="utf-8", errors="replace")
                         cp = configparser.ConfigParser()
                         cp.optionxform = str
                         cp.read_string(text)
                     except (OSError, configparser.Error):
-                        return {"ok": True, "path": str(p), "values": vals,
+                        return {"ok": True, "path": str(p), "values": vals, "schema": schema,
                                 "note": "unreadable, showing defaults"}
                     try:
-                        for key, allowed in SCALER_INI_SETTINGS.items():
+                        for key, opts in allowed.items():
                             if cp.has_option(SCALER_INI_SECTION, key):
                                 v = cp.get(SCALER_INI_SECTION, key).strip().lower()
-                                if v in allowed:
+                                if v in opts:
                                     vals[key] = v
                     except (ValueError, configparser.Error):
                         pass
-                    return {"ok": True, "path": str(p), "values": vals}
+                    return {"ok": True, "path": str(p), "values": vals, "schema": schema}
                 if not isinstance(values, dict):
                     return {"ok": False, "output": "bad settings"}
                 norm = {}
                 for key, v in values.items():
-                    if key not in SCALER_INI_SETTINGS:
+                    if key not in allowed:
                         return {"ok": False, "output": f"unknown setting: {key}"}
                     s = str(v).lower()
-                    if s not in SCALER_INI_SETTINGS[key]:
+                    if s not in allowed[key]:
                         return {"ok": False,
-                                "output": f"bad {key}: {v!r} ({', '.join(SCALER_INI_SETTINGS[key])})"}
+                                "output": f"bad {key}: {v!r} ({', '.join(allowed[key])})"}
                     norm[key] = s
+                if schema == "g3" and norm.get("QuickFlow") in ("fast", "fastest"):
+                    # As the release's own form enforces: QuickFlow runs only
+                    # with the full preset (auto = the file's light default;
+                    # at runtime it is ignored elsewhere anyway).
+                    if "FGPreset" in norm:
+                        preset = norm["FGPreset"]
+                    else:
+                        preset = "c"
+                        try:
+                            cp = configparser.ConfigParser()
+                            cp.optionxform = str
+                            cp.read_string(p.read_text(encoding="utf-8", errors="replace"))
+                            if cp.has_option(SCALER_INI_SECTION, "FGPreset"):
+                                preset = cp.get(SCALER_INI_SECTION, "FGPreset").strip().lower()
+                                preset = {"light": "c", "default": "full"}.get(preset, preset)
+                        except (OSError, configparser.Error):
+                            pass
+                    if preset != "full":
+                        return {"ok": False, "output": "QuickFlow needs FGPreset full"}
                 text = p.read_text(encoding="utf-8", errors="replace")
                 for key, val in norm.items():
                     text = _set_ini_value(text, SCALER_INI_SECTION, key, val)
@@ -2592,7 +2953,7 @@ class Plugin:
         if d is None:
             return "legacy"
         try:
-            return helixref.layout_of(d)
+            return _schema_of(d)
         except Exception:  # noqa: BLE001
             return "legacy"
 
@@ -2689,9 +3050,9 @@ class Plugin:
             bad = []
             for v in versions:
                 tag = _tag_of_dir(v)
-                if not (v / "amd_fidelityfx_dx12.dll").is_file():
+                if not _release_dll(v).is_file():
                     bad.append(f"{tag}: HelixSR DLL missing")
-                elif not helixscan.network_ready(v):
+                elif not _network_built(v):
                     bad.append(f"{tag}: network not built")
             checks.append({"name": "Versions",
                            "ok": not bad,
@@ -2792,8 +3153,11 @@ class Plugin:
             loader = sc.get("loader", SCALER_LOADER)
             if not (g.target / loader).is_file():
                 problems.append(f"{loader} missing next to the game's exe")
-            if not (g.target / helixscan.FOLDER / "helixsr.dll").is_file():
-                problems.append("HelixSR/helixsr.dll missing")
+            # HelixSR's DLL: HelixSR-fsrfg/amd_fidelityfx_dx12.dll on 2.0+
+            # installs, HelixSR/helixsr.dll before.
+            if not (_release_dll(g.target).is_file()
+                    or (g.target / helixscan.FOLDER / "helixsr.dll").is_file()):
+                problems.append("HelixSR DLL missing")
             if not (g.target / "OptiScaler.ini").is_file():
                 problems.append("OptiScaler.ini missing next to the game's exe")
             for rel in (sc.get("backup", {}) or {}).values():
@@ -2886,7 +3250,7 @@ class Plugin:
                 for v in _version_dirs():
                     tag = _tag_of_dir(v)
                     try:
-                        dll_version = helixscan.version_of(v / "amd_fidelityfx_dx12.dll")
+                        dll_version = helixscan.version_of(_release_dll(v))
                     except OSError:
                         dll_version = "?"
                     users = still_used.get(dll_version, []) if dll_version != "?" else []
@@ -2915,10 +3279,12 @@ class Plugin:
     async def start_build(self, rebuild: bool = False, fg: bool = False) -> dict:
         """Build the network: a background thread first ensures NVIDIA's DLSS
         DLL (downloaded with the plugin's own TLS, verified by hash), then the
-        reference helixsr-setup.sh runs with --dlss so its Python never needs
-        HTTPS. Game prompts default to no on EOF; use install_games after.
-        For 1.9.0+ frame generation is skipped (--no-fg) unless fg is set: it
-        serves HelixSR Scaler, not the drop-in this plugin installs."""
+        reference setup runs with --dlss so its Python never needs HTTPS.
+        Game prompts default to no on EOF; use install_games after. For
+        1.9.0+ frame generation is skipped (--no-fg) unless fg is set: it
+        serves HelixSR Scaler, not the drop-in this plugin installs.
+        2.0+ releases run setup/helixsr_setup.py directly (their bash wrapper
+        ends in a game-install step that --yes would answer into every game)."""
         thread_alive = bool(self._build_thread and self._build_thread.is_alive())
         if thread_alive:
             return {"ok": False, "error": "build already running"}
@@ -2930,8 +3296,12 @@ class Plugin:
         if fg and not helixref.fg_engine_available(d):
             return {"ok": False, "error": "this HelixSR has no frame generation engine "
                                           "(withdrawn in 1.9.3+; alternative providers live in Scaler)"}
-        if not rebuild and helixscan.network_ready(d):
+        net = _network_built(d)
+        if not rebuild and net and (_fg_built(d) or not fg):
             return {"ok": False, "error": "the network is already built — nothing to do"}
+        # A 2.0+ release's bridge caches its --status verdicts for the life
+        # of the module: drop it so the gates see the build's result.
+        helixref.reset_bridge(d)
         script = d / "helixsr-setup.sh"
         if not script.is_file():
             return {"ok": False, "error": f"helixsr-setup.sh not found in {d}: re-download the version"}
@@ -3046,28 +3416,39 @@ class Plugin:
                     return
                 line(f"[helixsr] nvngx_dlss.dll downloaded and verified ({got >> 20} MB)")
             dlssg = None
+            dlssg2 = None
+            py_tool = dxc = None
             if fg:
+                gen3 = helixref.generation(d) == 3
+                pins = [(DLSSG_FILE, DLSSG_SHA256, DLSSG_SL_URL, "nvngx_dlssg.dll")]
+                if gen3:
+                    pins.append((DLSSG2_FILE, DLSSG2_SHA256, DLSSG2_SL_URL,
+                                 "nvngx_dlssg.dll (310.9.16, light mode)"))
+                for fname, fsha, furl, flabel in pins:
+                    fpath = d / fname
+                    if fpath.is_file() and _sha256_file(fpath) == fsha:
+                        line(f"[helixsr] reusing verified {fname}")
+                    else:
+                        if fpath.is_file():
+                            line(f"[helixsr] existing {fname} failed checksum, re-downloading")
+                            fpath.unlink()
+                        line("[helixsr] HelixSR needs NVIDIA's DLSS Frame Generation DLL to build frame generation.")
+                        line(f"[helixsr] fetching {DLSSG_ENTRY} (~8 MB) from NVIDIA's Streamline SDK ({furl}): {flabel}.")
+                        line("[helixsr] the DLL is NVIDIA's, under NVIDIA's license; used once to build, for this PC only.")
+                        try:
+                            fpath.write_bytes(_fetch_zip_entry(furl, DLSSG_ENTRY, fsha))
+                        except OSError as e:
+                            fpath.unlink(missing_ok=True)
+                            line(f"[helixsr] DLSS-G download failed: {e}")
+                            self._finish_build(log, False, -1, "setup failed: dlssg download failed")
+                            return
+                        line(f"[helixsr] {fname} downloaded and verified")
                 dlssg = d / DLSSG_FILE
-                if dlssg.is_file() and _sha256_file(dlssg) == DLSSG_SHA256:
-                    line("[helixsr] reusing verified nvngx_dlssg.dll")
-                else:
-                    if dlssg.is_file():
-                        line("[helixsr] existing nvngx_dlssg.dll failed checksum, re-downloading")
-                        dlssg.unlink()
-                    line("[helixsr] HelixSR needs NVIDIA's DLSS Frame Generation DLL to build frame generation.")
-                    line(f"[helixsr] fetching {DLSSG_ENTRY} (~8 MB) from NVIDIA's Streamline SDK ({DLSSG_SL_URL}).")
-                    line("[helixsr] the DLL is NVIDIA's, under NVIDIA's license; used once to build, for this PC only.")
-                    try:
-                        dlssg.write_bytes(_fetch_zip_entry(DLSSG_SL_URL, DLSSG_ENTRY, DLSSG_SHA256))
-                    except OSError as e:
-                        dlssg.unlink(missing_ok=True)
-                        line(f"[helixsr] DLSS-G download failed: {e}")
-                        self._finish_build(log, False, -1, "setup failed: dlssg download failed")
-                        return
-                    line("[helixsr] nvngx_dlssg.dll downloaded and verified")
+                if gen3:
+                    dlssg2 = d / DLSSG2_FILE
                 # Intel XeLL pre-seed: the setup skips its own download when the
                 # hash matches, and falls back to its own wait otherwise.
-                fgdir = d / "helixsr-fg"
+                fgdir = d / "HelixSR-fsrfg" / "helixsr-fg" if gen3 else d / "helixsr-fg"
                 if fgdir.is_dir():
                     xell = fgdir / "libxell.dll"
                     if xell.is_file() and _sha256_file(xell) == XESS_SHA256:
@@ -3080,6 +3461,19 @@ class Plugin:
                             line(f"[helixsr] XeLL download failed ({e}): the setup falls back to its own wait")
                 line("[helixsr] NGX core: fetched by the setup itself (needs the zstd program or Python 3.14); "
                      "without it frame generation stays unavailable, upscaling is unaffected")
+            if helixref.generation(d) == 3:
+                # Provision what the release's helixsr-setup.sh would: a
+                # Python with numpy and the DXC shader compiler through Wine
+                # (the network build needs the compiler too, not just FG).
+                # The plugin runs setup/helixsr_setup.py directly — the bash
+                # wrapper's trailing game step would answer every game
+                # with --yes.
+                try:
+                    py_tool, dxc = _ensure_g3_toolchain(d, line, self._build_cancel)
+                except OSError as e:
+                    line(f"[helixsr] build toolchain setup failed: {e}")
+                    self._finish_build(log, False, -1, "setup failed: toolchain setup failed")
+                    return
             if not self._alive:
                 self._build_running = False
                 return
@@ -3087,7 +3481,8 @@ class Plugin:
                 self._finish_build(log, False, -1, "build cancelled before setup started")
                 return
             fut = asyncio.run_coroutine_threadsafe(
-                self._spawn_and_watch(d, log, header, bash, script, dlss, rebuild, dlssg), self.loop)
+                self._spawn_and_watch(d, log, header, bash, script, dlss, rebuild,
+                                      dlssg, dlssg2, py_tool, dxc), self.loop)
             fut.result()
             proc = self._build_proc
             if not self._alive and proc is not None and proc.returncode is None:
@@ -3117,8 +3512,38 @@ class Plugin:
 
     async def _spawn_and_watch(self, d: Path, log: Path, header: str,
                                bash: str, script: str, dlss: Path, rebuild: bool,
-                               dlssg: Path | None = None):
-        args = [bash, script] + self._build_args(d, rebuild, dlss, dlssg)
+                               dlssg: Path | None = None, dlssg2: Path | None = None,
+                               py_tool: str | None = None, dxc: Path | None = None):
+        gen3 = helixref.generation(d) == 3
+        if gen3:
+            if py_tool is None or dxc is None:
+                self._build_log_line(log, "[helixsr] build toolchain missing — cannot run the setup directly")
+                try:
+                    await decky.emit("helixsr_build_done", False, -1)
+                except Exception:  # noqa: BLE001 (e.g. unloading)
+                    pass
+                self._build_running = False
+                return
+            # Run the release's setup module directly (phase 1 provisioned
+            # Python + the DXC shim): the release's bash wrapper ends in a
+            # game-install step that --yes would answer into every game
+            # (2.0+ behavior; 1.9.x aborted on EOF instead).
+            net = _network_built(d)
+            args = [str(py_tool), "-I", str(d / "setup" / "helixsr_setup.py"), str(d),
+                    "--dxc", str(dxc), "--yes"]
+            if rebuild:
+                args.append("--rebuild")
+            elif net:
+                args.append("--fg-only")
+            if dlssg is None:
+                args.append("--no-fg")
+            args += ["--dlss", str(dlss)]
+            if dlssg is not None:
+                args += ["--dlssg", str(dlssg)]
+            if dlssg2 is not None:
+                args += ["--dlssg", str(dlssg2)]
+        else:
+            args = [bash, script] + self._build_args(d, rebuild, dlss, dlssg)
         if "--no-fg" in args:
             self._build_log_line(log, "[helixsr] frame generation skipped (--no-fg): drop-in only")
         try:
@@ -3165,18 +3590,28 @@ class Plugin:
             if log.stat().st_size <= len(header) + 1:
                 self._build_log_line(log, "[helixsr] NOTE: the setup script produced no output at all "
                                           "(it may have failed before its first message)")
-            if rc == 0:
+            ok = rc == 0 or (gen3 and rc == 3)
+            if gen3:
+                # The wrapper deletes its temporary Wine prefix after the run.
+                shutil.rmtree(_g3_data_dir() / "wineprefix", ignore_errors=True)
+                helixref.reset_bridge(d)
+            if ok:
                 dlss.unlink(missing_ok=True)
                 if dlssg is not None:
                     dlssg.unlink(missing_ok=True)
+                if dlssg2 is not None:
+                    dlssg2.unlink(missing_ok=True)
                 self._build_log_line(log, "[helixsr] network built; once-used nvngx_dlss.dll removed")
+                if gen3 and rc == 3:
+                    self._build_log_line(log, "[helixsr] upscaling is built; frame generation failed "
+                                              "(the log above says why) — run Build again to retry it")
             elif self._build_cancel.is_set():
                 self._build_log_line(log, "[helixsr] build cancelled; nvngx_dlss.dll kept for retry")
             else:
                 self._build_log_line(log, "[helixsr] setup failed; nvngx_dlss.dll kept for retry")
             self._build_log_line(log, f"[helixsr] setup exited rc={rc}")
             try:
-                await decky.emit("helixsr_build_done", rc == 0, rc)
+                await decky.emit("helixsr_build_done", ok, rc)
             except Exception:  # noqa: BLE001 (e.g. unloading)
                 pass
         except Exception as e:  # noqa: BLE001
@@ -3202,7 +3637,7 @@ class Plugin:
         d = await self._active_dir()
         return {"running": running, "log": tail,
                 "log_path": str(self._build_log) if self._build_log else "",
-                "network_built": bool(d and helixscan.network_ready(d)),
+                "network_built": bool(d and _network_built(d)),
                 "fg_built": bool(d and _fg_built(d))}
 
     async def cancel_build(self) -> dict:
