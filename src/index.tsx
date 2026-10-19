@@ -603,7 +603,7 @@ function Content() {
     dlPrev.current = null;
     setOutput(`Starting download of ${picked} ...`);
     try {
-      const r = await apiStartDownload(picked, pickedRelease.zip_url);
+      const r = await apiStartDownload(picked, pickedRelease.zip_url, pickedRelease.size);
       if (!r.ok) {
         toaster.toast({ title: "Download not started", body: r.error || "" });
         setOutput(r.error || "download not started");

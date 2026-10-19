@@ -196,6 +196,75 @@ class PluginCase(unittest.TestCase):
         with zipfile.ZipFile(self.tmp / "a.zip") as z:
             self.assertEqual(main._zip_top(z), "Top")
 
+    def test_download_refuses_when_disk_full(self):
+        zp = self._release_zip()
+        p = self._plugin()
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            with mock.patch.object(main, "_free_bytes", return_value=100_000_000):
+                r = await p.start_download("v9.9.9", zp.as_uri(), 137_000_000)
+            self.assertFalse(r["ok"])
+            self.assertIn("free disk", r["error"])
+            self.assertFalse(p._dl["running"])
+            root = Path(os.environ["DECKY_PLUGIN_RUNTIME_DIR"]) / "helixsr"
+            self.assertFalse((root / "HelixSR-9.9.9").exists())
+        asyncio.run(go())
+
+    def test_download_failed_layout_removes_partial_dir(self):
+        # A zip with the right top folder but no HelixSR DLL fails the layout
+        # check: the half-extracted dir must not be left behind.
+        src = self.tmp / "src-bad" / "HelixSR-9.9.9"
+        src.mkdir(parents=True)
+        (src / "helixsr-setup.sh").write_text("#!/bin/sh\n")
+        zp = self.tmp / "bad.zip"
+        with zipfile.ZipFile(zp, "w") as z:
+            for f in sorted(src.iterdir()):
+                z.write(f, f"HelixSR-9.9.9/{f.name}")
+        p = self._plugin()
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            self.assertEqual(await p.start_download("v9.9.9", zp.as_uri()), {"ok": True})
+            st = await self._wait_done(p.get_download_status)
+            self.assertFalse(st["ok"])
+            self.assertIn("no HelixSR DLL", st["error"])
+            root = Path(os.environ["DECKY_PLUGIN_RUNTIME_DIR"]) / "helixsr"
+            self.assertFalse((root / "HelixSR-9.9.9").exists())
+            self.assertFalse((root / ".v9.9.9.zip").exists())
+        asyncio.run(go())
+
+    def test_download_failure_keeps_previous_good_install(self):
+        # A previous good install of the same tag survives a failed re-download
+        # (here: the network drops mid-download, before extraction touches it).
+        d = self._version_dir(tag="9.9.9")
+        marker = d / "keep.me"
+        marker.write_bytes(b"precious")
+        p = self._plugin()
+
+        class Truncated:
+            headers = {"Content-Length": "100"}
+
+            def read(self, n):
+                data, self._done = (b"x" * 10, True) if not getattr(self, "_done", False) else (b"", True)
+                return data
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            with mock.patch.object(main.urllib.request, "urlopen", return_value=Truncated()):
+                self.assertEqual(await p.start_download("v9.9.9", "https://example.invalid/x.zip"),
+                                 {"ok": True})
+                st = await self._wait_done(p.get_download_status)
+            self.assertFalse(st["ok"])
+            self.assertTrue(marker.is_file(), "previous install must survive")
+        asyncio.run(go())
+
     # --- scan ---------------------------------------------------------------
 
     def test_scan_and_cache_reuse(self):

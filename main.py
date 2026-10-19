@@ -206,9 +206,12 @@ def _setup_status(d: Path):
         return hit[1]
     st = None
     try:
+        # Fast by design (the setup only reads a DLL footer and checks for
+        # files); 60s bounds a wedged interpreter instead of stalling the
+        # download thread or piling up concurrent get_state calls on it.
         p = subprocess.run([sys.executable, "-I", str(d / "setup" / "helixsr_setup.py"),
                             str(d), "--status"],
-                           capture_output=True, text=True, timeout=300)
+                           capture_output=True, text=True, timeout=60)
         m = re.search(r"network=([01])\s+fg=([01])", p.stdout or "")
         if m:
             st = (m.group(1) == "1", m.group(2) == "1")
@@ -1612,12 +1615,25 @@ class Plugin:
         decky.logger.info(f"HelixSR active_tag={tag}")
         return await self.get_state()
 
-    async def start_download(self, tag: str, zip_url: str) -> dict:
-        """Download + extract a release in a background thread; poll get_download_status()."""
+    async def start_download(self, tag: str, zip_url: str, size: int = 0) -> dict:
+        """Download + extract a release in a background thread; poll get_download_status().
+        Refuses when the disk cannot hold the zip plus its extraction: on a
+        full Deck the Steam client itself crashes/restarts, which looks like
+        the download killed the UI."""
         if self._dl["running"]:
             return {"ok": False, "error": "a download is already running"}
         if self._build_thread and self._build_thread.is_alive():
             return {"ok": False, "error": "a build is running — download after it finishes"}
+        try:
+            want = max(600_000_000, int(size or 0) * 5 // 2 + 100_000_000)
+        except (TypeError, ValueError):
+            want = 600_000_000
+        if _free_bytes(_helixsr_root()) < want:
+            free = _free_bytes(_helixsr_root())
+            return {"ok": False, "error": (
+                f"not enough free disk for {tag} "
+                f"(need ~{want / 1e9:.1f} GB, have {free / 1e9:.1f} GB): "
+                "free space or remove old versions first")}
         self._dl = _new_dl_state(tag)
         self._dl["running"] = True
         self._dl_stop.clear()
@@ -1634,6 +1650,8 @@ class Plugin:
     def _download_run(self, tag: str, zip_url: str):
         st = self._dl
         tmp: Path | None = None
+        top = ""
+        had_dir = True
         # A small on-disk log of its own: after a Steam UI restart (e.g. an
         # OOM from an unrelated memory hog), this is the record of how far
         # the download got and what memory looked like while it ran.
@@ -1676,7 +1694,10 @@ class Plugin:
                 dl.write(f"[helixsr] extracting — {_mem_line()}\n")
             with zipfile.ZipFile(tmp) as z:
                 top = _zip_top(z)
+                had_dir = (root / top).is_dir()
                 for info in z.infolist():
+                    if self._dl_stop.is_set():
+                        raise OSError("download cancelled")
                     # extractall() is skipped: it would also write absolute
                     # paths and ".." entries outside root (Zip Slip)
                     if info.filename.startswith("/") or ".." in Path(info.filename).parts:
@@ -1700,7 +1721,20 @@ class Plugin:
                 dl.write(f"[helixsr] done ok — {_mem_line()}, network_built={st['network_built']}\n")
         except Exception as e:  # noqa: BLE001
             decky.logger.error(f"download {tag} failed: {e}")
-            st["error"] = str(e)
+            if self._dl_stop.is_set():
+                st["cancelled"] = True
+                st["error"] = "download cancelled"
+            else:
+                st["error"] = str(e)
+            try:
+                # Never leave a half-extracted version dir behind: the next
+                # attempt would pile another copy onto a full disk, and a
+                # partial dir confuses the version list. Only remove what
+                # this run created (a previous good install keeps its files).
+                if top and not had_dir:
+                    shutil.rmtree(root / top, ignore_errors=True)
+            except OSError:
+                pass
             try:
                 with open(dlog, "a") as dl:
                     dl.write(f"[helixsr] failed: {e} — {_mem_line()}\n")
