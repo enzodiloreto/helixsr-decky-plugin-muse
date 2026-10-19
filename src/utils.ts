@@ -19,20 +19,16 @@ export function fmtAge(epochSec: number) {
 }
 
 export const ROUTE_LABELS: Record<string, string> = {
-  direct: "FSR drop-in (select AMD FSR)",
-  optiscaler: "OptiScaler (select DLSS)",
-  dlss: "DLSS loader (experimental!)",
-  unsupported: "No FSR 3.1 — needs HelixSR Scaler",
+  auto: "Recommended way",
   scaler: "HelixSR Scaler (Insert for menu)",
-  blocked: "Anti-cheat — nothing installs (FSR drop-in only if it had FSR 3.1)",
+  fsr: "FSR drop-in (select AMD FSR)",
+  blocked: "Anti-cheat — nothing installs here",
 };
 
 export const ROUTE_SHORT: Record<string, string> = {
-  direct: "FSR drop-in",
-  optiscaler: "OptiScaler",
-  dlss: "DLSS loader",
-  unsupported: "Unsupported",
+  auto: "Recommended",
   scaler: "Scaler",
+  fsr: "FSR drop-in",
   blocked: "Anti-cheat",
 };
 
@@ -47,12 +43,10 @@ export function parseBuildProgress(log: string): { pct: number; label: string } 
 }
 
 export function shortRoute(route: string): string {
-  if (route === "direct") return "drop-in, pick AMD FSR in-game";
-  if (route === "optiscaler") return "OptiScaler, pick DLSS in-game";
-  if (route === "dlss") return "DLSS loader, pick DLSS in-game";
-  if (route === "unsupported") return "not supported by the drop-in";
-  if (route === "scaler") return "scaler: pick DLSS/XeSS/FSR in-game, Insert for menu";
-  if (route === "blocked") return "anti-cheat: nothing installs (drop-in needs FSR 3.1)";
+  if (route === "auto") return "recommended way";
+  if (route === "scaler") return "scaler: pick DLSS in-game, Insert for menu";
+  if (route === "fsr") return "drop-in, pick AMD FSR in-game";
+  if (route === "blocked") return "anti-cheat: nothing installs here";
   return route;
 }
 

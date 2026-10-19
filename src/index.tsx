@@ -15,27 +15,21 @@ import {
 } from "@decky/api"
 import { Fragment, useEffect, useRef, useState } from "react";
 import { MdMemory } from "react-icons/md";
-import { Card, Chip, MButton, PagedText, Stepper } from "./components";
+import { Card, Chip, MButton, PagedText } from "./components";
 import { M3 } from "./theme";
 import {
+  DownloadStatus,
   HelixGame,
   HelixRelease,
   HelixState,
-  DownloadStatus,
-  GameLog,
-  GameSettings,
-  HealthCheck,
-  LogFix,
-  MigrationStatus,
+  InstallItem,
+  LogResult,
   PluginUpdateInfo,
   PluginUpdateStatus,
   ReadinessCheck,
-  ScalerDownloadStatus,
-  ScalerRelease,
-  ScalerSettings,
-  ScalerState,
   ScanCache,
   ScanStatus,
+  SettingsResult,
   VerifyResult,
   apiAddScanFolder,
   apiApplyIniPreset,
@@ -44,10 +38,8 @@ import {
   apiCancelDownload,
   apiCancelPluginUpdate,
   apiCancelScan,
-  apiCancelScalerDownload,
   apiCheckBuildReady,
   apiCheckPluginUpdate,
-  apiClearDlssCache,
   apiDeleteIniPreset,
   apiFactoryReset,
   apiGetBuildStatus,
@@ -56,14 +48,9 @@ import {
   apiGetGameSettings,
   apiGetIniPresets,
   apiGetLastScan,
-  apiGetMigrationStatus,
   apiGetPluginUpdateStatus,
   apiGetReleases,
   apiGetScanStatus,
-  apiGetScalerDownloadStatus,
-  apiGetScalerReleases,
-  apiGetScalerSettings,
-  apiGetScalerState,
   apiGetState,
   apiHealthCheck,
   apiInstallGames,
@@ -71,16 +58,16 @@ import {
   apiRemoveScanFolder,
   apiRemoveVersion,
   apiRepairGames,
+  apiResetGameSettings,
+  apiRollbackGame,
   apiSaveIniPreset,
   apiSetActiveVersion,
   apiSetGameSettings,
-  apiSetScalerSettings,
+  apiSetScalerFg,
   apiStartBuild,
   apiStartDownload,
-  apiStartMigration,
   apiStartPluginUpdate,
   apiStartScan,
-  apiStartScalerDownload,
   apiUninstallGames,
   apiVerifyInstalls,
 } from "./services/api";
@@ -91,131 +78,93 @@ import {
   fmtAge,
   fmtSize,
   parseBuildProgress,
-  ROUTE_LABELS,
-  ROUTE_SHORT,
   shortRoute,
 } from "./utils";
 
-// True while the panel is open; the plugin-scope build listener below only
+// True while the panel is open; the plugin-scope build listener only
 // toasts when it isn't, so completions are announced exactly once.
 let panelOpen = false;
 
-function presetsEqual(a: GameSettings, b: GameSettings): boolean {
-  if (a.Sharpener !== b.Sharpener || a.Sharpness !== b.Sharpness) return false;
-  const wa = a.WaveSize === "auto" ? "default" : a.WaveSize;
-  const wb = b.WaveSize === "auto" ? "default" : b.WaveSize;
-  if (wa !== wb) return false;
-  if ("UseGameSlider" in a && "UseGameSlider" in b) return a.UseGameSlider === b.UseGameSlider;
-  return true;
-}
-
-function formatPresetSummary(v: GameSettings): string {
-  const wave = `wave ${v.WaveSize}`;
-  if (!("UseGameSlider" in v)) return `${v.Sharpener} · ${v.Sharpness} · ${wave}`;
-  const slider = v.UseGameSlider === "true" ? "game-slider" : "manual";
-  return `${v.Sharpener} · ${v.Sharpness} · ${slider} · ${wave}`;
-}
-
-// Built-in preset shown first in the picker unless the user saved their own
-// preset with the same name (case-insensitive), which then takes over.
-const DEFAULT_PRESET_NAME = "Default";
-
-// HelixSR Scaler settings (OptiScaler.ini [HelixSR]): the only place to
-// change them besides the in-game menu (Insert). Sharpening is OptiScaler's.
-// 2.0+'s Scaler 1.1.0 renamed FrameGeneration to a preset (FGPreset: c =
-// NVIDIA's light mode, the file's auto default) and re-spelled QuickFlow.
-const SCALER_SETTING_LABELS: Record<string, string> = {
-  Int8: "Speed boost — faster int8 math (auto decides; off if the picture shimmers)",
-  WaveSize: "Wave size — 64 for RX 7000 / 9000 if the picture is broken",
-  FrameGeneration: "Frame generation — needs an FG build (off if crashes or stutters)",
-  QuickFlow: "FG quality — Best, Fast or Fastest (auto is Best)",
+// Settings keys the bridge edits (its documented schema). Unknown keys a
+// release reports come back under "other" and render read-only.
+const HELIXSR_LABELS: Record<string, string> = {
+  "Sharpening.Sharpener": "Sharpener — off, nvidia or rcas",
+  "Sharpening.Sharpness": "Sharpness — 0.0 to 1.0",
+  "Sharpening.UseGameSlider": "Game slider — let the game's slider drive sharpening",
+  "Compatibility.WaveSize": "Wave size — auto, 64 for RX 7000/9000 if broken",
 };
-const SCALER_SETTING_OPTIONS: Record<string, [string, string][]> = {
-  Int8: [["auto", "Auto"], ["on", "On"], ["off", "Off"]],
-  WaveSize: [["auto", "Auto"], ["64", "64"], ["32", "32"]],
-  FrameGeneration: [["auto", "Auto"], ["on", "On"], ["off", "Off"]],
-  QuickFlow: [["auto", "Auto"], ["off", "Best"], ["on", "Fast"], ["fastest", "Fastest"]],
+const SCALER_LABELS: Record<string, string> = {
+  "HelixSR.WaveSize": "Wave size — 64 for RX 7000/9000 if the picture is broken",
+  "HelixSR.FGPreset": "Frame generation — Light (fast) or Full quality",
+  "HelixSR.QuickFlow": "FG motion estimate — runs with Full only (auto is off)",
 };
-const SCALER_SETTING_LABELS_G3: Record<string, string> = {
-  Int8: "Speed boost — faster int8 math (auto decides; off if the picture shimmers)",
-  WaveSize: "Wave size — 64 for RX 7000 / 9000 if the picture is broken",
-  FGPreset: "Frame generation — Light (NVIDIA's light mode, fast) or Full",
-  QuickFlow: "FG motion estimate — runs with Full only",
+const HELIXSR_OPTIONS: Record<string, [string, string][] | null> = {
+  "Sharpening.Sharpener": [["off", "Off"], ["nvidia", "NVIDIA"], ["rcas", "RCAS"]],
+  "Sharpening.Sharpness": null,
+  "Sharpening.UseGameSlider": [["true", "On"], ["false", "Off"]],
+  "Compatibility.WaveSize": [["auto", "Auto"], ["default", "Default"], ["64", "64"], ["32", "32"]],
 };
-const SCALER_SETTING_OPTIONS_G3: Record<string, [string, string][]> = {
-  Int8: [["auto", "Auto"], ["on", "On"], ["off", "Off"]],
-  WaveSize: [["auto", "Auto"], ["64", "64"], ["32", "32"]],
-  FGPreset: [["auto", "Auto (Light)"], ["c", "Light"], ["full", "Full"]],
-  QuickFlow: [["auto", "Auto"], ["off", "Off"], ["fast", "Fast"], ["fastest", "Fastest"]],
+const SCALER_OPTIONS: Record<string, [string, string][] | null> = {
+  "HelixSR.WaveSize": [["auto", "Auto"], ["64", "64"], ["32", "32"]],
+  "HelixSR.FGPreset": [["auto", "Auto (Light)"], ["c", "Light"], ["full", "Full"]],
+  "HelixSR.QuickFlow": [["auto", "Auto"], ["off", "Off"], ["fast", "Fast"], ["fastest", "Fastest"]],
+};
+
+const WAY_LABELS: Record<string, string> = {
+  auto: "Recommended",
+  scaler: "HelixSR Scaler (pick DLSS in-game)",
+  fsr: "FSR drop-in (pick AMD FSR in-game)",
 };
 
 function Content() {
   const [releases, setReleases] = useState<HelixRelease[]>([]);
+  const [showPrereleases, setShowPrereleases] = useState(false);
+  const [showAllReleases, setShowAllReleases] = useState(false);
   const [state, setState] = useState<HelixState | null>(null);
-  const [picked, setPicked] = useState<string>("");
-  const [games, setGames] = useState<HelixGame[]>([]);
-  const [gamesTag, setGamesTag] = useState<string>("");
-  const [busy, setBusy] = useState<string>("");
-  const [output, setOutput] = useState<string>("");
-  const [building, setBuilding] = useState<boolean>(false);
-  const [fgBuild, setFgBuild] = useState<boolean>(false);
-  const [downloading, setDownloading] = useState<boolean>(false);
+  const [picked, setPicked] = useState("");
+  const [output, setOutput] = useState("");
+  const [busy, setBusy] = useState("");
+  // Download
+  const [downloading, setDownloading] = useState(false);
   const [dl, setDl] = useState<DownloadStatus | null>(null);
-  const [dlRate, setDlRate] = useState<string>("");
+  const [dlRate, setDlRate] = useState("");
   const dlPrev = useRef<{ t: number; bytes: number } | null>(null);
-  const [scalerReleases, setScalerReleases] = useState<ScalerRelease[]>([]);
-  const [scalerState, setScalerState] = useState<ScalerState | null>(null);
-  const [scalerPicked, setScalerPicked] = useState<string>("");
-  const [scalerDownloading, setScalerDownloading] = useState<boolean>(false);
-  const [scDl, setScDl] = useState<ScalerDownloadStatus | null>(null);
-  const [scDlRate, setScDlRate] = useState<string>("");
-  const scPrev = useRef<{ t: number; bytes: number } | null>(null);
-  const [scIniFor, setScIniFor] = useState<number | null>(null);
-  const [scIni, setScIni] = useState<ScalerSettings | null>(null);
-  const [scIniPath, setScIniPath] = useState<string>("");
-  const [scSchema, setScSchema] = useState<string>("legacy");
-  const [scanning, setScanning] = useState<boolean>(false);
-  const [routes, setRoutes] = useState<Record<number, string>>({});
-  const [fgWithScaler, setFgWithScaler] = useState<boolean>(true);
-  const [iniFor, setIniFor] = useState<number | null>(null);
-  const [ini, setIni] = useState<GameSettings | null>(null);
-  const [iniSchema, setIniSchema] = useState<string>("legacy");
-  const [iniPath, setIniPath] = useState<string>("");
-  const [presets, setPresets] = useState<Record<string, GameSettings>>({});
-  const [presetDefaults, setPresetDefaults] = useState<GameSettings | null>(null);
-  const [presetPick, setPresetPick] = useState<string>("");
-  const [presetName, setPresetName] = useState<string>("");
-  const [logFor, setLogFor] = useState<number | null>(null);
-  const [gameLogs, setGameLogs] = useState<GameLog[]>([]);
-  const [logFixes, setLogFixes] = useState<LogFix[]>([]);
+  // Build
+  const [building, setBuilding] = useState(false);
+  const [buildLog, setBuildLog] = useState("");
+  const [fgBuild, setFgBuild] = useState(true);
+  const [readiness, setReadiness] = useState<ReadinessCheck[] | null>(null);
+  // Games
+  const [games, setGames] = useState<HelixGame[]>([]);
+  const [gamesTag, setGamesTag] = useState("");
+  const [scanning, setScanning] = useState(false);
+  const [ways, setWays] = useState<Record<string, string>>({});
+  const [fgFor, setFgFor] = useState<Record<string, boolean>>({});
   const [verify, setVerify] = useState<VerifyResult[] | null>(null);
-  const [filter, setFilter] = useState<string>("");
-  const [showPrereleases, setShowPrereleases] = useState<boolean>(false);
-  const [showAllReleases, setShowAllReleases] = useState<boolean>(false);
-  const [expanded, setExpanded] = useState<Record<number, boolean>>({});
-  const [showMode, setShowMode] = useState<string>("all");
-  const [openGroups, setOpenGroups] = useState<Record<string, boolean | undefined>>({});
-  const [health, setHealth] = useState<HealthCheck[] | null>(null);
-  const [migrating, setMigrating] = useState<boolean>(false);
-  const [mig, setMig] = useState<MigrationStatus | null>(null);
-  const [folderInput, setFolderInput] = useState<string>("");
-  const [puCheck, setPuCheck] = useState<PluginUpdateInfo | null>(null);
-  const [checkingUpdate, setCheckingUpdate] = useState<boolean>(false);
-  const [updating, setUpdating] = useState<boolean>(false);
+  const [folderInput, setFolderInput] = useState("");
+  // Settings + logs
+  const [settingsFor, setSettingsFor] = useState<string | null>(null);
+  const [settings, setSettings] = useState<SettingsResult | null>(null);
+  const [settingsDraft, setSettingsDraft] = useState<Record<string, string>>({});
+  const [presets, setPresets] = useState<Record<string, Record<string, string | null>>>({});
+  const [presetName, setPresetName] = useState("Default");
+  const [logFor, setLogFor] = useState<string | null>(null);
+  const [gameLog, setGameLog] = useState<LogResult | null>(null);
+  // Updates / health
+  const [updateInfo, setUpdateInfo] = useState<PluginUpdateInfo | null>(null);
+  const [updating, setUpdating] = useState(false);
   const [pu, setPu] = useState<PluginUpdateStatus | null>(null);
-  const [puRate, setPuRate] = useState<string>("");
+  const [puRate, setPuRate] = useState("");
   const puPrev = useRef<{ t: number; bytes: number } | null>(null);
-  const [confirm, setConfirm] = useState<string>("");
+  const [confirm, setConfirm] = useState("");
   const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Two-tap confirmation for destructive actions: first tap arms (with an
-  // expiry), second tap runs. Arming another action replaces the first.
-  const armOrRun = async (key: string, prompt: string, fn: () => Promise<void>) => {
-    if (confirm !== key) {
-      setConfirm(key);
-      setOutput(prompt);
+  const armOrRun = async (id: string, label: string, fn: () => Promise<void>) => {
+    if (confirm !== id) {
+      setConfirm(id);
       if (confirmTimer.current) clearTimeout(confirmTimer.current);
       confirmTimer.current = setTimeout(() => setConfirm(""), 15000);
+      setOutput(`${label}: tap again to confirm.`);
       return;
     }
     if (confirmTimer.current) clearTimeout(confirmTimer.current);
@@ -240,11 +189,8 @@ function Content() {
       const relsRes = await apiGetReleases(showPrereleases);
       setReleases(relsRes.releases);
       if (!picked) setPicked(relsRes.releases[0]?.tag || "");
-      if (relsRes.error) {
-        setOutput(`Failed to load HelixSR releases: ${relsRes.error}`);
-      } else if (relsRes.releases.length) {
-        setOutput("");
-      }
+      if (relsRes.error) setOutput(`Failed to load HelixSR releases: ${relsRes.error}`);
+      else if (relsRes.releases.length) setOutput("");
       return relsRes;
     } catch (e) {
       console.error("[helixsr] get_releases failed", e);
@@ -252,42 +198,11 @@ function Content() {
     }
   };
 
-  const refreshScalerState = async () => {
+  const onCheckPluginUpdate = async (force: boolean) => {
     try {
-      const s = await apiGetScalerState();
-      setScalerState(s);
-      return s;
-    } catch (e) {
-      console.error("[helixsr] get_scaler_state failed", e);
-      return null;
-    }
-  };
-
-  const refreshScalerReleases = async () => {
-    try {
-      const r = await apiGetScalerReleases(showPrereleases);
-      setScalerReleases(r.releases);
-      if (!scalerPicked) setScalerPicked(r.releases[0]?.tag || "");
-      if (r.error) setOutput(`Failed to load Scaler releases: ${r.error}`);
-      return r;
-    } catch (e) {
-      console.error("[helixsr] get_scaler_releases failed", e);
-      return null;
-    }
-  };
-
-  const onTogglePrereleases = async (c: boolean) => {
-    setShowPrereleases(c);
-    try {
-      const [relsRes, scalerRes] = await Promise.all([apiGetReleases(c), apiGetScalerReleases(c)]);
-      setReleases(relsRes.releases);
-      setScalerReleases(scalerRes.releases);
-      if (!relsRes.releases.some((r) => r.tag === picked)) setPicked(relsRes.releases[0]?.tag || "");
-      if (!scalerRes.releases.some((r) => r.tag === scalerPicked)) setScalerPicked(scalerRes.releases[0]?.tag || "");
-      if (relsRes.error) setOutput(`Failed to load HelixSR releases: ${relsRes.error}`);
-    } catch (e) {
-      console.error("[helixsr] prerelease toggle failed", e);
-    }
+      const info = await apiCheckPluginUpdate(force);
+      setUpdateInfo(info);
+    } catch { /* best-effort */ }
   };
 
   useEffect(() => {
@@ -304,9 +219,9 @@ function Content() {
           if (cached.games.length) {
             setGames(cached.games);
             setGamesTag(cached.tag || "");
-            const rm: Record<number, string> = {};
-            cached.games.forEach((g) => { rm[g.index] = g.route; });
-            setRoutes(rm);
+            const wm: Record<string, string> = {};
+            cached.games.forEach((g) => { wm[g.folder] = "auto"; });
+            setWays(wm);
             if (!relsRes.error) {
               const tagNote = s.active_tag && cached.tag && cached.tag !== s.active_tag
                 ? ` (scanned with ${cached.tag})` : "";
@@ -315,23 +230,12 @@ function Content() {
           }
         } catch { /* no cached scan yet */ }
         try {
-          // Resume polling for operations still running (e.g. panel was closed).
-          const [dl0, sc0, mg0, pu0, scdl0] = await Promise.all([
-            apiGetDownloadStatus(), apiGetScanStatus(), apiGetMigrationStatus(),
-            apiGetPluginUpdateStatus(), apiGetScalerDownloadStatus()]);
+          const [dl0, sc0, pu0] = await Promise.all([
+            apiGetDownloadStatus(), apiGetScanStatus(), apiGetPluginUpdateStatus()]);
           if (dl0.running) { setDl(dl0); setDownloading(true); }
           if (sc0.running) setScanning(true);
-          if (mg0.running) { setMig(mg0); setMigrating(true); }
           if (pu0.running) { setPu(pu0); setUpdating(true); }
-          if (scdl0.running) { setScDl(scdl0); setScalerDownloading(true); }
         } catch { /* nothing running */ }
-        try {
-          const [scalerRels, scalerSt] = await Promise.all([apiGetScalerReleases(), apiGetScalerState()]);
-          setScalerReleases(scalerRels.releases);
-          setScalerState(scalerSt);
-          setScalerPicked(scalerRels.releases[0]?.tag || "");
-          if (scalerRels.error) console.error("[helixsr] scaler releases:", scalerRels.error);
-        } catch { /* scaler feed is best-effort */ }
         try {
           await onCheckPluginUpdate(false);
         } catch { /* update check is best-effort */ }
@@ -342,9 +246,9 @@ function Content() {
         setBuilding(false);
         try {
           const st = await apiGetBuildStatus();
-          setOutput(st.log || `Build finished rc=${rc}, no log captured (full log: ${st.log_path}).`);
+          setBuildLog(st.log || `Build finished rc=${rc}, no log captured (full log: ${st.log_path}).`);
         } catch {
-          setOutput(`Build finished rc=${rc}, could not read build log.`);
+          setBuildLog(`Build finished rc=${rc}, could not read build log.`);
         }
         toaster.toast({ title: ok ? "HelixSR build done" : "HelixSR build failed", body: `rc=${rc}` });
         refreshState();
@@ -400,43 +304,6 @@ function Content() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [downloading]);
 
-  // Poll scaler download progress while one runs
-  useEffect(() => {
-    if (!scalerDownloading) return;
-    const t = setInterval(async () => {
-      try {
-        const st = await apiGetScalerDownloadStatus();
-        setScDl(st);
-        const now = Date.now();
-        const prev = scPrev.current;
-        scPrev.current = { t: now, bytes: st.downloaded };
-        if (prev && now > prev.t && st.downloaded >= prev.bytes && !st.done) {
-          const speed = ((st.downloaded - prev.bytes) * 1000) / (now - prev.t);
-          if (speed > 0) {
-            const left = st.total > st.downloaded ? (st.total - st.downloaded) / speed : 0;
-            setScDlRate(`${fmtSize(speed)}/s${st.total ? ` — ~${Math.max(1, Math.ceil(left))}s left` : ""}`);
-          }
-        }
-        if (st.done) {
-          setScalerDownloading(false);
-          setScDlRate("");
-          if (st.cancelled) {
-            setOutput("Scaler download cancelled.");
-          } else if (st.ok) {
-            setOutput(`Downloaded Scaler ${st.tag} (${st.dir}).`);
-            toaster.toast({ title: `Downloaded Scaler ${st.tag}`, body: "" });
-          } else {
-            toaster.toast({ title: "Scaler download failed", body: st.error || "" });
-            setOutput(st.error || "scaler download failed");
-          }
-          refreshScalerState();
-        }
-      } catch { /* ignore */ }
-    }, 500);
-    return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scalerDownloading]);
-
   // Poll scan status while a scan runs
   useEffect(() => {
     if (!scanning) return;
@@ -449,15 +316,10 @@ function Content() {
             setGames(st.games);
             setGamesTag(st.tag || "");
             setVerify(null);
-            setIniFor(null);
-            setIni(null);
-            setLogFor(null);
-            setGameLogs([]);
-            setLogFixes([]);
-            const rm: Record<number, string> = {};
-            st.games.forEach((g) => { rm[g.index] = g.route; });
-            setRoutes(rm);
-            setOutput(`Found ${st.games.length} compatible game(s) with ${st.tag}.${st.skipped ? ` ${st.skipped} folder(s) skipped (unreadable).` : ""}`);
+            const wm: Record<string, string> = {};
+            st.games.forEach((g) => { wm[g.folder] = "auto"; });
+            setWays(wm);
+            setOutput(`Found ${st.games.length} compatible game(s) with ${st.tag}.`);
           } else if (st.cancelled) {
             setOutput("Scan cancelled.");
           } else {
@@ -493,13 +355,8 @@ function Content() {
           setPuRate("");
           puPrev.current = null;
           if (st.ok) {
-            if (st.mode === "manual") {
-              setOutput(`Update v${st.version} downloaded to:\n${st.path}\n\nInstall it via Decky > Settings > Developer > Install Plugin from ZIP File, then restart Decky.`);
-              toaster.toast({ title: `Update downloaded`, body: "Install it from Decky settings" });
-            } else {
-              setOutput(`Plugin update to v${st.version} installed — restart Decky to apply it.`);
-              toaster.toast({ title: `Plugin updated to v${st.version}`, body: "Restart Decky to apply" });
-            }
+            setOutput(`Plugin update to v${st.version} installed — restart Decky to apply it.`);
+            toaster.toast({ title: `Plugin updated to v${st.version}`, body: "Restart Decky to apply" });
             refreshState();
             onCheckPluginUpdate(false);
           } else {
@@ -513,35 +370,13 @@ function Content() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [updating]);
 
-  // Poll migration status while a migration runs
-  useEffect(() => {
-    if (!migrating) return;
-    const t = setInterval(async () => {
-      try {
-        const st = await apiGetMigrationStatus();
-        setMig(st);
-        if (st.done) {
-          setMigrating(false);
-          const done = st.results.filter((r) => r.ok).length;
-          const lines = st.results.map((r) => `${r.ok ? "✓" : "✗"} ${r.name}${r.ok ? "" : `: ${r.detail.slice(-300)}`}`);
-          setOutput(`Migration to ${st.tag}: ${done}/${st.results.length} moved.${lines.length ? "\n" + lines.join("\n") : ""}${st.error ? `\n${st.error}` : ""}`);
-          toaster.toast({ title: st.ok ? `Migrated to ${st.tag}` : "Migration finished with errors", body: `${done}/${st.results.length} games` });
-          refreshState();
-          onScan();
-        }
-      } catch { /* ignore */ }
-    }, 1000);
-    return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [migrating]);
-
   // Poll build log while a build runs
   useEffect(() => {
     if (!building) return;
     const t = setInterval(async () => {
       try {
         const st = await apiGetBuildStatus();
-        setOutput(st.log);
+        setBuildLog(st.log);
         if (!st.running) {
           setBuilding(false);
           refreshState();
@@ -553,15 +388,12 @@ function Content() {
   }, [building]);
 
   const downloadedTags = new Set((state?.versions || []).map((v) => v.tag));
-  // Downloaded versions plus the newest few; the rest hide behind an expander
-  // so a long release history doesn't dominate the panel.
   const listedReleases = showAllReleases
     ? releases
     : releases.filter((r, i) => downloadedTags.has(r.tag) || i < 3);
   const activeVersion = state?.versions.find((v) => v.tag === state.active_tag);
   const pickedRelease = releases.find((r) => r.tag === picked);
   const pickedDownloaded = picked ? downloadedTags.has(picked) : false;
-  const scalerPickedRelease = scalerReleases.find((r) => r.tag === scalerPicked);
 
   const onCancelDownload = async () => {
     try {
@@ -584,9 +416,6 @@ function Content() {
         setPicked(picked);
         setGames([]);
         setGamesTag("");
-        // the FG flag can't carry across to a build without the FG engine
-        const nv = (st.versions || []).find((v) => v.tag === st.active_tag);
-        if (nv && nv.fg_available === false) setFgBuild(false);
       } finally {
         setBusy("");
         refreshState();
@@ -619,162 +448,80 @@ function Content() {
     }
   };
 
-  const onCancelScalerDownload = async () => {
-    try {
-      await apiCancelScalerDownload();
-    } catch (e) {
-      console.error("[helixsr] cancel_scaler_download failed", e);
+  const onDownloadOrUsePick = async (tag: string) => {
+    setPicked(tag);
+    if ((state?.versions || []).some((v) => v.tag === tag)) {
+      setBusy("version");
+      try {
+        const st = await apiSetActiveVersion(tag);
+        setState(st);
+        setGames([]);
+        setGamesTag("");
+      } finally {
+        setBusy("");
+        refreshState();
+      }
+      return;
     }
-  };
-
-  const onScalerDownload = async () => {
-    const rel = scalerReleases.find((r) => r.tag === scalerPicked);
+    const rel = releases.find((r) => r.tag === tag);
     if (!rel) {
-      setOutput("No Scaler release selected.");
+      setOutput(`No download found for ${tag}. Tap Reload releases and try again.`);
       return;
     }
-    setScDl(null);
-    setScDlRate("");
-    scPrev.current = null;
+    setDl(null);
+    setDlRate("");
+    dlPrev.current = null;
     try {
-      const r = await apiStartScalerDownload(rel.tag, rel.tar_url);
+      const r = await apiStartDownload(tag, rel.zip_url, rel.size);
       if (!r.ok) {
-        toaster.toast({ title: "Scaler download not started", body: r.error || "" });
-        setOutput(r.error || "scaler download not started");
+        setOutput(r.error || "download not started");
         return;
       }
-      setScalerDownloading(true);
-      setOutput(`Downloading ${rel.tar_name} (${fmtSize(rel.size)}) ...`);
+      setDownloading(true);
+      setOutput(`Downloading ${rel.zip_name} (${fmtSize(rel.size)}) ...`);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      toaster.toast({ title: "Scaler download failed to start", body: msg });
-      setOutput(`Could not start scaler download: ${msg}`);
-      console.error("[helixsr] start_scaler_download failed", e);
+      setOutput(`Could not start download: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
-  const onOpenScIni = async (g: HelixGame) => {
-    setBusy(`scini-${g.index}`);
+  const onRemoveVersion = async (tag: string) => {
+    setBusy("version");
     try {
-      const r = await apiGetScalerSettings(g.index);
-      if (!r.ok || !r.values) {
-        setOutput(r.error || "cannot read scaler settings");
-        return;
+      const r = await apiRemoveVersion(tag);
+      if (!r.ok) setOutput(r.error || "remove failed");
+      else {
+        setOutput(`Removed ${tag} (freed ${r.freed_mb} MB).`);
+        if (picked === tag) setPicked("");
       }
-      setScIni(r.values);
-      setScIniPath(r.path || "");
-      setScSchema(r.schema || "legacy");
-      setScIniFor(g.index);
+      refreshState();
     } finally {
       setBusy("");
     }
   };
 
-  const onSaveScIni = async () => {
-    if (scIniFor === null || !scIni) return;
-    setBusy("scini-save");
-    try {
-      const r = await apiSetScalerSettings(scIniFor, scIni);
-      setOutput(r.output || "");
-      toaster.toast({ title: r.ok ? "Scaler settings saved" : "Save failed", body: r.ok ? "" : (r.output || "").slice(-200) });
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const onCopyLaunchOptions = async (text: string) => {
-    const done = () => toaster.toast({ title: "Launch options copied", body: "Paste in Steam → Properties → Launch Options" });
-    try {
-      await navigator.clipboard.writeText(text);
-      done();
-      return;
-    } catch (e) {
-      console.error("[helixsr] async clipboard failed, trying fallback", e);
-    }
-    // Fallback for CEF without async clipboard permission.
-    try {
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      ta.style.position = "fixed";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
-      ta.select();
-      if (!document.execCommand("copy")) throw new Error("execCommand returned false");
-      document.body.removeChild(ta);
-      done();
-    } catch (e) {
-      console.error("[helixsr] clipboard fallback failed", e);
-      setOutput(`Copy failed — select the text by hand:\n${text}`);
-      toaster.toast({ title: "Copy failed", body: "select the text manually" });
-    }
-  };
-
-  const pickedRoute = (g: HelixGame): string => {
-    const avail = g.available || [];
-    if (avail.length === 1) return avail[0];
-    return routes[g.index] || g.route;
-  };
-
-  const onRemove = async () => {
-    if (!picked || !pickedDownloaded) return;
-    await armOrRun(`remove ${picked}`,
-      `Tap again to confirm removing ${picked} files.`,
-      async () => {
-        setBusy("version");
-        try {
-          await apiRemoveVersion(picked);
-          setOutput(`Removed ${picked}.`);
-          setGames([]);
-          setGamesTag("");
-        } finally {
-          setBusy("");
-          refreshState();
-        }
-      });
-  };
-
-  const runReadiness = async (): Promise<ReadinessCheck[] | null> => {
-    const c = await apiCheckBuildReady(activeVersion?.tag || null, fgBuild);
-    const lines = (c.checks || []).map((x) => `${x.ok ? "✓" : "✗"} ${x.name}: ${x.detail}`);
-    setOutput([(c.error || (!c.ok ? "Not ready to build:" : "Ready to build.")), ...lines].join("\n"));
-    return c.ok ? (c.checks || []) : null;
-  };
-
-  const onCheckBuild = async () => {
+  const onCheckReady = async () => {
     setBusy("ready");
     try {
-      await runReadiness();
+      const tag = activeVersion?.tag || null;
+      const r = await apiCheckBuildReady(tag, fgBuild);
+      if (!r.checks) {
+        setOutput(r.error || "readiness check failed");
+        setReadiness(null);
+        return;
+      }
+      setReadiness(r.checks);
+      const bad = r.checks.filter((c) => !c.ok);
+      setOutput(bad.length
+        ? `Not ready: ${bad.map((c) => `${c.name} — ${c.detail}`).join("; ")}`
+        : `Ready to build${fgBuild ? " with FG" : ""}: ${r.checks.map((c) => c.name).join(", ")}.`);
     } finally {
       setBusy("");
     }
   };
 
-  const onCancelBuild = async () => {
-    try {
-      const r = await apiCancelBuild();
-      if (!r.ok) setOutput(r.error || "build not cancelled");
-    } catch (e) {
-      console.error("[helixsr] cancel_build failed", e);
-    }
-  };
-
-  const onBuild = async (rebuild: boolean) => {
-    if (rebuild) {
-      await armOrRun("rebuild network",
-        "Tap again to confirm: rebuild the network from scratch (takes a while).",
-        () => doBuild(true));
-    } else {
-      await doBuild(false);
-    }
-  };
-
-  const doBuild = async (rebuild: boolean) => {
+  const onStartBuild = async (rebuild: boolean) => {
     setBusy("build");
     try {
-      if (!(await runReadiness())) {
-        toaster.toast({ title: "Build not ready", body: "see Log" });
-        return;
-      }
       const r = await apiStartBuild(rebuild, fgBuild);
       if (!r.ok) {
         toaster.toast({ title: "Build not started", body: r.error || "" });
@@ -782,17 +529,27 @@ function Content() {
         return;
       }
       setBuilding(true);
-      setOutput("Build started (compiling shaders — can take several minutes). Polling log ...");
-      try {
-        const s0 = await apiGetBuildStatus();
-        if (s0.log) setOutput(s0.log);
-      } catch { /* first poll will retry */ }
+      setBuildLog("");
+      setOutput(`Building ${rebuild ? "(rebuild) " : ""}${fgBuild ? "with frame generation" : "upscaling only"} — watch the log below.`);
     } finally {
       setBusy("");
     }
   };
 
+  const onCancelBuild = async () => {
+    try {
+      await apiCancelBuild();
+    } catch (e) {
+      console.error("[helixsr] cancel_build failed", e);
+    }
+  };
+
   const onScan = async () => {
+    if (!activeVersion) {
+      setOutput("Download a HelixSR version first.");
+      return;
+    }
+    setBusy("scan");
     try {
       const r = await apiStartScan();
       if (!r.ok) {
@@ -800,9 +557,9 @@ function Content() {
         return;
       }
       setScanning(true);
-      setOutput("Scanning Steam libraries for DLSS / XeSS / FSR games ...");
-    } catch (e) {
-      console.error("[helixsr] start_scan failed", e);
+      setOutput("Scanning Steam libraries for games ...");
+    } finally {
+      setBusy("");
     }
   };
 
@@ -814,83 +571,93 @@ function Content() {
     }
   };
 
-  // Refresh the games list from the persisted scan (the backend rewrites it
-  // after every install/uninstall): an uninstall doesn't warrant a
-  // minutes-long library re-walk. Falls back to a real scan when there is
-  // no cached list, and mimics what a scan completion resets.
-  const refreshGamesFromCache = async () => {
+  const onAddFolder = async () => {
+    if (!folderInput.trim()) return;
+    setBusy("scan");
     try {
-      const cached = await apiGetLastScan();
-      if (!cached.games.length) return false;
-      setGames(cached.games);
-      setVerify(null);
-      setIniFor(null);
-      setIni(null);
-      setLogFor(null);
-      setGameLogs([]);
-      setLogFixes([]);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-
-  const onOpenIni = async (g: HelixGame) => {
-    setBusy(`ini-${g.index}`);
-    try {
-      const r = await apiGetGameSettings(g.index);
-      if (!r.ok || !r.values) {
-        setOutput(r.error || "cannot read settings");
-        return;
+      const r = await apiAddScanFolder(folderInput.trim());
+      if (!r.ok) setOutput(r.error || "not added");
+      else {
+        setFolderInput("");
+        setOutput(`Added ${r.folders?.length} extra folder(s). Scan to include them.`);
+        refreshState();
       }
-      setIni(r.values);
-      setIniSchema(r.layout === "modern" ? "modern" : "legacy");
-      setIniPath(r.path || "");
-      setIniFor(g.index);
-      setPresetPick("");
-      setPresetName("");
-      await onLoadPresets();
-      if (r.note) setOutput(r.note);
     } finally {
       setBusy("");
     }
   };
 
-  const onSaveIni = async () => {
-    if (iniFor === null || !ini) return;
-    setBusy("ini-save");
-    try {
-      const r = await apiSetGameSettings(iniFor, ini);
-      setOutput(r.output || "");
-      toaster.toast({ title: r.ok ? "Settings saved" : "Save failed", body: r.ok ? "" : (r.output || "").slice(-200) });
-    } finally {
-      setBusy("");
-    }
+  const installItems = (folders: string[], way: string): InstallItem[] =>
+    folders.map((folder) => {
+      const g = games.find((x) => x.folder === folder);
+      const it: InstallItem = { folder, way };
+      if (way === "scaler" || (way === "auto" && g?.recommended === "scaler")) {
+        if (fgFor[folder]) it.fg = true;
+      }
+      if (g && g.anticheat.length) it.anticheat_ok = true;
+      return it;
+    });
+
+  const onInstall = async (folders: string[], way: string) => {
+    if (!folders.length) return;
+    const hasAc = folders.some((f) => (games.find((x) => x.folder === f)?.anticheat.length || 0) > 0);
+    await armOrRun(`install:${folders.join(",")}:${way}`, "Install HelixSR", async () => {
+      if (hasAc && way !== "fsr") {
+        setOutput("Anti-cheat game: confirming installs HelixSR Scaler for offline / single-player use only.");
+      }
+      setBusy("games");
+      try {
+        const r = await apiInstallGames(installItems(folders, way));
+        const lines = (r.results || []).map((x) =>
+          `${x.ok ? "✓" : "✗"} ${base(x.folder)}${x.ok ? (x.installed ? ` (${x.installed})` : "") : `: ${x.detail.slice(-300)}`}`);
+        setOutput(`${r.ok ? "Installed" : "Finished with errors"}:\n${lines.join("\n")}${r.error ? `\n${r.error}` : ""}`);
+        refreshState();
+        onScanQuiet();
+      } finally {
+        setBusy("");
+      }
+    });
   };
 
-  const onHealth = async () => {
-    setBusy("health");
+  const onScanQuiet = async () => {
     try {
-      const r = await apiHealthCheck();
-      if (!r.checks) {
-        setOutput(r.error || "health check failed");
-        return;
+      const r = await apiStartScan();
+      if (r.ok) setScanning(true);
+    } catch { /* the poller reports failures */ }
+  };
+
+  const onUninstall = async (folders: string[]) => {
+    if (!folders.length) return;
+    await armOrRun(`uninstall:${folders.join(",")}`, "Remove HelixSR", async () => {
+      setBusy("games");
+      try {
+        const r = await apiUninstallGames(folders);
+        const lines = (r.results || []).map((x) => `${x.ok ? "✓" : "✗"} ${base(x.folder)}${x.ok ? "" : `: ${x.detail.slice(-300)}`}`);
+        setOutput(`Removed:\n${lines.join("\n")}`);
+        refreshState();
+        onScanQuiet();
+      } finally {
+        setBusy("");
       }
-      setHealth(r.checks);
-      const bad = r.checks.filter((c) => !c.ok);
-      setOutput(bad.length
-        ? `Health: ${bad.length} issue(s):\n${bad.map((c) => `✗ ${c.name}: ${c.detail}`).join("\n")}`
-        : "Health: all checks pass.");
-    } catch (e) {
-      console.error("[helixsr] health_check failed", e);
-      setOutput("health check failed");
+    });
+  };
+
+  const onRepair = async (folders: string[]) => {
+    if (!folders.length) return;
+    setBusy("games");
+    try {
+      const r = await apiRepairGames(folders);
+      const lines = (r.results || []).map((x) => `${x.ok ? "✓" : "✗"} ${base(x.folder)}${x.ok ? "" : `: ${x.detail.slice(-300)}`}`);
+      setOutput(`Repaired:\n${lines.join("\n")}`);
+      refreshState();
+      onScanQuiet();
     } finally {
       setBusy("");
     }
   };
 
   const onVerify = async () => {
-    setBusy("verify");
+    setBusy("games");
     try {
       const r = await apiVerifyInstalls();
       if (!r.ok) {
@@ -898,1631 +665,743 @@ function Content() {
         return;
       }
       setVerify(r.games);
-      const broken = r.games.filter((g) => !g.ok);
-      setOutput(broken.length
-        ? `${broken.length} game(s) need repair:\n${broken.map((g) => `✗ ${g.name}: ${g.problems.join("; ")}`).join("\n")}`
-        : `All ${r.games.length} installed game(s) verified OK.`);
+      const bad = r.games.filter((g) => !g.ok);
+      setOutput(bad.length
+        ? `Broken installs:\n${bad.map((g) => `✗ ${g.name}: ${g.problems.join("; ").slice(-300)}`).join("\n")}`
+        : `${r.games.length} installed game(s), all verified.`);
     } finally {
       setBusy("");
     }
   };
 
-  const onRepair = async (indices: number[]) => {
-    if (!indices.length) return;
-    setBusy("repair");
+  const onToggleFg = async (folder: string, on: boolean) => {
+    setBusy("games");
     try {
-      const r = await apiRepairGames(indices);
-      setOutput(r.output || "");
-      toaster.toast({ title: r.ok ? "Repair done" : "Repair failed", body: r.ok ? "" : (r.output || "").slice(-200) });
-      if (r.ok) onVerify();
+      const r = await apiSetScalerFg(folder, on);
+      if (!r.ok) setOutput(r.error || "FG switch failed");
+      else {
+        setOutput(r.output || `Frame generation ${on ? "on" : "off"}.`);
+        onScanQuiet();
+      }
     } finally {
       setBusy("");
     }
   };
 
-  const onOpenLog = async (g: HelixGame) => {
-    setBusy(`log-${g.index}`);
+  const onRollback = async (folder: string) => {
+    await armOrRun(`rollback:${folder}`, "Roll back", async () => {
+      setBusy("games");
+      try {
+        const r = await apiRollbackGame(folder);
+        if (!r.ok) setOutput(r.error || "rollback failed");
+        else {
+          setOutput(r.output || "Rolled back.");
+          onScanQuiet();
+        }
+      } finally {
+        setBusy("");
+      }
+    });
+  };
+
+  const openSettings = async (folder: string) => {
+    setSettingsFor(folder);
+    setSettings(null);
+    setSettingsDraft({});
     try {
-      const r = await apiGetGameLog(g.index);
-      if (!r.ok) {
-        setOutput(r.error || "cannot read log");
+      const [s, p] = await Promise.all([apiGetGameSettings(folder), apiGetIniPresets()]);
+      setPresets(p.presets || {});
+      if (!s.ok) {
+        setOutput(s.error || "settings unavailable");
         return;
       }
-      setGameLogs(r.logs || []);
-      setLogFixes(r.fixes || []);
-      setLogFor(g.index);
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const onApplyFix = async (fixId: string) => {
-    if (logFor === null) return;
-    setBusy("log-fix");
-    try {
-      const r = await apiApplyLogFix(logFor, fixId);
-      setOutput(r.output || "");
-      toaster.toast({ title: r.ok ? "Fix applied" : "Fix failed", body: r.ok ? "" : (r.output || "").slice(-200) });
-      if (r.ok) onOpenLog({ index: logFor } as HelixGame);
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const onLoadPresets = async () => {
-    try {
-      const r = await apiGetIniPresets();
-      if (r.ok) {
-        setPresets(r.presets || {});
-        if (r.defaults) setPresetDefaults(r.defaults);
-      }
+      setSettings(s);
+      setSettingsDraft(Object.fromEntries(Object.entries(s.values || {}).map(([k, v]) => [k, v ?? ""])));
     } catch (e) {
-      console.error("[helixsr] get_ini_presets failed", e);
+      console.error("[helixsr] settings failed", e);
     }
+  };
+
+  const onSaveSettings = async () => {
+    if (!settingsFor) return;
+    setBusy("settings");
+    try {
+      const r = await apiSetGameSettings(settingsFor, settingsDraft);
+      if (!r.ok) setOutput(r.error || "save failed");
+      else {
+        setOutput("Settings saved — restart the game to apply them.");
+        openSettings(settingsFor);
+      }
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const onResetSettings = async () => {
+    if (!settingsFor) return;
+    await armOrRun(`reset:${settingsFor}`, "Reset settings", async () => {
+      setBusy("settings");
+      try {
+        const r = await apiResetGameSettings(settingsFor);
+        if (!r.ok) setOutput(r.error || "reset failed");
+        else {
+          setOutput(r.output || "Settings back to defaults.");
+          openSettings(settingsFor);
+        }
+      } finally {
+        setBusy("");
+      }
+    });
   };
 
   const onSavePreset = async () => {
-    if (!ini) return;
-    const trimmed = presetName.trim();
-    if (!trimmed) return;
-    setBusy("preset");
+    if (!presetName.trim()) {
+      setOutput("Name the preset first.");
+      return;
+    }
+    setBusy("settings");
     try {
-      const r = await apiSaveIniPreset(trimmed, { ...ini });
-      if (!r.ok) {
-        setOutput(r.error || "cannot save preset");
-        return;
+      const r = await apiSaveIniPreset(presetName.trim(), settingsDraft);
+      if (!r.ok) setOutput(r.error || "preset not saved");
+      else {
+        setPresets(r.presets || {});
+        setOutput(`Preset "${presetName.trim()}" saved${r.overwrote ? " (overwrote)." : "."}`);
       }
-      setPresets(r.presets || {});
-      setPresetPick(trimmed);
-      setPresetName("");
-      setOutput(r.overwrote ? `Preset "${trimmed}" updated.` : `Preset "${trimmed}" saved.`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const onApplyPreset = async () => {
+    if (!settingsFor || !presetName) return;
+    setBusy("settings");
+    try {
+      const r = await apiApplyIniPreset(settingsFor, presetName);
+      if (!r.ok) setOutput(r.error || "preset not applied");
+      else {
+        setOutput(`Preset "${presetName}" applied.`);
+        openSettings(settingsFor);
+      }
     } finally {
       setBusy("");
     }
   };
 
   const onDeletePreset = async () => {
-    if (!presetPick) return;
-    await armOrRun(`delete preset ${presetPick}`,
-      `Tap again to confirm deleting preset "${presetPick}".`,
-      async () => {
-        setBusy("preset");
-        try {
-          const r = await apiDeleteIniPreset(presetPick);
-          if (r.ok) setPresets(r.presets || {});
-          setPresetPick("");
-        } finally {
-          setBusy("");
-        }
-      });
-  };
-
-  const onApplyPreset = async () => {
-    if (iniFor === null || !presetPick) return;
-    const applied = presetPick;
-    setBusy("preset");
+    setBusy("settings");
     try {
-      // Stored presets are translated to the game's schema server-side; the
-      // built-in Default resolves to that game's defaults the same way.
-      const r = await apiApplyIniPreset(iniFor, applied);
-      setOutput(r.output || "");
-      toaster.toast({ title: r.ok ? `Preset "${applied}" applied` : "Apply failed", body: r.ok ? "" : (r.output || "").slice(-200) });
-      if (r.ok) {
-        const g = games.find((x) => x.index === iniFor);
-        if (g) await onOpenIni(g);
-        setPresetPick(applied);
-      }
+      const r = await apiDeleteIniPreset(presetName);
+      setPresets(r.presets || {});
+      setOutput(`Preset "${presetName}" deleted.`);
     } finally {
       setBusy("");
     }
   };
 
-  const onResetAll = async () => {
-    await armOrRun("reset everything",
-      "Tap again to confirm: uninstall everywhere and wipe versions, caches and settings (presets are kept).",
-      async () => {
-        setBusy("reset");
-        try {
-          const r = await apiFactoryReset();
-          if (!r.ok) {
-            setOutput(r.error || "reset failed");
-            return;
-          }
-          const lines = [
-            `Uninstalled: ${(r.games_uninstalled || []).join(", ") || "none"}`,
-            ...((r.games_failed || []).map((x) => `FAILED: ${x}`)),
-            `Versions removed: ${(r.versions_removed || []).join(", ") || "none"}`,
-            ...((r.versions_skipped || []).map((x) => `kept ${x}`)),
-            `Freed ${r.freed_mb} MB.`,
-            r.note || "",
-          ];
-          setOutput(lines.join("\n"));
-          setGames([]);
-          setGamesTag("");
-          setVerify(null);
-          refreshState();
-        } finally {
-          setBusy("");
-        }
-      });
-  };
-
-  const onInstallAll = async () => {
-    const targets = installAllTargets;
-    if (!targets.length) return;
-    setBusy("games-all");
+  const openLog = async (folder: string) => {
+    setLogFor(folder);
+    setGameLog(null);
     try {
-      const r = await apiInstallGames(targets.map((g) => g.index), "");
-      setOutput(r.output);
-      const note = r.output.includes("skipped") || !r.ok ? r.output.slice(-200) : "";
-      toaster.toast({ title: r.ok ? `Installed in ${targets.length} game(s)` : "Install failed", body: note });
-      if (r.ok) {
-        const done = new Set(targets.map((t) => t.index));
-        setGames((gs) => gs.map((x) => (!x.installed && done.has(x.index)
-          ? { ...x, installed: true, status: "HelixSR installed" } : x)));
-        refreshState();
-      }
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const onRemoveAll = async () => {
-    const n = visibleGames.filter((g) => g.installed).length;
-    await armOrRun("remove all games",
-      `Tap again to confirm removing HelixSR from ${n} game(s).`,
-      async () => {
-        const targets = visibleGames.filter((g) => g.installed);
-        if (!targets.length) return;
-        setBusy("games-all");
-        try {
-          const r = await apiUninstallGames(targets.map((g) => g.index));
-          setOutput(r.output);
-          toaster.toast({ title: r.ok ? `Removed from ${targets.length} game(s)` : "Uninstall failed", body: r.ok ? "" : r.output.slice(-200) });
-          if (r.ok && !(await refreshGamesFromCache())) onScan();
-        } finally {
-          setBusy("");
-        }
-      });
-  };
-
-  const onAddFolder = async () => {
-    const path = folderInput.trim();
-    if (!path) return;
-    setBusy("folder");
-    try {
-      const r = await apiAddScanFolder(path);
+      const r = await apiGetGameLog(folder);
       if (!r.ok) {
-        setOutput(r.error || "cannot add folder");
+        setOutput(r.error || "no log yet");
         return;
       }
-      setFolderInput("");
-      refreshState();
-      setOutput(`Scan folder added. Rescan to include it.`);
-    } finally {
-      setBusy("");
+      setGameLog(r);
+    } catch (e) {
+      console.error("[helixsr] log failed", e);
     }
   };
 
-  const onRemoveFolder = async (path: string) => {
-    setBusy("folder");
+  const onApplyFix = async (fixId: string) => {
+    if (!logFor) return;
+    setBusy("log");
     try {
-      await apiRemoveScanFolder(path);
-      refreshState();
-      setOutput(`Removed scan folder. Rescan to update the list.`);
+      const r = await apiApplyLogFix(logFor, fixId);
+      if (!r.ok) setOutput(r.output || "fix not applied");
+      else {
+        setOutput("Fix applied — restart the game.");
+        openLog(logFor);
+      }
     } finally {
       setBusy("");
     }
   };
 
   const onRemoveOld = async () => {
-    await armOrRun("remove old versions",
-      "Tap again to confirm removing all versions except the active one.",
-      async () => {
-        setBusy("storage");
-        try {
-          const r = await apiRemoveOldVersions();
-          const lines = [...r.removed.map((t) => `removed ${t}`), ...r.skipped.map((t) => `kept ${t}`)];
-          setOutput(`Freed ${r.freed_mb} MB.\n${lines.join("\n")}`);
-          refreshState();
-        } finally {
-          setBusy("");
-        }
-      });
-  };
-
-  const onClearDlss = async () => {
-    await armOrRun("clear SDK cache",
-      "Tap again to confirm deleting cached NVIDIA DLLs (re-downloaded on next build).",
-      async () => {
-        setBusy("storage");
-        try {
-          const r = await apiClearDlssCache();
-          setOutput(`Freed ${r.freed_mb} MB.\n${r.cleared.join("\n") || "nothing cached"}`);
-        } finally {
-          setBusy("");
-        }
-      });
-  };
-
-  const onCheckPluginUpdate = async (force: boolean) => {
-    setCheckingUpdate(true);
-    try {
-      setPuCheck(await apiCheckPluginUpdate(force));
-    } catch (e) {
-      console.error("[helixsr] check_plugin_update failed", e);
-      setPuCheck({ ok: false, error: "update check failed" });
-    } finally {
-      setCheckingUpdate(false);
-    }
-  };
-
-  // Decky's privileged installer bridge (same JS realm Decky itself runs in).
-  // Null when unreachable: callers fall back to the backend flows.
-  const getDeckyBridge = (): { call: (route: string, ...args: any[]) => Promise<any> } | null => {
-    const b = (window as any).DeckyBackend;
-    return b && typeof b.call === "function" ? b : null;
-  };
-
-  const onReloadPlugin = async () => {
-    const bridge = getDeckyBridge();
-    if (!bridge) {
-      setOutput("Decky bridge unavailable — reinstall the plugin zip and restart Decky.");
-      return;
-    }
-    if (downloading || scanning || migrating || building || updating) {
-      setOutput("Finish the running task first, then reload.");
-      toaster.toast({ title: "Reload blocked", body: "another task is running" });
-      return;
-    }
-    setBusy("reload");
-    try {
-      let triggered = false;
-      for (const name of ["HelixSR Muse Plugin", "HelixSR-Decky-Plugin-Muse"]) {
-        try {
-          // Stops our backend and re-imports it (plus fresh frontend bundle):
-          // heals UI-newer mismatches immediately, no reinstall or restart.
-          await bridge.call("utilities/enable_plugin", name);
-          triggered = true;
-          break;
-        } catch { /* unknown name on this Decky: try the other */ }
-      }
-      if (!triggered) {
-        setOutput("Decky refused the reload — reinstall the plugin zip and restart Decky.");
-        return;
-      }
-    } finally {
-      setBusy("");
-    }
-    const deadline = Date.now() + 60000;
-    while (Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 2000));
-      let s = null;
+    await armOrRun("storage:old", "Remove old versions", async () => {
+      setBusy("storage");
       try {
-        s = await Promise.race([
-          apiGetState(),
-          new Promise<null>((r) => setTimeout(() => r(null), 8000)),
-        ]);
-      } catch { /* backend mid-replacement: keep waiting */ }
-      if (s && s.plugin_version === PLUGIN_VERSION) {
-        setOutput("Plugin reloaded — UI and backend match again.");
-        toaster.toast({ title: "Plugin reloaded", body: "versions match" });
+        const r = await apiRemoveOldVersions();
+        if (!r.ok) setOutput("remove failed");
+        else {
+          setOutput(r.removed.length ? `Removed ${r.removed.join(", ")} (freed ${r.freed_mb} MB).` : "Nothing to remove — only the active version is kept.");
+          if (picked && r.removed.includes(picked)) setPicked("");
+        }
         refreshState();
-        return;
+      } finally {
+        setBusy("");
       }
-    }
-    setOutput("Reloaded, but versions still differ — reopen this panel; if it persists, reinstall the zip and restart Decky.");
+    });
+  };
+
+  const onFactoryReset = async () => {
+    await armOrRun("storage:factory", "Factory reset", async () => {
+      setBusy("storage");
+      try {
+        const r = await apiFactoryReset();
+        if (!r.ok) {
+          setOutput(r.error || "factory reset failed");
+          return;
+        }
+        const lines = [
+          ...(r.games_uninstalled || []).map((n) => `✓ ${n} uninstalled`),
+          ...(r.games_failed || []).map((n) => `✗ ${n}`),
+          `versions removed: ${(r.versions_removed || []).join(", ") || "none"}`,
+        ];
+        setOutput(`Factory reset done:\n${lines.join("\n")}`);
+        setGames([]);
+        setGamesTag("");
+        setPicked("");
+        refreshState();
+      } finally {
+        setBusy("");
+      }
+    });
   };
 
   const onStartPluginUpdate = async () => {
-    const bridge = getDeckyBridge();
-    if (bridge && puCheck?.latest && puCheck?.url) {
-      try {
-        await updateViaDecky(bridge, puCheck.latest, puCheck.url);
-        return;
-      } catch (e) {
-        console.error("[helixsr] decky install unavailable, falling back", e);
-      }
-    }
+    setBusy("update");
     try {
       const r = await apiStartPluginUpdate();
       if (!r.ok) {
         setOutput(r.error || "update not started");
-        toaster.toast({ title: "Update not started", body: r.error || "" });
         return;
       }
       setUpdating(true);
-      setPu(null);
-      setPuRate("");
-      puPrev.current = null;
-      setOutput(`Downloading plugin update v${r.version} ...`);
+      setOutput(`Updating plugin to v${r.version} ...`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const onCancelPluginUpdate = async () => {
+    try {
+      await apiCancelPluginUpdate();
     } catch (e) {
-      console.error("[helixsr] start_plugin_update failed", e);
+      console.error("[helixsr] cancel_plugin_update failed", e);
     }
   };
 
-  // Update through Decky's own machinery: native consent modal, privileged
-  // install (works for root-owned installs too), hot-reload afterwards.
-  // Throws only before Decky's popup appears (caller falls back); once the
-  // install is triggered this owns the flow to success or timeout.
-  const updateViaDecky = async (
-    bridge: { call: (route: string, ...args: any[]) => Promise<any> },
-    tag: string,
-    url: string,
-  ) => {
-    if (downloading || scanning || migrating || building) {
-      setOutput("Finish the running download, scan, build or migration first.");
-      toaster.toast({ title: "Update not started", body: "another task is running" });
-      return;
-    }
-    // A legacy entry would install side-by-side instead of replacing: refuse
-    // (no silent auto-uninstall) and point at the old entry.
-    const plugins = await bridge.call("loader/get_plugins");
-    const names = (Array.isArray(plugins) ? plugins : []).map((p) => p && p.name).filter(Boolean);
-    if (names.includes("HelixSR-Decky-Plugin-Muse")) {
-      setOutput("Old 'HelixSR-Decky-Plugin-Muse' entry still installed: uninstall it first (Decky menu), then update.");
-      toaster.toast({ title: "Update blocked", body: "uninstall the old entry first" });
-      return;
-    }
-    // install_type 2 = UPDATE. Shows Decky's install popup for confirmation.
-    await bridge.call("utilities/install_plugin", url, "HelixSR Muse Plugin", tag, "", 2);
-    setUpdating(true);
-    setPu(null);
-    setPuRate("");
-    puPrev.current = null;
-    setOutput(`Confirm Decky's install popup for ${tag} ...`);
-    const deadline = Date.now() + 10 * 60 * 1000;
-    while (Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 3000));
-      let s = null;
-      try {
-        s = await Promise.race([
-          apiGetState(),
-          new Promise<null>((r) => setTimeout(() => r(null), 8000)),
-        ]);
-      } catch { /* backend mid-replacement: keep waiting */ }
-      if (s && cmpTags(s.plugin_version, tag) === 0) {
-        setUpdating(false);
-        setOutput(`Updated to ${tag} — reopen this panel for the new UI.`);
-        toaster.toast({ title: `Plugin updated to ${tag}`, body: "Reopen this panel" });
-        try {
-          await refreshState();
-        } catch { /* ignore */ }
-        onCheckPluginUpdate(false);
-        return;
-      }
-    }
-    setUpdating(false);
-    setOutput("Still on the old version — confirm Decky's popup, or retry the update.");
-    toaster.toast({ title: "Update not detected", body: "confirm the popup or retry" });
-  };
-
-  const onMigrate = async () => {
-    if (!activeVersion) return;
-    await armOrRun(`migrate to ${activeVersion.tag}`,
-      `Tap again to confirm migrating ${migCandidates.length} game(s) to ${activeVersion.tag}.`,
-      async () => {
-        try {
-          const r = await apiStartMigration(activeVersion.tag);
-          if (!r.ok) {
-            setOutput(r.error || "migration not started");
-            return;
-          }
-          setMigrating(true);
-          setMig(null);
-          setOutput(`Migrating games to ${activeVersion.tag} ...`);
-        } catch (e) {
-          console.error("[helixsr] start_migration failed", e);
-        }
-      });
-  };
-
-  const onInstall = async (g: HelixGame) => {
-    const route = pickedRoute(g);
-    if (route === "scaler") {
-      const fgNote = activeVersion?.generation === 3
-        ? (fgWithScaler && activeVersion?.fg_built
-          ? " Frame generation goes in with it."
-          : (activeVersion?.fg_built ? "" : " (No FG built: upscaling only.)"))
-        : "";
-      await armOrRun(`install scaler ${g.index}`,
-        `Tap again to confirm installing HelixSR Scaler in "${g.name}". Not for online games or games with anti-cheat (ban risk).${fgNote} Steam launch options only if the game's row below says so.`,
-        async () => {
-          setBusy(`game-${g.index}`);
-          try {
-            const fg = activeVersion?.generation === 3 ? fgWithScaler : undefined;
-            const r = await apiInstallGames([g.index], route, fg);
-            setOutput(r.output);
-            toaster.toast({ title: r.ok ? `Scaler installed in ${g.name}` : "Install failed", body: r.ok ? (fg ? "" : "Scaler installed (frame generation off)") : r.output.slice(-200) });
-            if (r.ok && !(await refreshGamesFromCache())) onScan();
-          } finally {
-            setBusy("");
-          }
-        });
-      return;
-    }
-    setBusy(`game-${g.index}`);
+  const onHealth = async () => {
+    setBusy("health");
     try {
-      const r = await apiInstallGames([g.index], route);
-      setOutput(r.output);
-      toaster.toast({ title: r.ok ? `Installed in ${g.name}` : "Install failed", body: r.ok ? "" : r.output.slice(-200) });
-      if (r.ok) setGames((gs) => gs.map((x) => (x.index === g.index ? { ...x, installed: true, status: "HelixSR installed" } : x)));
+      const r = await apiHealthCheck();
+      const lines = (r.checks || []).map((c) => `${c.ok ? "✓" : "✗"} ${c.name} — ${c.detail}`);
+      setOutput(`${r.ok ? "All healthy" : "Issues found"}:\n${lines.join("\n")}`);
     } finally {
       setBusy("");
     }
   };
 
-  const onUninstall = async (g: HelixGame) => {
-    setBusy(`game-${g.index}`);
-    try {
-      const r = await apiUninstallGames([g.index]);
-      setOutput(r.output);
-      toaster.toast({ title: r.ok ? `Removed from ${g.name}` : "Uninstall failed", body: r.ok ? "" : r.output.slice(-200) });
-      if (r.ok && !(await refreshGamesFromCache())) onScan();
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const hasVersions = (state?.versions.length || 0) > 0;
-  const brokenSet = verify ? new Set(verify.filter((v) => !v.ok).map((v) => v.index)) : new Set<number>();
-  const statusGames = showMode === "installed" ? games.filter((g) => g.installed)
-    : showMode === "available" ? games.filter((g) => !g.installed)
-    : showMode === "repair" ? games.filter((g) => brokenSet.has(g.index))
-    : games;
-  const visibleGames = filter.trim()
-    ? statusGames.filter((g) => g.name.toLowerCase().includes(filter.trim().toLowerCase()))
-    : statusGames;
-  const sortedGames = [...visibleGames].sort((a, b) =>
-    Number(b.installed) - Number(a.installed) || a.index - b.index);
-  const installedGroup = visibleGames.filter((g) => g.installed);
-  const availGroup = visibleGames.filter((g) => !g.installed);
-  // undefined = auto: the sole non-empty group starts expanded (a first scan
-  // shouldn't present two collapsed headers); an explicit tap wins over the
-  // default from then on.
-  const openInstalled = openGroups.installed ?? (installedGroup.length > 0 && availGroup.length === 0);
-  const openNot = openGroups.not ?? (availGroup.length > 0 && installedGroup.length === 0);
-  const installedCount = games.filter((g) => g.installed).length;
-  const visInstalled = visibleGames.filter((g) => g.installed).length;
-  const downloadedVersions = (state?.versions || []).filter((v) => downloadedTags.has(v.tag));
-  const totalMB = downloadedVersions.reduce((a, v) => a + (v.size_mb || 0), 0);
-  const activeLayout = state?.versions.find((v) => v.tag === state?.active_tag)?.layout || "legacy";
-  // "Install all" can only cover games the active HelixSR can actually install
-  // into: on 1.9.0+ (modern layout) that is games with FSR 3.1 files (the
-  // drop-in's requirement); the backend skips the rest with a note.
-  const installAllTargets = visibleGames.filter((g) => !g.installed
-    && (activeLayout !== "modern" || (g.fsr || []).length > 0));
-  const buildProg = building ? parseBuildProgress(output) : null;
-  // Live operation reflected in the hero so deep-scrolled users see state.
   const heroOp = downloading
-    ? {
-        text: `Downloading ${dl?.tag || ""} — ${dl && dl.total > 0 ? `${Math.floor((100 * dl.downloaded) / dl.total)}%${dlRate ? ` · ${dlRate}` : ""}` : "starting…"}`,
-        pct: dl && dl.total > 0 ? Math.min(100, (100 * dl.downloaded) / dl.total) : null,
-      }
+    ? { label: "Downloading", pct: dl && dl.total > 0 ? Math.min(100, (100 * dl.downloaded) / dl.total) : -1 }
     : building
-    ? {
-        text: buildProg ? `Building — ${buildProg.pct}% · ${buildProg.label}` : "Building network…",
-        pct: buildProg?.pct ?? null,
-      }
-    : scanning
-    ? { text: "Scanning games…", pct: null }
-    : migrating
-    ? {
-        text: mig && mig.total > 0 ? `Migrating ${mig.current}/${mig.total}${mig.current_name ? ` · ${mig.current_name}` : ""}…` : "Starting migration…",
-        pct: mig && mig.total > 0 ? Math.min(100, (100 * mig.current) / mig.total) : null,
-      }
-    : updating
-    ? {
-        text: `Updating plugin${pu && pu.total > 0 ? ` — ${Math.floor((100 * pu.downloaded) / pu.total)}%` : "…"}`,
-        pct: pu && pu.total > 0 ? Math.min(100, (100 * pu.downloaded) / pu.total) : null,
-      }
-    : null;
-  const newestRelease = releases.length ? releases[0] : null;
-  const updateAvailable = newestRelease && ![...downloadedTags].some((t) => cmpTags(t, newestRelease.tag) >= 0);
-  const step = !state || !state.versions.length ? 1 : !activeVersion?.network_built ? 2 : !games.length ? 3 : 4;
-  const STEP_TEXT = ["", "Download a HelixSR release", "Build the network", "Scan your games", "Install into games"];
-  const migCandidates = activeVersion && activeVersion.dll_version && activeVersion.dll_version !== "?"
-    ? games.filter((g) => g.installed && !(g.installed_versions || []).includes(activeVersion.dll_version))
-    : [];
-  const presetNames = Object.keys(presets).sort((a, b) => a.localeCompare(b));
-  const showBuiltinDefault = presetDefaults !== null
-    && !presetNames.some((n) => n.toLowerCase() === DEFAULT_PRESET_NAME.toLowerCase());
-  const allPresetNames = showBuiltinDefault ? [DEFAULT_PRESET_NAME, ...presetNames] : presetNames;
-  const presetValues = (n: string): GameSettings | undefined => {
-    if (n === DEFAULT_PRESET_NAME && showBuiltinDefault && presetDefaults !== null) return presetDefaults;
-    return presets[n];
-  };
-  const pickedPresetValues = presetPick ? presetValues(presetPick) : undefined;
-  const presetMatch = ini ? allPresetNames.find((n) => {
-    const v = presetValues(n);
-    return v !== undefined && presetsEqual(v, ini);
-  }) : undefined;
-  const trimmedPresetName = presetName.trim();
-  const overwriteTarget = trimmedPresetName
-    ? (presetNames.find((n) => n.toLowerCase() === trimmedPresetName.toLowerCase())
-      ?? (showBuiltinDefault && trimmedPresetName.toLowerCase() === DEFAULT_PRESET_NAME.toLowerCase()
-        ? DEFAULT_PRESET_NAME : undefined))
-    : undefined;
+      ? (() => { const p = parseBuildProgress(buildLog); return { label: "Building", pct: p ? p.pct : -1 }; })()
+      : null;
 
-  return (
-    <div>
-      <Card
-        variant="elevated"
-        tone={hasVersions ? "primary" : "neutral"}
-        radius={M3.shape.xl}
-        style={{ marginBottom: M3.space.md }}
-      >
-        <div style={{ ...M3.type.headline, marginBottom: M3.space.sm }}>
-          {hasVersions ? `Active ${state?.active_tag || "none"}` : "Welcome to HelixSR"}
-        </div>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: M3.space.md }}>
-          {activeVersion ? (
-            activeVersion.network_built
-              ? <Chip tone="success">Network built</Chip>
-              : <Chip tone="warning">Network NOT built</Chip>
-          ) : (
-            <Chip tone="neutral">No active version</Chip>
-          )}
-          {games.length > 0 ? (
-            <Chip tone="secondary">{installedCount}/{games.length} games{gamesTag ? ` · ${gamesTag}` : ""}</Chip>
-          ) : (
-            <Chip tone="neutral">Not scanned</Chip>
-          )}
-          {totalMB > 0 && <Chip tone="neutral">{totalMB.toFixed(1)} MB</Chip>}
-        </div>
-        <Stepper step={step} />
-        <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.sm }}>
-          Step {step}/4 — {STEP_TEXT[step]}
-        </div>
-        {step === 2 && activeVersion && !building && (
-          <div style={{ marginTop: M3.space.sm }}>
-            <MButton
-              disabled={busy !== "" || downloading || scanning || migrating || updating}
-              description="Compiles the shaders HelixSR needs — takes several minutes"
-              variant="filled"
-              onClick={() => doBuild(false)}
-            >
-              Build network now
-            </MButton>
-          </div>
-        )}
-        {step === 3 && games.length === 0 && !scanning && (
-          <div style={{ marginTop: M3.space.sm }}>
-            <MButton
-              disabled={busy !== "" || downloading || building || migrating || updating}
-              description="Finds DLSS / XeSS / FSR titles in your Steam libraries"
-              variant="filled"
-              onClick={onScan}
-            >
-              Scan games now
-            </MButton>
-          </div>
-        )}
-        {heroOp && (
-          <div style={{ marginTop: M3.space.sm }}>
-            {heroOp.pct === null
-              ? <ProgressBar indeterminate nTransitionSec={M3.motion.bar} />
-              : <ProgressBar nProgress={heroOp.pct} nTransitionSec={M3.motion.bar} />}
-            <div style={{ ...M3.type.caption, marginTop: M3.space.xs, fontVariantNumeric: M3.tabular }}>{heroOp.text}</div>
-          </div>
-        )}
-      </Card>
-      {state && state.update_pending ? (
-        <Card tone="primary" radius={M3.shape.md} style={{ marginBottom: M3.space.md }}>
-          <div style={{ ...M3.type.title, marginBottom: 2 }}>Restart needed</div>
-          <div style={M3.type.body}>v{state.update_pending} downloaded — restart Decky to apply it.</div>
-        </Card>
-      ) : state && state.plugin_version !== PLUGIN_VERSION ? (
-        <Card tone="error" radius={M3.shape.md} style={{ marginBottom: M3.space.md }}>
-          <div style={{ ...M3.type.title, marginBottom: 2 }}>Partial update</div>
-          <div style={{ ...M3.type.body, marginBottom: M3.space.sm }}>
-            UI v{PLUGIN_VERSION} but backend v{state.plugin_version || "unknown"}.
-          </div>
-          <MButton variant="tonal" disabled={busy !== ""} onClick={onReloadPlugin}>
-            Reload plugin
-          </MButton>
-          <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.xs }}>
-            If it still shows after reload, reopen this panel — then reinstall the zip and restart Decky.
-          </div>
-        </Card>
-      ) : null}
-      {output && (
-        <PanelSection title="Log">
-          <PanelSectionRow>
-            <Card tone="neutral" radius={M3.shape.md} style={{ background: M3.color.surfaceContainerLow, width: "100%" }}>
-              <PagedText text={output.slice(-4000)} pageSize={40} maxHeight={240} />
-            </Card>
-          </PanelSectionRow>
-          <PanelSectionRow>
-            <MButton variant="text" onClick={() => setOutput("")}>
-              Clear log
-            </MButton>
-          </PanelSectionRow>
-        </PanelSection>
-      )}
-      <PanelSection title="1 · Version">
-        <>
-        {updateAvailable && newestRelease && (
-          <PanelSectionRow>
-            <Card tone="tertiary" radius={M3.shape.md}>
-              <div style={M3.type.label}>Update available: {newestRelease.tag} — select it below to download.</div>
-            </Card>
-          </PanelSectionRow>
-        )}
-        <PanelSectionRow>
-          <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
-            {activeVersion ? `Active: ${activeVersion.tag} (network ${activeVersion.network_built ? "built" : "NOT built"}${activeVersion.layout === "modern" ? `, FG ${activeVersion.fg_built ? "built" : "not built"}` : ""})` : "No version downloaded yet"}
-          </div>
-        </PanelSectionRow>
-        {listedReleases.map((r) => {
-          const dl = (state?.versions || []).find((v) => v.tag === r.tag);
+  const renderSettingsEditor = () => {
+    if (!settingsFor || !settings) return null;
+    const isScaler = settings.schema === "scaler";
+    const labels = isScaler ? SCALER_LABELS : HELIXSR_LABELS;
+    const options = isScaler ? SCALER_OPTIONS : HELIXSR_OPTIONS;
+    const keys = Object.keys(labels);
+    return (
+      <Card>
+        <div style={{ fontWeight: 600 }}>Settings — {base(settingsFor)}</div>
+        <div style={{ ...M3.type.caption, opacity: 0.8, overflowWrap: "anywhere" }}>{settings.path}</div>
+        {keys.map((key) => {
+          const opts = options[key];
+          const cur = settingsDraft[key] ?? "";
+          if (opts) {
+            const idx = Math.max(0, opts.findIndex((o) => o[0] === cur));
+            const next = () => {
+              const n = opts[(idx + 1) % opts.length][0];
+              setSettingsDraft({ ...settingsDraft, [key]: n });
+            };
+            return (
+              <PanelSectionRow key={key}>
+                <MButton variant="tonal" onClick={next} description={labels[key]}>
+                  {key.split(".")[1]}: {opts[idx][1]}
+                </MButton>
+              </PanelSectionRow>
+            );
+          }
+          if (key.endsWith("Sharpness")) {
+            return (
+              <PanelSectionRow key={key}>
+                <SliderField
+                  label="Sharpness"
+                  description={labels[key]}
+                  value={parseFloat(cur) || 0}
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  showValue
+                  onChange={(v: number) => setSettingsDraft({ ...settingsDraft, [key]: String(Math.round(v * 100) / 100) })}
+                />
+              </PanelSectionRow>
+            );
+          }
           return (
-            <PanelSectionRow key={r.tag}>
-              <MButton
-                variant={picked === r.tag ? "filled" : "outlined"}
-                description={dl ? `${dl.size_mb} MB on disk` : `${r.published_at} · ${fmtSize(r.size)} download`}
-                onClick={() => setPicked(r.tag)}
-              >
-                {`${r.tag}${dl ? " ✓" : ""}`}
-              </MButton>
+            <PanelSectionRow key={key}>
+              <TextField
+                label={key.split(".")[1]}
+                description={labels[key]}
+                value={cur}
+                onChange={(e) => setSettingsDraft({ ...settingsDraft, [key]: (e.target as HTMLInputElement).value })}
+              />
             </PanelSectionRow>
           );
         })}
-        {releases.length > listedReleases.length && (
+        {settings.other && Object.keys(settings.other).length > 0 && (
           <PanelSectionRow>
-            <MButton variant="text" onClick={() => setShowAllReleases(true)}>
-              {`Show all ${releases.length} releases`}
-            </MButton>
-          </PanelSectionRow>
-        )}
-        {showAllReleases && releases.length > 3 && (
-          <PanelSectionRow>
-            <MButton variant="text" onClick={() => setShowAllReleases(false)}>
-              Show fewer
-            </MButton>
-          </PanelSectionRow>
-        )}
-        {pickedRelease && !pickedDownloaded && pickedRelease.body && (
-          <PanelSectionRow>
-            <Card tone="neutral" radius={M3.shape.md}>
-              <PagedText text={pickedRelease.body.slice(0, 800)} pageSize={12} maxHeight={160} />
-            </Card>
+            <div style={M3.type.caption}>
+              Other keys in the file: {Object.entries(settings.other).map(([k, v]) => `${k}=${v}`).join(", ")}
+            </div>
           </PanelSectionRow>
         )}
         <PanelSectionRow>
-          <MButton  disabled={busy !== "" || !releases.length} variant="tonal" onClick={() => refreshReleases()}>
-            Reload releases
-          </MButton>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
+            <MButton variant="filled" disabled={busy !== ""} onClick={onSaveSettings}>Save</MButton>
+            <MButton variant="tonal" disabled={busy !== ""} onClick={() => openSettings(settingsFor)}>Reload</MButton>
+            <MButton variant="outlined" disabled={busy !== ""}
+              onClick={onResetSettings}>
+              {confirm === `reset:${settingsFor}` ? "Tap again to confirm reset" : "Defaults"}
+            </MButton>
+            <MButton variant="text" onClick={() => { setSettingsFor(null); setSettings(null); }}>Close</MButton>
+          </div>
         </PanelSectionRow>
         <PanelSectionRow>
-          <ToggleField
-            label="Include prereleases"
-            description="Show prerelease builds (may be unstable)"
-            checked={showPrereleases}
-            onChange={(c: boolean) => onTogglePrereleases(c)}
+          <TextField
+            label="Preset name"
+            value={presetName}
+            onChange={(e) => setPresetName((e.target as HTMLInputElement).value.slice(0, 40))}
           />
         </PanelSectionRow>
         <PanelSectionRow>
-          <MButton
-            
-            disabled={busy !== "" || downloading || !picked}
-            description={!releases.length ? "No releases loaded — Reload above" : undefined}
-            variant="filled" onClick={onDownloadOrUse}
-          >
-            {pickedDownloaded ? `Switch to ${picked}` : downloading ? "Downloading ..." : `Download ${picked}`}
-          </MButton>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
+            <MButton variant="tonal" disabled={busy !== ""} onClick={onSavePreset}>Save preset</MButton>
+            <MButton variant="tonal" disabled={busy !== "" || !presetName} onClick={onApplyPreset}>
+              Apply {presetName || "preset"}
+            </MButton>
+            <MButton variant="outlined" disabled={busy !== "" || !presetName} onClick={onDeletePreset}>
+              Delete {presetName || "preset"}
+            </MButton>
+          </div>
         </PanelSectionRow>
-        {downloading && (
+        {Object.keys(presets).length > 0 && (
           <PanelSectionRow>
-            <div style={{ width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
-              <ProgressBar nProgress={dl && dl.total > 0 ? Math.min(100, (100 * dl.downloaded) / dl.total) : 0} nTransitionSec={M3.motion.bar} />
-              <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.xs, fontVariantNumeric: M3.tabular }}>
-                {dl && dl.total > 0
-                  ? `${fmtSize(dl.downloaded)} / ${fmtSize(dl.total)} (${Math.floor((100 * dl.downloaded) / dl.total)}%)${dlRate ? ` — ${dlRate}` : ""}`
-                  : dl ? `${fmtSize(dl.downloaded)} downloaded ...${dlRate ? ` — ${dlRate}` : ""}` : "Starting download ..."}
-              </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
+              {(["Default", ...Object.keys(presets)]).map((n) => (
+                <MButton key={n} variant={presetName === n ? "filled" : "text"} onClick={() => setPresetName(n)}>
+                  {n}
+                </MButton>
+              ))}
             </div>
           </PanelSectionRow>
         )}
-        {downloading && (
-          <PanelSectionRow>
-            <MButton  variant="text" onClick={onCancelDownload}>
-              Cancel download
-            </MButton>
-          </PanelSectionRow>
+      </Card>
+    );
+  };
+
+  const renderLog = () => {
+    if (!logFor || !gameLog) return null;
+    return (
+      <Card>
+        <div style={{ fontWeight: 600 }}>Log — {base(logFor)}</div>
+        {(gameLog.files || []).map((f) => (
+          <div key={String(f.path)} style={{ marginTop: M3.space.sm }}>
+            <div style={{ ...M3.type.caption, overflowWrap: "anywhere" }}>{String(f.path)} ({f.lines} lines)</div>
+            <PagedText text={Array.isArray(f.tail) ? f.tail.join("\n") : String(f.tail || "")} pageSize={30} maxHeight={200} />
+          </div>
+        ))}
+        {(gameLog.important || []).length > 0 && (
+          <div style={{ marginTop: M3.space.sm }}>
+            <div style={{ fontWeight: 600 }}>Important</div>
+            <PagedText text={(gameLog.important || []).join("\n")} pageSize={40} maxHeight={160} />
+          </div>
         )}
-        {pickedDownloaded && (
-          <PanelSectionRow>
-            <MButton  disabled={busy !== ""} variant={confirm === `remove ${picked}` ? "danger" : "danger-outline"} onClick={onRemove}>
-              {confirm === `remove ${picked}` ? `Confirm remove ${picked}?` : `Remove ${picked} files`}
-            </MButton>
-          </PanelSectionRow>
-        )}
-        </>
-      </PanelSection>
-      {hasVersions && (
-      <PanelSection title="2 · Network build">
-        <>
-        <PanelSectionRow>
-          <MButton
-            
-            disabled={busy !== "" || building || !activeVersion}
-            description={!activeVersion ? "Download a version first" : undefined}
-            variant={confirm === "rebuild network" ? "danger" : "filled"} onClick={() => onBuild(Boolean(activeVersion?.network_built))}
-          >
-            {building ? "Building network ..." : activeVersion?.network_built ? confirm === "rebuild network" ? "Confirm rebuild?" : "Rebuild network" : "Build network"}
-          </MButton>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <MButton  disabled={busy !== "" || building || !activeVersion} variant="tonal" onClick={onCheckBuild}>
-            Check build readiness
-          </MButton>
-        </PanelSectionRow>
-        {activeVersion?.layout === "modern" && (
-        <PanelSectionRow>
-          <ToggleField
-            label="Frame generation (experimental)"
-            description={activeVersion?.fg_available === false
-              ? "No FG engine in this HelixSR build (withdrawn in 1.9.3+ — Scaler's providers cover FG)"
-              : "Builds the FG engine for Scaler games; 2.0+ installs it with every Scaler (~400 MB extra downloads, longer build)"}
-            checked={fgBuild}
-            disabled={activeVersion?.fg_available === false}
-            onChange={(c: boolean) => setFgBuild(c)}
-          />
-        </PanelSectionRow>
-        )}
-        {building && buildProg && (
-          <PanelSectionRow>
-            <div style={{ width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
-              <ProgressBar nProgress={buildProg.pct} nTransitionSec={M3.motion.bar} />
-              <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.xs, fontVariantNumeric: M3.tabular }}>{buildProg.pct}% — {buildProg.label}</div>
-            </div>
-          </PanelSectionRow>
-        )}
-        {building && (
-          <PanelSectionRow>
-            <MButton variant="text" onClick={onCancelBuild}>
-              Cancel build
-            </MButton>
-          </PanelSectionRow>
-        )}
-        </>
-      </PanelSection>
-      )}
-      {hasVersions && (
-      <PanelSection title="3 · Games">
-        <>
-        <PanelSectionRow>
-          <MButton
-            
-            disabled={scanning || busy !== "" || !activeVersion}
-            description={!activeVersion ? "Download and build a version first" : busy !== "" ? "Busy — wait for the current task" : undefined}
-            variant="filled" onClick={onScan}
-          >
-            {scanning ? "Scanning ..." : `Scan games${gamesTag ? ` (${gamesTag})` : ""}`}
-          </MButton>
-        </PanelSectionRow>
-        {activeVersion?.generation === 3 && (
-        <PanelSectionRow>
-          <ToggleField
-            label="Install frame generation with Scaler"
-            description={activeVersion?.fg_built
-              ? "2.0+ Scaler games get DLSS frame generation (turn it on in the game; change quality in Scaler settings)"
-              : "No FG built — run the network build with frame generation first"}
-            checked={fgWithScaler && !!activeVersion?.fg_built}
-            disabled={!activeVersion?.fg_built}
-            onChange={(c: boolean) => setFgWithScaler(c)}
-          />
-        </PanelSectionRow>
-        )}
-        {scanning && (
-          <PanelSectionRow>
-            <MButton  variant="text" onClick={onCancelScan}>
-              Cancel scan
-            </MButton>
-          </PanelSectionRow>
-        )}
-        {scanning && (
-          <PanelSectionRow>
-            <div style={{ width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
-              <ProgressBar indeterminate={true} />
-              <div style={{ fontSize: 12, marginTop: 4 }}>Walking Steam libraries — this can take a few minutes on large collections ...</div>
-            </div>
-          </PanelSectionRow>
-        )}
-        {migCandidates.length > 0 && activeVersion && !migrating && (
-          <PanelSectionRow>
-            <MButton
-              
-              disabled={busy !== "" || scanning}
-              description="Reinstalls them into the new build, keeping routes"
-              variant="filled" onClick={onMigrate}
-            >
-              {confirm === `migrate to ${activeVersion.tag}` ? "Confirm migrate?" : `Migrate ${migCandidates.length} game(s) to ${activeVersion.tag}`}
-            </MButton>
-          </PanelSectionRow>
-        )}
-        {migrating && (
-          <PanelSectionRow>
-            <div style={{ width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
-              <ProgressBar nProgress={mig && mig.total > 0 ? Math.min(100, (100 * mig.current) / mig.total) : 0} nTransitionSec={M3.motion.bar} />
-              <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.xs, fontVariantNumeric: M3.tabular }}>
-                {mig && mig.total > 0 ? `Migrating ${mig.current}/${mig.total}${mig.current_name ? `: ${mig.current_name}` : ""} ...` : "Starting migration ..."}
-              </div>
-            </div>
-          </PanelSectionRow>
-        )}
-        {installAllTargets.length > 0 && (
-          <PanelSectionRow>
-            <MButton  disabled={busy !== "" || scanning} variant="filled" onClick={onInstallAll}>
-              {`Install all ${installAllTargets.length} game(s)`}
-            </MButton>
-          </PanelSectionRow>
-        )}
-        {visInstalled > 0 && (
-          <PanelSectionRow>
-            <MButton  disabled={busy !== "" || scanning} variant={confirm === "remove all games" ? "danger" : "danger-outline"} onClick={onRemoveAll}>
-              {confirm === "remove all games" ? "Confirm remove all?" : `Remove from all ${visInstalled} game(s)`}
-            </MButton>
-          </PanelSectionRow>
-        )}
-        {installedCount > 0 && (
-          <PanelSectionRow>
-            <MButton  disabled={busy !== "" || scanning} variant="tonal" onClick={onVerify}>
-              Verify installs
-            </MButton>
-          </PanelSectionRow>
-        )}
-        {verify && verify.some((v) => !v.ok) && (
-          <PanelSectionRow>
-            <MButton
-              
-              disabled={busy !== ""}
-              variant="filled" onClick={() => onRepair(verify.filter((v) => !v.ok).map((v) => v.index))}
-            >
-              {`Repair all ${verify.filter((v) => !v.ok).length} broken game(s)`}
-            </MButton>
-          </PanelSectionRow>
-        )}
-        {verify && verify.filter((v) => !v.ok).map((v) => (
-          <PanelSectionRow key={`verify-${v.index}`}>
-            <MButton
-              
-              disabled={busy !== ""}
-              description={v.problems.join("; ")}
-              variant="filled" onClick={() => onRepair([v.index])}
-            >
-              {`Repair ${v.name}`}
+        {(gameLog.fixes || []).map((fx) => (
+          <PanelSectionRow key={fx.id}>
+            <MButton variant="tonal" disabled={busy !== ""}
+              onClick={() => armOrRun(`fix:${logFor}:${fx.id}`, fx.label, () => onApplyFix(fx.id))}>
+              {confirm === `fix:${logFor}:${fx.id}` ? "Tap again to apply fix" : `Fix: ${fx.label}`}
             </MButton>
           </PanelSectionRow>
         ))}
-        {games.length > 0 && (
+        <PanelSectionRow>
+          <MButton variant="text" onClick={() => { setLogFor(null); setGameLog(null); }}>Close</MButton>
+        </PanelSectionRow>
+      </Card>
+    );
+  };
+
+  const renderGame = (g: HelixGame) => {
+    const way = ways[g.folder] || "auto";
+    const wayChoices = ["auto", ...g.ways];
+    return (
+      <Card key={g.folder}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: M3.space.sm }}>
+          <div style={{ fontWeight: 600, minWidth: 0, overflowWrap: "anywhere" }}>{g.name}</div>
+          {g.installed
+            ? <Chip tone="success">✓ {g.installed}{g.version ? ` ${g.version}` : ""}</Chip>
+            : <Chip tone="neutral">{g.blocked || shortRoute(g.recommended || "")}</Chip>}
+        </div>
+        <div style={{ ...M3.type.caption, opacity: 0.8, overflowWrap: "anywhere" }}>{g.folder}</div>
+        <div style={M3.type.caption}>
+          {(g.inputs || []).join(" · ")}
+          {g.anticheat.length > 0 ? ` — anti-cheat (${g.anticheat.join(", ")})` : ""}
+        </div>
+        {g.installed === "scaler" && (
+          <div style={M3.type.caption}>
+            FG: {g.frame_generation == null ? "unknown" : g.frame_generation ? "on" : "off"}
+            {g.fg_other ? " (game picks another provider)" : ""}
+            {g.fg_unsupported ? " (unsupported GPU)" : ""}
+            {g.scaler_missing.length > 0 ? ` — missing: ${g.scaler_missing.join(", ")}` : ""}
+          </div>
+        )}
+        {g.launch_options && (
+          <div style={{ ...M3.type.caption, overflowWrap: "anywhere" }}>Launch options: {g.launch_options}</div>
+        )}
+        {g.previous ? (
+          <div style={M3.type.caption}>A previous install is kept — rollback can restore it.</div>
+        ) : null}
+        <PanelSectionRow>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
+            {wayChoices.map((w) => (
+              <MButton key={w} variant={way === w ? "filled" : "tonal"}
+                disabled={busy !== "" || !g.supported}
+                onClick={() => setWays({ ...ways, [g.folder]: w })}>
+                {WAY_LABELS[w] || w}
+              </MButton>
+            ))}
+          </div>
+        </PanelSectionRow>
+        {(way === "scaler" || (way === "auto" && g.recommended === "scaler")) && g.fg_possible && !g.anticheat.length && (
           <PanelSectionRow>
-            <TextField
-              label="Filter games"
-              value={filter}
-              bShowClearAction
-              onChange={(e) => setFilter((e.target as HTMLInputElement).value)}
+            <ToggleField
+              label="Frame generation with Scaler"
+              description="Needs an FG build (games with DLSS Frame Generation)"
+              checked={!!fgFor[g.folder]}
+              onChange={(c: boolean) => setFgFor({ ...fgFor, [g.folder]: c })}
             />
           </PanelSectionRow>
         )}
         <PanelSectionRow>
           <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
-            {([
-              ["all", "All"],
-              ["installed", "Installed"],
-              ["available", "Available"],
-              ["repair", "Repair"],
-            ] as const).map(([mode, label]) => (
-              <MButton
-                key={mode}
-                variant={showMode === mode ? "filled" : "outlined"}
-                onClick={() => setShowMode(mode)}
-                style={{ flex: "1 1 40%", minWidth: 0 }}
-              >
-                {label}
+            {!g.installed && (
+              <MButton variant="filled" disabled={busy !== "" || !g.supported}
+                onClick={() => onInstall([g.folder], way)}>
+                {confirm.startsWith(`install:${g.folder}`) ? "Tap again to confirm" : "Install"}
+              </MButton>
+            )}
+            {g.installed && (
+              <Fragment>
+                <MButton variant="tonal" disabled={busy !== ""}
+                  onClick={() => onInstall([g.folder], g.installed || "auto")}>Update</MButton>
+                <MButton variant="outlined" disabled={busy !== ""}
+                  onClick={() => onUninstall([g.folder])}>
+                  {confirm.startsWith(`uninstall:${g.folder}`) ? "Tap again to confirm" : "Remove"}
+                </MButton>
+                <MButton variant="text" disabled={busy !== ""} onClick={() => onRepair([g.folder])}>Repair</MButton>
+                {g.installed === "scaler" && g.fg_possible && (
+                  <MButton variant="tonal" disabled={busy !== ""}
+                    onClick={() => onToggleFg(g.folder, !(g.frame_generation ?? false))}>
+                    FG {g.frame_generation ? "off" : "on"}
+                  </MButton>
+                )}
+                {g.previous ? (
+                  <MButton variant="outlined" disabled={busy !== ""}
+                    onClick={() => onRollback(g.folder)}>
+                    {confirm === `rollback:${g.folder}` ? "Tap again to confirm" : "Roll back"}
+                  </MButton>
+                ) : null}
+                <MButton variant="text" disabled={busy !== ""} onClick={() => openSettings(g.folder)}>Settings</MButton>
+                <MButton variant="text" disabled={busy !== ""} onClick={() => openLog(g.folder)}>Log</MButton>
+              </Fragment>
+            )}
+          </div>
+        </PanelSectionRow>
+      </Card>
+    );
+  };
+
+  return (
+    <div>
+      {heroOp && (
+        <PanelSectionRow>
+          <div style={{ width: "100%" }}>
+            <div style={M3.type.caption}>{heroOp.label}{dlRate ? ` — ${dlRate}` : ""}</div>
+            {heroOp.pct < 0
+              ? <ProgressBar indeterminate nTransitionSec={M3.motion.bar} />
+              : <ProgressBar nProgress={heroOp.pct} nTransitionSec={M3.motion.bar} />}
+          </div>
+        </PanelSectionRow>
+      )}
+      {downloading && (
+        <PanelSectionRow>
+          <MButton variant="outlined" onClick={onCancelDownload}>Cancel download</MButton>
+        </PanelSectionRow>
+      )}
+      {building && (
+        <PanelSectionRow>
+          <MButton variant="outlined" onClick={onCancelBuild}>Cancel build</MButton>
+        </PanelSectionRow>
+      )}
+
+      <PanelSection title="Version">
+        <PanelSectionRow>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm, width: "100%" }}>
+            {listedReleases.map((r) => (
+              <MButton key={r.tag} variant={picked === r.tag ? "filled" : "tonal"}
+                onClick={() => setPicked(r.tag)}
+                description={`${r.zip_name} · ${fmtSize(r.size)}`}>
+                {r.tag}{downloadedTags.has(r.tag) ? " ✓" : ""}
               </MButton>
             ))}
           </div>
         </PanelSectionRow>
-        {showMode === "repair" && !verify && (
+        {!showAllReleases && releases.length > 3 && (
           <PanelSectionRow>
-            <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
-              Run Verify installs first to find broken games.
-            </div>
+            <MButton variant="text" onClick={() => setShowAllReleases(true)}>
+              Show all {releases.length} releases
+            </MButton>
           </PanelSectionRow>
         )}
         <PanelSectionRow>
-          <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
-            {games.length > 0
-              ? `Showing ${({ all: "all games", installed: "installed only", available: "not installed only", repair: "needs repair" } as Record<string, string>)[showMode] || showMode}${filter.trim() ? ` · filter "${filter.trim()}"` : ""} — ${visibleGames.length}/${games.length}`
-              : "Scan to find games"}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
+            <MButton variant="filled" disabled={busy !== "" || downloading || !picked}
+              onClick={onDownloadOrUse}>
+              {pickedDownloaded ? `Switch to ${picked}` : downloading ? "Downloading ..." : `Download ${picked}`}
+            </MButton>
+            <MButton variant="tonal" disabled={busy !== ""} onClick={() => { refreshReleases(); }}>
+              Reload releases
+            </MButton>
+            <MButton variant="text" onClick={() => setShowPrereleases(!showPrereleases)}>
+              {showPrereleases ? "Hide prereleases" : "Show prereleases"}
+            </MButton>
           </div>
         </PanelSectionRow>
-        {sortedGames.map((g, si) => (
-          <Fragment key={g.index}>
-            {(si === 0 || sortedGames[si - 1].installed !== g.installed) && (
-              <PanelSectionRow>
-                <MButton
-                  variant="text"
-                  onClick={() => setOpenGroups({
-                    ...openGroups,
-                    [g.installed ? "installed" : "not"]: !(g.installed ? openInstalled : openNot),
-                  })}
-                >
-                  {g.installed
-                    ? `Installed (${installedGroup.length}) — ${openInstalled ? "collapse" : "expand"}`
-                    : `Not installed (${availGroup.length}) — ${openNot ? "collapse" : "expand"}`}
-                </MButton>
-              </PanelSectionRow>
-            )}
-            {(g.installed ? openInstalled : openNot) && (
-          <Card variant="outlined" style={{ width: "100%", marginBottom: M3.space.sm }}>
-            <PanelSectionRow>
-              <div style={{ display: "flex", alignItems: "center", gap: M3.space.sm, flexWrap: "wrap", width: "100%", boxSizing: "border-box", minWidth: 0 }}>
-                <span style={{ ...M3.type.title, flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>{g.name}</span>
-                {g.installed
-                  ? <Chip tone="success">Installed</Chip>
-                  : <Chip tone="secondary">{ROUTE_SHORT[g.route || ""] || g.route || "—"}</Chip>}
-              </div>
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <MButton
-                
-                disabled={busy !== "" || scanning || (!g.installed && !(g.fsr || []).length && activeLayout === "modern" && !((g.available || []).includes("scaler")))}
-                description={g.installed ? shortRoute(g.route) : (ROUTE_LABELS[pickedRoute(g)] || g.status)}
-                variant={confirm === `install scaler ${g.index}` ? "danger" : (g.installed ? "outlined" : "filled")} onClick={() => (g.installed ? onUninstall(g) : onInstall(g))}
-              >
-                {confirm === `install scaler ${g.index}` && !g.installed
-                  ? `Tap again: install Scaler in ${g.name}`
-                  : `${g.installed ? "Remove from" : "Install in"} ${g.name}`}
-              </MButton>
-            </PanelSectionRow>
-            {!g.installed && g.available.length > 1 && (
-              <PanelSectionRow>
-                <div style={{ width: "100%" }}>
-                  <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
-                    Install via:
+        {pickedRelease && !pickedDownloaded && pickedRelease.body && (
+          <PanelSectionRow>
+            <PagedText text={pickedRelease.body.slice(0, 800)} pageSize={12} maxHeight={160} />
+          </PanelSectionRow>
+        )}
+        {(state?.versions || []).length > 0 && (
+          <PanelSectionRow>
+            <div style={{ width: "100%" }}>
+              {(state?.versions || []).slice().sort((a, b) => cmpTags(b.tag, a.tag)).map((v) => (
+                <div key={v.tag} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: M3.space.sm, marginBottom: M3.space.xs }}>
+                  <div style={{ minWidth: 0 }}>
+                    <span style={{ fontWeight: state?.active_tag === v.tag ? 700 : 400 }}>{v.tag}</span>
+                    <span style={M3.type.caption}>
+                      {` · ${v.dll_version} · ${v.size_mb} MB · network ${v.network_built ? "built" : "missing"} · FG ${v.fg_built ? "built" : "—"}`}
+                      {v.scaler_version ? ` · Scaler ${v.scaler_version}` : ""}
+                    </span>
                   </div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
-                    {g.available.map((a) => (
-                      <MButton
-                        key={a}
-                        variant={(routes[g.index] || g.route) === a ? "filled" : "outlined"}
-                        onClick={() => setRoutes({ ...routes, [g.index]: a })}
-                        style={{ flex: "1 1 40%", minWidth: 0 }}
-                      >
-                        {ROUTE_LABELS[a] || a}
-                      </MButton>
-                    ))}
+                  <div style={{ display: "flex", gap: M3.space.xs }}>
+                    {state?.active_tag !== v.tag && (
+                      <MButton variant="text" disabled={busy !== ""} onClick={() => onDownloadOrUsePick(v.tag)}>Use</MButton>
+                    )}
+                    <MButton variant="text" disabled={busy !== ""}
+                      onClick={() => armOrRun(`rm:${v.tag}`, `Remove ${v.tag}`, () => onRemoveVersion(v.tag))}>
+                      {confirm === `rm:${v.tag}` ? "Confirm?" : "Remove"}
+                    </MButton>
                   </div>
                 </div>
-              </PanelSectionRow>
-            )}
-            <PanelSectionRow>
-              <MButton variant="text" onClick={() => setExpanded({ ...expanded, [g.index]: !expanded[g.index] })}>
-                {expanded[g.index] ? "Hide details" : "Details"}
-              </MButton>
-            </PanelSectionRow>
-            {expanded[g.index] && (
-              <PanelSectionRow>
-                <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, overflowWrap: "anywhere" }}>
-                  <div>Folder: {g.folder}</div>
-                  <div>Detected: {g.inputs.length ? g.inputs.join(" / ") : "none"}</div>
-                  <div>FSR: {(g.fsr || []).length ? g.fsr.map(base).join(", ") : "none"}</div>
-                  <div>Exe: {g.exe ? base(g.exe) : "not found"}</div>
-                  <div>Installed builds: {(g.installed_versions || []).length ? (g.installed_versions || []).join(", ") : "—"}</div>
+              ))}
+            </div>
+          </PanelSectionRow>
+        )}
+      </PanelSection>
+
+      <PanelSection title="Build">
+        <PanelSectionRow>
+          <ToggleField
+            label="Frame generation"
+            description="Also build DLSS frame generation (needs game closed, extra downloads)"
+            checked={fgBuild}
+            onChange={(c: boolean) => { setFgBuild(c); setReadiness(null); }}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
+            <MButton variant="tonal" disabled={busy !== "" || building || !activeVersion}
+              onClick={onCheckReady}>
+              {busy === "ready" ? "Checking ..." : "Check readiness"}
+            </MButton>
+            <MButton variant="filled" disabled={busy !== "" || building || !activeVersion}
+              onClick={() => onStartBuild(false)}>
+              {building ? "Building ..." : "Build"}
+            </MButton>
+            <MButton variant="outlined" disabled={busy !== "" || building || !activeVersion}
+              onClick={() => armOrRun("build:rebuild", "Rebuild", () => onStartBuild(true))}>
+              {confirm === "build:rebuild" ? "Tap again to rebuild" : "Rebuild"}
+            </MButton>
+          </div>
+        </PanelSectionRow>
+        {readiness && (
+          <PanelSectionRow>
+            <div style={{ width: "100%" }}>
+              {readiness.map((c) => (
+                <div key={c.name} style={M3.type.caption}>
+                  {c.ok ? "✓" : "✗"} {c.name} — {c.detail}
                 </div>
-              </PanelSectionRow>
-            )}
-            {g.installed && g.route !== "scaler" && iniFor !== g.index && (
-              <PanelSectionRow>
-                <MButton  disabled={busy !== "" || scanning} variant="text" onClick={() => onOpenIni(g)}>
-                  {`Settings — ${g.name}`}
-                </MButton>
-              </PanelSectionRow>
-            )}
-            {g.installed && g.route === "scaler" && scIniFor !== g.index && (
-              <PanelSectionRow>
-                <MButton  disabled={busy !== "" || scanning} variant="text" onClick={() => onOpenScIni(g)}>
-                  {`Scaler settings — ${g.name}`}
-                </MButton>
-              </PanelSectionRow>
-            )}
-            {g.installed && g.route === "scaler" && !g.launch_options ? (
-              <PanelSectionRow>
-                <Card tone="neutral" radius={M3.shape.md} style={{ background: M3.color.surfaceContainerLow, width: "100%" }}>
-                  <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
-                    No Steam launch options needed (dxgi.dll loads by itself).
-                  </div>
-                </Card>
-              </PanelSectionRow>
-            ) : null}
-            {g.installed && g.launch_options ? (
-              <PanelSectionRow>
-                <Card tone="neutral" radius={M3.shape.md} style={{ background: M3.color.surfaceContainerLow, width: "100%" }}>
-                  <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
-                    Steam launch options — Steam → game Properties → General → Launch Options, paste:
-                  </div>
-                  <div style={{ fontFamily: M3.mono, fontSize: 12, overflowWrap: "anywhere" }}>{g.launch_options}</div>
-                  <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.xs }}>
-                    Required for the Insert menu. Take them back out if you uninstall.
-                  </div>
-                  <MButton variant="tonal" onClick={() => onCopyLaunchOptions(g.launch_options || "")}>
-                    Copy launch options
-                  </MButton>
-                </Card>
-              </PanelSectionRow>
-            ) : null}
-            {g.installed && logFor !== g.index && (
-              <PanelSectionRow>
-                <MButton  disabled={busy !== "" || scanning} variant="text" onClick={() => onOpenLog(g)}>
-                  {`Log — ${g.name}`}
-                </MButton>
-              </PanelSectionRow>
-            )}
-            {g.installed && logFor === g.index && (
-              <div key={`log-${g.index}`}>
-                {gameLogs.map((l, i) => (
-                  <PanelSectionRow key={i}>
-                    <Card tone="neutral" radius={M3.shape.md} style={{ background: M3.color.surfaceContainerLow, width: "100%" }}>
-                      <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs, overflowWrap: "anywhere" }}>{l.path}</div>
-                      <PagedText text={l.tail.slice(-4000)} pageSize={30} maxHeight={200} />
-                    </Card>
-                  </PanelSectionRow>
-                ))}
-                {logFixes.map((f) => (
-                  <PanelSectionRow key={f.id}>
-                    <MButton  disabled={busy !== ""} description={f.label} variant="filled" onClick={() => onApplyFix(f.id)}>
-                      Apply fix
-                    </MButton>
-                  </PanelSectionRow>
-                ))}
-                <PanelSectionRow>
-                  <MButton  variant="text" onClick={() => { setLogFor(null); setGameLogs([]); setLogFixes([]); }}>
-                    Close log
-                  </MButton>
-                </PanelSectionRow>
-              </div>
-            )}
-            {g.installed && iniFor === g.index && ini && (
-              <div>
-                <PanelSectionRow>
-                  <div style={{ fontSize: 12 }}>{iniPath}</div>
-                </PanelSectionRow>
-                <PanelSectionRow>
-                  <div style={{ width: "100%" }}>
-                    <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
-                      Sharpener — NVIDIA's filter, AMD FSR's RCAS, or off (as DLSS)
-                    </div>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
-                      {([
-                        ["off", "Off"],
-                        ["nvidia", "NVIDIA"],
-                        ["rcas", "RCAS (AMD)"],
-                      ] as const).map(([v, label]) => (
-                        <MButton
-                          key={v}
-                          variant={ini.Sharpener === v ? "filled" : "outlined"}
-                          onClick={() => setIni({ ...ini, Sharpener: v })}
-                          style={{ flex: "1 1 40%", minWidth: 0 }}
-                        >
-                          {label}
-                        </MButton>
-                      ))}
-                    </div>
-                  </div>
-                </PanelSectionRow>
-                <PanelSectionRow>
-                  <SliderField
-                    label="Sharpness"
-                    description="Used when a sharpener is on (0.5 is NVIDIA's default)"
-                    value={parseFloat(ini.Sharpness)}
-                    min={0}
-                    max={1}
-                    step={0.05}
-                    showValue
-                    disabled={ini.Sharpener === "off"}
-                    onChange={(v: number) => setIni({ ...ini, Sharpness: String(Math.round(v * 100) / 100) })}
-                  />
-                </PanelSectionRow>
-                {(iniSchema === "legacy" || iniSchema === "g3") && (
-                <PanelSectionRow>
-                  <ToggleField
-                    label="Use game slider"
-                    description="Follow the game's sharpness slider, if it has one"
-                    checked={ini.UseGameSlider === "true"}
-                    onChange={(c: boolean) => setIni({ ...ini, UseGameSlider: c ? "true" : "false" })}
-                  />
-                </PanelSectionRow>
-                )}
-                <PanelSectionRow>
-                  <div style={{ width: "100%" }}>
-                    <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
-                      {iniSchema === "modern"
-                        ? "WaveSize — 64 for RX 7000 / 9000 if the log says wave32"
-                        : "WaveSize — 64 for RX 7000 / 9000 in OptiScaler games if the log says wave32"}
-                    </div>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
-                      {((iniSchema === "modern"
-                        ? [["auto", "Auto"], ["64", "64"], ["32", "32"]]
-                        : iniSchema === "g3"
-                          ? [["auto", "Auto"], ["default", "Default"], ["64", "64"], ["32", "32"]]
-                          : [["default", "Default"], ["64", "64"], ["32", "32"]]) as [string, string][]).map(([v, label]) => (
-                        <MButton
-                          key={v}
-                          variant={ini.WaveSize === v ? "filled" : "outlined"}
-                          onClick={() => setIni({ ...ini, WaveSize: v })}
-                          style={{ flex: "1 1 40%", minWidth: 0 }}
-                        >
-                          {label}
-                        </MButton>
-                      ))}
-                    </div>
-                  </div>
-                </PanelSectionRow>
-                {iniSchema === "g3" && (
-                <PanelSectionRow>
-                  <div style={{ width: "100%" }}>
-                    <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
-                      Int8 — faster int8 math (auto decides; off if the picture shimmers)
-                    </div>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
-                      {([["auto", "Auto"], ["on", "On"], ["off", "Off"]] as [string, string][]).map(([v, label]) => (
-                        <MButton
-                          key={v}
-                          variant={(ini.Int8 || "auto") === v ? "filled" : "outlined"}
-                          onClick={() => setIni({ ...ini, Int8: v })}
-                          style={{ flex: "1 1 40%", minWidth: 0 }}
-                        >
-                          {label}
-                        </MButton>
-                      ))}
-                    </div>
-                  </div>
-                </PanelSectionRow>
-                )}
-                {iniSchema === "g3" && (
-                <PanelSectionRow>
-                  <div style={{ width: "100%" }}>
-                    <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
-                      NetworkResolution — Ultra Performance (fast, default) vs the sharpest image (full)
-                    </div>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
-                      {([["fast", "Fast"], ["full", "Full"]] as [string, string][]).map(([v, label]) => (
-                        <MButton
-                          key={v}
-                          variant={(ini.NetworkResolution || "fast") === v ? "filled" : "outlined"}
-                          onClick={() => setIni({ ...ini, NetworkResolution: v })}
-                          style={{ flex: "1 1 40%", minWidth: 0 }}
-                        >
-                          {label}
-                        </MButton>
-                      ))}
-                    </div>
-                  </div>
-                </PanelSectionRow>
-                )}
-                {iniSchema === "g3" && (
-                <PanelSectionRow>
-                  <div style={{ width: "100%" }}>
-                    <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
-                      DLSS frame generation (needs an FG build)
-                    </div>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
-                      {([["c", "Light"], ["full", "Full"]] as [string, string][]).map(([v, label]) => (
-                        <MButton
-                          key={v}
-                          variant={(ini.FgPreset || "c") === v ? "filled" : "outlined"}
-                          disabled={ini.FgEnabled === "false"}
-                          onClick={() => setIni({ ...ini, FgPreset: v })}
-                          style={{ flex: "1 1 40%", minWidth: 0 }}
-                        >
-                          {label}
-                        </MButton>
-                      ))}
-                      <MButton
-                        variant={ini.FgMemory === "system" ? "filled" : "outlined"}
-                        disabled={ini.FgEnabled === "false"}
-                        onClick={() => setIni({ ...ini, FgMemory: ini.FgMemory === "system" ? "auto" : "system" })}
-                        style={{ flex: "1 1 40%", minWidth: 0 }}
-                      >
-                        {ini.FgMemory === "system" ? "Memory: system" : "Memory: auto"}
-                      </MButton>
-                      <MButton
-                        variant={ini.FgEnabled === "false" ? "outlined" : "filled"}
-                        onClick={() => setIni({ ...ini, FgEnabled: ini.FgEnabled === "false" ? "true" : "false" })}
-                        style={{ flex: "1 1 40%", minWidth: 0 }}
-                      >
-                        {ini.FgEnabled === "false" ? "FG off" : "FG on"}
-                      </MButton>
-                    </div>
-                  </div>
-                </PanelSectionRow>
-                )}
-                {allPresetNames.length === 0 && (
-                  <PanelSectionRow>
-                    <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
-                      No presets yet — tune above, name it, save.
-                    </div>
-                  </PanelSectionRow>
-                )}
-                {allPresetNames.length > 0 && (
-                  <PanelSectionRow>
-                    <div style={{ width: "100%" }}>
-                      <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
-                        Preset — apply a saved set of values
-                      </div>
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
-                        {allPresetNames.map((n) => (
-                          <MButton
-                            key={n}
-                            variant={presetPick === n ? "filled" : "outlined"}
-                            onClick={() => setPresetPick(n)}
-                            style={{ flex: "1 1 40%", minWidth: 0 }}
-                          >
-                            {`${n}${presetMatch === n ? " ✓" : ""}`}
-                          </MButton>
-                        ))}
-                      </div>
-                    </div>
-                  </PanelSectionRow>
-                )}
-                {pickedPresetValues && (
-                  <PanelSectionRow>
-                    <div style={{ width: "100%" }}>
-                      <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
-                        {formatPresetSummary(pickedPresetValues)}
-                        {presetPick === DEFAULT_PRESET_NAME && showBuiltinDefault
-                          ? " — built-in HelixSR defaults"
-                          : presetMatch === presetPick ? " — matches current settings" : ""}
-                      </div>
-                      <MButton disabled={busy !== ""} variant="filled" onClick={onApplyPreset}>
-                        {`Apply "${presetPick}"`}
-                      </MButton>
-                    </div>
-                  </PanelSectionRow>
-                )}
-                {presetPick && presets[presetPick] && (
-                  <PanelSectionRow>
-                    <MButton disabled={busy !== ""} variant={confirm === `delete preset ${presetPick}` ? "danger" : "text"} onClick={onDeletePreset}>
-                      {confirm === `delete preset ${presetPick}` ? `Tap again to delete "${presetPick}"` : `Delete "${presetPick}"`}
-                    </MButton>
-                  </PanelSectionRow>
-                )}
-                <PanelSectionRow>
-                  <TextField
-                    label="Preset name"
-                    description={`Save the current editor values as a preset (${trimmedPresetName.length}/40)`}
-                    value={presetName}
-                    onChange={(e) => setPresetName((e.target as HTMLInputElement).value.slice(0, 40))}
-                  />
-                </PanelSectionRow>
-                {overwriteTarget && (
-                  <PanelSectionRow>
-                    <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
-                      {`Will overwrite "${overwriteTarget}".`}
-                    </div>
-                  </PanelSectionRow>
-                )}
-                {trimmedPresetName !== "" && (
-                <PanelSectionRow>
-                  <MButton disabled={busy !== ""} variant="tonal" onClick={onSavePreset}>
-                    {overwriteTarget ? `Overwrite "${overwriteTarget}"` : "Save preset"}
-                  </MButton>
-                </PanelSectionRow>
-                )}
-                <PanelSectionRow>
-                  <MButton  disabled={busy !== ""} variant="filled" onClick={onSaveIni}>
-                    Save settings
-                  </MButton>
-                </PanelSectionRow>
-                <PanelSectionRow>
-                  <MButton  variant="text" onClick={() => { setIniFor(null); setIni(null); setIniSchema("legacy"); setPresetPick(""); setPresetName(""); }}>
-                    Close settings
-                  </MButton>
-                </PanelSectionRow>
-              </div>
-            )}
-            {g.installed && g.route === "scaler" && scIniFor === g.index && scIni && (
-              <div>
-                <PanelSectionRow>
-                  <div style={{ fontSize: 12 }}>{scIniPath}</div>
-                </PanelSectionRow>
-                {(scSchema === "g3"
-                  ? (["Int8", "WaveSize", "FGPreset", "QuickFlow"] as const)
-                  : (["Int8", "WaveSize", "FrameGeneration", "QuickFlow"] as const)
-                ).map((key) => (
-                  <PanelSectionRow key={key}>
-                    <div style={{ width: "100%" }}>
-                      <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginBottom: M3.space.xs }}>
-                        {key} — {(scSchema === "g3" ? SCALER_SETTING_LABELS_G3 : SCALER_SETTING_LABELS)[key]}
-                      </div>
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
-                        {((scSchema === "g3" ? SCALER_SETTING_OPTIONS_G3 : SCALER_SETTING_OPTIONS)[key]).map(([v, label]) => (
-                          <MButton
-                            key={v}
-                            variant={scIni[key] === v ? "filled" : "outlined"}
-                            onClick={() => setScIni({ ...scIni, [key]: v } as ScalerSettings)}
-                            style={{ flex: "1 1 40%", minWidth: 0 }}
-                          >
-                            {label}
-                          </MButton>
-                        ))}
-                      </div>
-                    </div>
-                  </PanelSectionRow>
-                ))}
-                <PanelSectionRow>
-                  <MButton  disabled={busy !== ""} variant="filled" onClick={onSaveScIni}>
-                    Save scaler settings
-                  </MButton>
-                </PanelSectionRow>
-                <PanelSectionRow>
-                  <MButton  variant="text" onClick={() => { setScIniFor(null); setScIni(null); }}>
-                    Close scaler settings
-                  </MButton>
-                </PanelSectionRow>
-              </div>
-            )}
-          </Card>
-            )}
-          </Fragment>
-        ))}
+              ))}
+            </div>
+          </PanelSectionRow>
+        )}
+        {buildLog && (
+          <PanelSectionRow>
+            <PagedText text={buildLog.slice(-6000)} pageSize={40} maxHeight={220} />
+          </PanelSectionRow>
+        )}
+      </PanelSection>
+
+      <PanelSection title="Games">
+        <PanelSectionRow>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
+            <MButton variant="filled" disabled={busy !== "" || scanning || !activeVersion} onClick={onScan}>
+              {scanning ? "Scanning ..." : games.length ? "Re-scan" : "Scan games"}
+            </MButton>
+            {scanning && <MButton variant="outlined" onClick={onCancelScan}>Cancel</MButton>}
+            <MButton variant="tonal" disabled={busy !== "" || !games.length} onClick={onVerify}>Verify installs</MButton>
+          </div>
+        </PanelSectionRow>
         <PanelSectionRow>
           <TextField
             label="Extra game folder"
-            description="A game outside Steam libraries (also: drag its folder onto a manual setup run)"
+            description="A game outside Steam libraries"
             value={folderInput}
             onChange={(e) => setFolderInput((e.target as HTMLInputElement).value)}
           />
         </PanelSectionRow>
         <PanelSectionRow>
-          <MButton  disabled={busy !== "" || !folderInput.trim()} variant="tonal" onClick={onAddFolder}>
-            Add folder
-          </MButton>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
+            <MButton variant="tonal" disabled={busy !== "" || !folderInput.trim()} onClick={onAddFolder}>Add folder</MButton>
+            {(state?.extra_folders || []).map((f) => (
+              <MButton key={f} variant="text" disabled={busy !== ""}
+                description={f}
+                onClick={() => apiRemoveScanFolder(f).then(() => refreshState())}>
+                ✕ {base(f)}
+              </MButton>
+            ))}
+          </div>
         </PanelSectionRow>
-        {(state?.extra_folders || []).map((f) => (
-          <PanelSectionRow key={f}>
-            <MButton  disabled={busy !== ""} variant="text" description={f} onClick={() => onRemoveFolder(f)}>
-              Remove folder
-            </MButton>
+        {gamesTag && (
+          <PanelSectionRow>
+            <div style={M3.type.caption}>
+              {games.length} game(s) scanned with {gamesTag}{verify ? ` — ${verify.filter((v) => v.ok).length}/${verify.length} verified` : ""}.
+            </div>
           </PanelSectionRow>
-        ))}
-        </>
+        )}
+        {games.map(renderGame)}
+        {settingsFor && settings && (
+          <PanelSectionRow>
+            <div style={{ width: "100%" }}>{renderSettingsEditor()}</div>
+          </PanelSectionRow>
+        )}
+        {logFor && gameLog && (
+          <PanelSectionRow>
+            <div style={{ width: "100%" }}>{renderLog()}</div>
+          </PanelSectionRow>
+        )}
       </PanelSection>
-      )}
-      <PanelSection title="HelixSR Scaler">
-        <>
-        {activeVersion?.generation === 3 ? (
+
+      <PanelSection title="Storage & updates">
         <PanelSectionRow>
-          <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
-            Scaler is bundled with HelixSR 2.0+ — installing a game brings it (and frame generation) automatically.
-            The download below is only for 1.9.x versions.
-          </div>
-        </PanelSectionRow>
-        ) : (
-        <PanelSectionRow>
-          <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
-            For games with DLSS/XeSS/FSR2 but no FSR 3.1: OptiScaler with HelixSR built in (Insert for the menu).
-            Not for online games or games with anti-cheat. Needs a built HelixSR 1.9.0+ and manual Steam launch
-            options per game. About 132 MB to download, plus copies in each game.
-          </div>
-        </PanelSectionRow>
-        )}
-        {activeVersion?.generation !== 3 && (
-        <PanelSectionRow>
-          <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
-            {scalerState?.tag ? `Downloaded: ${scalerState.tag} (${scalerState.size_mb} MB on disk)` : "Not downloaded yet"}
-          </div>
-        </PanelSectionRow>
-        )}
-        {scalerReleases.map((r) => (
-          <PanelSectionRow key={r.tag}>
-            <MButton
-              variant={scalerPicked === r.tag ? "filled" : "outlined"}
-              description={`${r.published_at} · ${fmtSize(r.size)} download`}
-              onClick={() => setScalerPicked(r.tag)}
-            >
-              {`${r.tag}${scalerState?.tag === r.tag ? " ✓" : ""}`}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
+            <MButton variant="tonal" disabled={busy !== ""}
+              onClick={onRemoveOld}>
+              {confirm === "storage:old" ? "Tap again to confirm" : "Remove old versions"}
             </MButton>
-          </PanelSectionRow>
-        ))}
-        {scalerPickedRelease && scalerPickedRelease.body && (
+            <MButton variant="outlined" disabled={busy !== ""}
+              onClick={onFactoryReset}>
+              {confirm === "storage:factory" ? "Tap again to confirm" : "Factory reset"}
+            </MButton>
+            <MButton variant="tonal" disabled={busy !== ""} onClick={onHealth}>
+              {busy === "health" ? "Checking ..." : "Health check"}
+            </MButton>
+          </div>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm, alignItems: "center" }}>
+            <span style={M3.type.caption}>
+              Plugin v{PLUGIN_VERSION}
+              {updateInfo?.update_available ? ` — v${updateInfo.latest} available` : updateInfo && !updateInfo.ok ? " — update check failed" : " — up to date"}
+            </span>
+            <MButton variant="tonal" disabled={busy !== "" || updating}
+              onClick={() => onCheckPluginUpdate(true)}>
+              Check for update
+            </MButton>
+            {updateInfo?.update_available && (
+              <MButton variant="filled" disabled={busy !== "" || updating} onClick={onStartPluginUpdate}>
+                Update to v{updateInfo.latest}
+              </MButton>
+            )}
+            {updating && (
+              <MButton variant="outlined" onClick={onCancelPluginUpdate}>Cancel</MButton>
+            )}
+          </div>
+        </PanelSectionRow>
+        {pu && updating && (
           <PanelSectionRow>
-            <Card tone="neutral" radius={M3.shape.md}>
-              <PagedText text={scalerPickedRelease.body.slice(0, 800)} pageSize={12} maxHeight={160} />
-            </Card>
-          </PanelSectionRow>
-        )}
-        <PanelSectionRow>
-          <MButton  disabled={busy !== "" || scalerDownloading || !scalerPicked} variant="tonal" onClick={() => refreshScalerReleases()}>
-            Reload scaler releases
-          </MButton>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ToggleField
-            label="Include prereleases"
-            description="Show prerelease builds (may be unstable)"
-            checked={showPrereleases}
-            onChange={(c: boolean) => onTogglePrereleases(c)}
-          />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <MButton
-            disabled={busy !== "" || scalerDownloading || !scalerPicked}
-            variant="filled" onClick={onScalerDownload}
-          >
-            {scalerDownloading ? "Downloading Scaler ..." : `Download ${scalerPicked || "Scaler"}`}
-          </MButton>
-        </PanelSectionRow>
-        {scalerDownloading && (
-          <PanelSectionRow>
-            <div style={{ width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
-              <ProgressBar nProgress={scDl && scDl.total > 0 ? Math.min(100, (100 * scDl.downloaded) / scDl.total) : 0} nTransitionSec={M3.motion.bar} />
-              <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.xs, fontVariantNumeric: M3.tabular }}>
-                {scDl && scDl.total > 0
-                  ? `${fmtSize(scDl.downloaded)} / ${fmtSize(scDl.total)} (${Math.floor((100 * scDl.downloaded) / scDl.total)}%)${scDlRate ? ` — ${scDlRate}` : ""}`
-                  : scDl ? `${fmtSize(scDl.downloaded)} downloaded ...${scDlRate ? ` — ${scDlRate}` : ""}` : "Starting scaler download ..."}
+            <div style={{ width: "100%" }}>
+              <div style={M3.type.caption}>
+                {pu.downloaded > 0 ? `${fmtSize(pu.downloaded)}${pu.total ? ` / ${fmtSize(pu.total)}` : ""}${puRate ? ` — ${puRate}` : ""}` : "Starting ..."}
               </div>
+              {pu.total > 0
+                ? <ProgressBar nProgress={Math.min(100, (100 * pu.downloaded) / pu.total)} nTransitionSec={M3.motion.bar} />
+                : <ProgressBar indeterminate nTransitionSec={M3.motion.bar} />}
             </div>
           </PanelSectionRow>
         )}
-        {scalerDownloading && (
-          <PanelSectionRow>
-            <MButton  variant="text" onClick={onCancelScalerDownload}>
-              Cancel scaler download
-            </MButton>
-          </PanelSectionRow>
-        )}
-        </>
+        <PanelSectionRow>
+          <span className={staticClasses.Text} style={M3.type.caption}>
+            HelixSR 2.0+ only. The game's own files are backed up before every install.
+            {state?.update_pending ? ` Plugin update ${state.update_pending} installed — restart Decky to apply.` : ""}
+          </span>
+        </PanelSectionRow>
       </PanelSection>
-      <PanelSection title="System">
-        <>
-        {hasVersions && (
-        <>
-        <PanelSectionRow>
-          <div style={{ ...M3.type.title }}>Total {totalMB.toFixed(1)} MB in {downloadedVersions.length} version(s)</div>
-        </PanelSectionRow>
-        {downloadedVersions.map((v) => (
-          <PanelSectionRow key={v.tag}>
-            <div style={{ ...M3.type.body, color: M3.color.onSurfaceVariant }}>{v.tag} — {v.size_mb} MB on disk{v.tag === state?.active_tag ? " (active)" : ""}</div>
-          </PanelSectionRow>
-        ))}
-        <PanelSectionRow>
-          <MButton  disabled={busy !== "" || downloadedVersions.length < 2} variant={confirm === "remove old versions" ? "danger" : "danger-outline"} onClick={onRemoveOld}>
-            {confirm === "remove old versions" ? "Confirm remove all?" : "Remove all except active"}
-          </MButton>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <MButton  disabled={busy !== ""} variant={confirm === "clear SDK cache" ? "danger" : "danger-outline"} onClick={onClearDlss}>
-            {confirm === "clear SDK cache" ? "Confirm clear cache?" : "Clear cached SDK files"}
-          </MButton>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <MButton  disabled={busy !== ""} variant={confirm === "reset everything" ? "danger" : "danger-outline"} onClick={onResetAll}>
-            {confirm === "reset everything" ? "Confirm reset all?" : "Reset everything"}
-          </MButton>
-        </PanelSectionRow>
-        </>
-        )}
-        <PanelSectionRow>
-          <MButton  disabled={busy !== ""} variant="tonal" onClick={onHealth}>
-            Run health check
-          </MButton>
-        </PanelSectionRow>
-        {(health || []).map((c) => (
-          <PanelSectionRow key={c.name}>
-            <div style={{ display: "flex", gap: M3.space.sm, alignItems: "baseline", ...M3.type.body }}>
-              <Chip tone={c.ok ? "success" : "error"}>{c.ok ? "OK" : "FAIL"}</Chip>
-              <span style={{ overflowWrap: "anywhere" }}>{c.name} — {c.detail}</span>
-            </div>
-          </PanelSectionRow>
-        ))}
-        </>
-      </PanelSection>
-      <PanelSection title="Plugin update">
-        <>
-        {puCheck?.update_available && !updating && !(pu?.done && pu?.ok) && (
+
+      {output && (
+        <PanelSection title="Output">
           <PanelSectionRow>
-            <div style={{ fontSize: 12 }}>v{puCheck.latest} available (you run v{puCheck.current}).</div>
+            <PagedText text={output.slice(-4000)} pageSize={30} maxHeight={220} />
           </PanelSectionRow>
-        )}
-        {puCheck?.update_available && puCheck?.body && !updating && !(pu?.done && pu?.ok) && (
-          <PanelSectionRow>
-            <PagedText text={puCheck.body.slice(0, 800)} pageSize={12} maxHeight={160} />
-          </PanelSectionRow>
-        )}
-        {puCheck?.update_available && !updating && !(pu?.done && pu?.ok) && (
-          <PanelSectionRow>
-            <MButton  disabled={busy !== ""} variant="filled" onClick={onStartPluginUpdate}>
-              {`Download & install v${puCheck.latest}`}
-            </MButton>
-          </PanelSectionRow>
-        )}
-        {puCheck?.update_available && puCheck.can_install === false && !updating && !(pu?.done && pu?.ok) && (
-          <PanelSectionRow>
-            <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>
-              Decky runs this plugin without write access to its own folder, so the update
-              is downloaded for Decky's manual Install-from-ZIP flow instead.
-            </div>
-          </PanelSectionRow>
-        )}
-        {puCheck && !puCheck.update_available && !updating && (
-          <PanelSectionRow>
-            <div style={{ ...M3.type.body, color: M3.color.onSurfaceVariant }}>
-              {puCheck.ok
-                ? `Plugin v${puCheck.current || PLUGIN_VERSION} — up to date.`
-                : `Update check failed${puCheck.error ? `: ${puCheck.error}` : ""}.`}
-            </div>
-          </PanelSectionRow>
-        )}
-        {updating && (
-          <PanelSectionRow>
-            <div style={{ width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
-              <ProgressBar nProgress={pu && pu.total > 0 ? Math.min(100, (100 * pu.downloaded) / pu.total) : 0} nTransitionSec={M3.motion.bar} />
-              <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant, marginTop: M3.space.xs, fontVariantNumeric: M3.tabular }}>
-                {pu && pu.total > 0
-                  ? `${fmtSize(pu.downloaded)} / ${fmtSize(pu.total)} (${Math.floor((100 * pu.downloaded) / pu.total)}%)${puRate ? ` — ${puRate}` : ""}`
-                  : "Starting update ..."}
-              </div>
-            </div>
-          </PanelSectionRow>
-        )}
-        {updating && pu?.running && (
-          <PanelSectionRow>
-            <MButton  variant="text" onClick={async () => {
-              try {
-                const r = await apiCancelPluginUpdate();
-                if (!r.ok) setOutput(r.error || "update not cancelled");
-              } catch (e) {
-                console.error("[helixsr] cancel_plugin_update failed", e);
-              }
-            }}>
-              Cancel update
-            </MButton>
-          </PanelSectionRow>
-        )}
-        {!updating && (
-          <PanelSectionRow>
-            <MButton  disabled={busy !== "" || checkingUpdate} variant="tonal" onClick={() => onCheckPluginUpdate(true)}>
-              {checkingUpdate ? "Checking ..." : puCheck ? "Check again" : "Check for updates"}
-            </MButton>
-          </PanelSectionRow>
-        )}
-        </>
-      </PanelSection>
-      {state?.plugin_version && (
-        <PanelSectionRow>
-          <div style={{ ...M3.type.caption, color: M3.color.onSurfaceVariant }}>plugin v{state.plugin_version}</div>
-        </PanelSectionRow>
+        </PanelSection>
       )}
     </div>
   );
-};
+}
 
 export default definePlugin(() => {
-  console.log("HelixSR initializing, this is called once on frontend startup")
+  console.log("HelixSR initializing");
 
   const listener = addEventListener<[ok: boolean, rc: number]>("helixsr_build_done", (ok, rc) => {
-    console.log("HelixSR build done:", ok, rc)
     if (!panelOpen) {
       toaster.toast({ title: ok ? "HelixSR build done" : "HelixSR build failed", body: `rc=${rc}` });
     }
   });
 
   return {
-    // The name shown in various decky menus
     name: "HelixSR Muse Plugin",
-    // The element displayed at the top of your plugin's menu
     titleView: <div className={staticClasses.Title}>HelixSR</div>,
-    // The content of your plugin's menu
     content: <Content />,
-    // The icon displayed in the plugin list
     icon: <MdMemory />,
-    // The function triggered when your plugin unloads
     onDismount() {
-      console.log("Unloading HelixSR")
+      console.log("Unloading HelixSR");
       removeEventListener("helixsr_build_done", listener);
     },
   };
