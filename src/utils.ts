@@ -50,6 +50,20 @@ export function shortRoute(route: string): string {
   return route;
 }
 
+/** The way an install action uses: the way the user picked, or the way the
+ * game already has when nothing is picked (an update keeps that way). */
+export function installWayFor(picked?: string | null, installed?: string | null): string {
+  const p = picked || "auto";
+  if (p !== "auto") return p;
+  return installed || "auto";
+}
+
+/** Whether the picked way is another one than the installed way: the install
+ * then switches the game (the bridge removes the other install first). */
+export function isWaySwitch(picked?: string | null, installed?: string | null): boolean {
+  return !!installed && !!picked && picked !== "auto" && picked !== installed;
+}
+
 export function cmpTags(a: string, b: string): number {
   // Numeric dotted comparison ignoring a leading "v": v1.9.0 > v1.8.1.
   const pa = a.replace(/^v/i, "").split(".").map((x) => parseInt(x, 10) || 0);

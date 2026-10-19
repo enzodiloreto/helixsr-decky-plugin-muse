@@ -9,6 +9,8 @@ import {
   cmpTags,
   fmtAge,
   fmtSize,
+  installWayFor,
+  isWaySwitch,
   parseBuildProgress,
   ROUTE_LABELS,
   ROUTE_SHORT,
@@ -82,5 +84,31 @@ describe("routes", () => {
       assert.ok(shortRoute(r).length > 0);
     }
     assert.equal(shortRoute("mystery"), "mystery");
+  });
+});
+
+describe("installWayFor", () => {
+  it("uses the way the user picked", () => {
+    assert.equal(installWayFor("scaler", null), "scaler");
+    assert.equal(installWayFor("fsr", "scaler"), "fsr");
+    assert.equal(installWayFor("fsr", "fsr"), "fsr");
+  });
+  it("keeps the installed way when nothing is picked", () => {
+    assert.equal(installWayFor("auto", "scaler"), "scaler");
+    assert.equal(installWayFor(null, "fsr"), "fsr");
+    assert.equal(installWayFor("auto", null), "auto");
+  });
+});
+
+describe("isWaySwitch", () => {
+  it("is true when the picked way is not the installed one", () => {
+    assert.equal(isWaySwitch("fsr", "scaler"), true);
+    assert.equal(isWaySwitch("scaler", "fsr"), true);
+  });
+  it("is false for the same way, for auto and for a game with no install", () => {
+    assert.equal(isWaySwitch("scaler", "scaler"), false);
+    assert.equal(isWaySwitch("auto", "scaler"), false);
+    assert.equal(isWaySwitch("fsr", null), false);
+    assert.equal(isWaySwitch(null, "scaler"), false);
   });
 });

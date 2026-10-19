@@ -73,12 +73,14 @@ import {
 } from "./services/api";
 import { PLUGIN_VERSION } from "./version";
 import {
+  ROUTE_SHORT,
   base,
   cmpTags,
   fmtAge,
   fmtSize,
+  installWayFor,
+  isWaySwitch,
   parseBuildProgress,
-  shortRoute,
 } from "./utils";
 
 // True while the panel is open; the plugin-scope build listener only
@@ -112,8 +114,22 @@ const SCALER_OPTIONS: Record<string, [string, string][] | null> = {
 
 const WAY_LABELS: Record<string, string> = {
   auto: "Recommended",
-  scaler: "HelixSR Scaler (pick DLSS in-game)",
-  fsr: "FSR drop-in (pick AMD FSR in-game)",
+  scaler: "HelixSR Scaler",
+  fsr: "FSR drop-in",
+};
+
+// What the player has to pick inside the game for each way.
+const WAY_HINTS: Record<string, string> = {
+  auto: "HelixSR picks the game's best way",
+  scaler: "Pick DLSS in-game (Insert for the menu)",
+  fsr: "Pick AMD FSR in-game",
+};
+
+// Short way names for buttons and chips (WAY_LABELS carries the in-game hint).
+const WAY_SHORT: Record<string, string> = {
+  auto: "Recommended",
+  scaler: "HelixSR Scaler",
+  fsr: "FSR drop-in",
 };
 
 function Content() {
@@ -172,6 +188,17 @@ function Content() {
     await fn();
   };
 
+  // Keep the way the user picked for a game: every install, repair and manual
+  // scan re-scans the libraries, and that must not throw the selection back
+  // to "Recommended" (the pick is what the install action uses).
+  const mergeWays = (list: HelixGame[]) => {
+    setWays((prev) => {
+      const next: Record<string, string> = {};
+      list.forEach((g) => { next[g.folder] = prev[g.folder] || "auto"; });
+      return next;
+    });
+  };
+
   const refreshState = async () => {
     try {
       const s = await apiGetState();
@@ -219,9 +246,7 @@ function Content() {
           if (cached.games.length) {
             setGames(cached.games);
             setGamesTag(cached.tag || "");
-            const wm: Record<string, string> = {};
-            cached.games.forEach((g) => { wm[g.folder] = "auto"; });
-            setWays(wm);
+            mergeWays(cached.games);
             if (!relsRes.error) {
               const tagNote = s.active_tag && cached.tag && cached.tag !== s.active_tag
                 ? ` (scanned with ${cached.tag})` : "";
@@ -316,9 +341,7 @@ function Content() {
             setGames(st.games);
             setGamesTag(st.tag || "");
             setVerify(null);
-            const wm: Record<string, string> = {};
-            st.games.forEach((g) => { wm[g.folder] = "auto"; });
-            setWays(wm);
+            mergeWays(st.games);
             setOutput(`Found ${st.games.length} compatible game(s) with ${st.tag}.`);
           } else if (st.cancelled) {
             setOutput("Scan cancelled.");
@@ -601,7 +624,9 @@ function Content() {
   const onInstall = async (folders: string[], way: string) => {
     if (!folders.length) return;
     const hasAc = folders.some((f) => (games.find((x) => x.folder === f)?.anticheat.length || 0) > 0);
-    await armOrRun(`install:${folders.join(",")}:${way}`, "Install HelixSR", async () => {
+    const switches = folders.some((f) => isWaySwitch(way, games.find((x) => x.folder === f)?.installed));
+    const label = switches ? `Switch to ${WAY_SHORT[way] || way}` : "Install HelixSR";
+    await armOrRun(`install:${folders.join(",")}:${way}`, label, async () => {
       if (hasAc && way !== "fsr") {
         setOutput("Anti-cheat game: confirming installs HelixSR Scaler for offline / single-player use only.");
       }
@@ -1050,13 +1075,32 @@ function Content() {
   const renderGame = (g: HelixGame) => {
     const way = ways[g.folder] || "auto";
     const wayChoices = ["auto", ...g.ways];
+    // What the install action uses: the picked way, or the way the game
+    // already has when nothing is picked (an update keeps that way).
+    const installWay = installWayFor(way, g.installed);
+    // The picked way is not the installed one -> the action switches it.
+    const switching = isWaySwitch(way, g.installed);
+    const installId = `install:${g.folder}:${installWay}`;
+    // The chip shows what the game gets: the installed one, the recommended
+    // one, or the picked one when it is another way than both.
+    const currentWay = g.installed || g.recommended || "";
+    const pending = way !== "auto" && way !== currentWay;
+    // Short state chip. It must stay short: a long chip squeezed the game's
+    // name out of the header row and wrote it vertically, one letter per line.
+    const chipText = pending
+      ? `→ ${WAY_SHORT[way] || way}`
+      : g.installed
+        ? `✓ ${ROUTE_SHORT[g.installed] || g.installed}${g.version ? ` ${g.version}` : ""}`
+        : (g.blocked
+            ? ROUTE_SHORT.blocked
+            : (ROUTE_SHORT[g.recommended || ""] || (g.supported ? "Recommended" : "Not supported")));
     return (
       <Card key={g.folder}>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: M3.space.sm }}>
-          <div style={{ fontWeight: 600, minWidth: 0, overflowWrap: "anywhere" }}>{g.name}</div>
-          {g.installed
-            ? <Chip tone="success">✓ {g.installed}{g.version ? ` ${g.version}` : ""}</Chip>
-            : <Chip tone="neutral">{g.blocked || shortRoute(g.recommended || "")}</Chip>}
+        {/* flexWrap + a flex basis on the name: the chip drops to its own line
+            instead of squeezing the name to zero width. */}
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: M3.space.sm }}>
+          <div style={{ flex: "1 1 40%", minWidth: 0, fontWeight: 600, overflowWrap: "break-word" }}>{g.name}</div>
+          <Chip tone={pending ? "warning" : g.installed ? "success" : "neutral"}>{chipText}</Chip>
         </div>
         <div style={{ ...M3.type.caption, opacity: 0.8, overflowWrap: "anywhere" }}>{g.folder}</div>
         <div style={M3.type.caption}>
@@ -1082,6 +1126,7 @@ function Content() {
             {wayChoices.map((w) => (
               <MButton key={w} variant={way === w ? "filled" : "tonal"}
                 disabled={busy !== "" || !g.supported}
+                description={WAY_HINTS[w]}
                 onClick={() => setWays({ ...ways, [g.folder]: w })}>
                 {WAY_LABELS[w] || w}
               </MButton>
@@ -1109,7 +1154,13 @@ function Content() {
             {g.installed && (
               <Fragment>
                 <MButton variant="tonal" disabled={busy !== ""}
-                  onClick={() => onInstall([g.folder], g.installed || "auto")}>Update</MButton>
+                  onClick={() => onInstall([g.folder], installWay)}>
+                  {confirm === installId
+                    ? "Tap again to confirm"
+                    : switching
+                      ? `Switch to ${WAY_SHORT[way] || way}`
+                      : "Update"}
+                </MButton>
                 <MButton variant="outlined" disabled={busy !== ""}
                   onClick={() => onUninstall([g.folder])}>
                   {confirm.startsWith(`uninstall:${g.folder}`) ? "Tap again to confirm" : "Remove"}

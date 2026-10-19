@@ -72,7 +72,9 @@ export function Chip(props: { tone?: M3Tone; children: ReactNode }) {
         maxWidth: "100%",
         ...M3.type.caption,
         fontWeight: 500,
-        whiteSpace: "nowrap",
+        // Not nowrap: a long chip wraps inside itself instead of pushing the
+        // row (and the text next to it) out of shape.
+        overflowWrap: "anywhere",
       }}
     >
       {children}
