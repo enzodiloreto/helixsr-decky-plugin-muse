@@ -5,6 +5,7 @@ import copy
 import json
 import re
 import shutil
+import signal
 import ssl
 import subprocess
 import sys
@@ -356,7 +357,7 @@ def _download_for_setup(url: str, dest: Path, sha: str, line, cancel) -> None:
     if _sha256_file(dest) != sha:
         dest.unlink(missing_ok=True)
         raise OSError(f"{dest.name}: checksum mismatch (not the expected file)")
-    line(f"[helixsr] {dest.name} downloaded and verified ({got >> 20} MB)")
+    line(f"[helixsr] {dest.name} downloaded and verified ({got >> 20} MB) — {_mem_line()}")
 
 
 def _g3_data_dir() -> Path:
@@ -464,6 +465,53 @@ def _mem_available_mb() -> int:
     except (OSError, ValueError, IndexError):
         pass
     return 0
+
+
+def _swap_free_mb() -> int:
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("SwapFree:"):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def _mem_line() -> str:
+    return f"mem {_mem_available_mb()} MB available, {_swap_free_mb()} MB swap free"
+
+
+BUILD_PID_FILE = "build.pid"
+
+
+def _kill_build_tree(pid: int) -> bool:
+    """SIGTERM a build's whole process group (python + its Wine/DXC workers).
+    Only when the pid still is the HelixSR setup (guards against pid reuse)."""
+    import signal
+    try:
+        cmd = open(f"/proc/{pid}/cmdline", "rb").read().replace(b"\0", b" ").decode(
+            "utf-8", errors="replace")
+        if "helixsr_setup" not in cmd and "helixsr-setup" not in cmd:
+            return False
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _reap_orphaned_build():
+    """Kill a build left running by a previous backend instance (plugin
+    reload/update): its wine workers keep compiling otherwise, eating the
+    memory the next build/download needs."""
+    pid_file = _helixsr_root() / BUILD_PID_FILE
+    try:
+        old = int(pid_file.read_text().strip())
+    except (OSError, ValueError):
+        return
+    if _kill_build_tree(old):
+        decky.logger.info(f"HelixSR killed orphaned build process {old}")
+    pid_file.unlink(missing_ok=True)
 
 
 def _compile_jobs_env() -> dict:
@@ -1568,6 +1616,8 @@ class Plugin:
         """Download + extract a release in a background thread; poll get_download_status()."""
         if self._dl["running"]:
             return {"ok": False, "error": "a download is already running"}
+        if self._build_thread and self._build_thread.is_alive():
+            return {"ok": False, "error": "a build is running — download after it finishes"}
         self._dl = _new_dl_state(tag)
         self._dl["running"] = True
         self._dl_stop.clear()
@@ -1584,25 +1634,37 @@ class Plugin:
     def _download_run(self, tag: str, zip_url: str):
         st = self._dl
         tmp: Path | None = None
+        # A small on-disk log of its own: after a Steam UI restart (e.g. an
+        # OOM from an unrelated memory hog), this is the record of how far
+        # the download got and what memory looked like while it ran.
+        dlog = _helixsr_root() / f"download-{tag.lstrip('v') or 'x'}.log"
         try:
             root = _helixsr_root()
             root.mkdir(parents=True, exist_ok=True)
             tmp = root / f".{tag}.zip"
             req = urllib.request.Request(zip_url, headers={"User-Agent": "helixsr-decky-plugin"})
-            with urllib.request.urlopen(req, timeout=120, context=_ssl_context()) as r:
-                try:
-                    st["total"] = int(r.headers.get("Content-Length") or 0)
-                except (TypeError, ValueError):
-                    st["total"] = 0
-                with open(tmp, "wb") as f:
-                    while True:
-                        if self._dl_stop.is_set():
-                            break
-                        chunk = r.read(1 << 20)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        st["downloaded"] += len(chunk)
+            with open(dlog, "w") as dl:
+                dl.write(f"[helixsr] download {tag} start: {zip_url} — {_mem_line()}\n")
+                last_q = 0
+                with urllib.request.urlopen(req, timeout=120, context=_ssl_context()) as r:
+                    try:
+                        st["total"] = int(r.headers.get("Content-Length") or 0)
+                    except (TypeError, ValueError):
+                        st["total"] = 0
+                    with open(tmp, "wb") as f:
+                        while True:
+                            if self._dl_stop.is_set():
+                                break
+                            chunk = r.read(1 << 20)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            st["downloaded"] += len(chunk)
+                            if st["total"]:
+                                q = (100 * st["downloaded"]) // st["total"] // 25
+                                if q > last_q:
+                                    last_q = q
+                                    dl.write(f"[helixsr] {q * 25}% — {_mem_line()}\n")
             if self._dl_stop.is_set():
                 tmp.unlink(missing_ok=True)
                 st["cancelled"] = True
@@ -1610,6 +1672,8 @@ class Plugin:
                 return
             if st["total"] and st["downloaded"] != st["total"]:
                 raise OSError(f"incomplete download: got {st['downloaded']} of {st['total']} bytes")
+            with open(dlog, "a") as dl:
+                dl.write(f"[helixsr] extracting — {_mem_line()}\n")
             with zipfile.ZipFile(tmp) as z:
                 top = _zip_top(z)
                 for info in z.infolist():
@@ -1632,9 +1696,16 @@ class Plugin:
                     decky.logger.debug(f"HelixSR {tag}: no {name} in this release")
             st["dir"] = top
             st["network_built"] = _network_built(d)
+            with open(dlog, "a") as dl:
+                dl.write(f"[helixsr] done ok — {_mem_line()}, network_built={st['network_built']}\n")
         except Exception as e:  # noqa: BLE001
             decky.logger.error(f"download {tag} failed: {e}")
             st["error"] = str(e)
+            try:
+                with open(dlog, "a") as dl:
+                    dl.write(f"[helixsr] failed: {e} — {_mem_line()}\n")
+            except OSError:
+                pass
             if tmp is not None:
                 try:
                     tmp.unlink(missing_ok=True)
@@ -3328,8 +3399,9 @@ class Plugin:
         serves HelixSR Scaler, not the drop-in this plugin installs.
         2.0+ releases run setup/helixsr_setup.py directly (their bash wrapper
         ends in a game-install step that --yes would answer into every game)."""
-        thread_alive = bool(self._build_thread and self._build_thread.is_alive())
-        if thread_alive:
+        if self._dl["running"] or self._sc["running"]:
+            return {"ok": False, "error": "a download is running — build after it finishes"}
+        if self._build_thread and self._build_thread.is_alive():
             return {"ok": False, "error": "build already running"}
         d = await self._active_dir()
         if d is None:
@@ -3395,6 +3467,7 @@ class Plugin:
             if not self._alive:
                 self._build_running = False
                 return
+            line(f"[helixsr] build start — {_mem_line()}")
             fixed = _repair_exec_bits(d)
             if fixed:
                 line(f"[helixsr] restored executable permission: {', '.join(fixed)}")
@@ -3603,7 +3676,8 @@ class Plugin:
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=open(log, "a"), stderr=subprocess.STDOUT,
                 env={**os.environ, **env},
-                cwd=str(d))
+                cwd=str(d),
+                start_new_session=True)   # own process group: cancel/unload kill the whole tree
         except Exception as e:  # noqa: BLE001
             self._build_log_line(log, f"[helixsr] could not start build: {type(e).__name__}: {e}")
             try:
@@ -3613,7 +3687,23 @@ class Plugin:
             self._build_running = False
             return
         self._build_proc = proc
+        try:
+            (_helixsr_root() / BUILD_PID_FILE).write_text(str(proc.pid))
+        except OSError:
+            pass
 
+        async def mem_watch():
+            """Evidence trail that survives a Steam UI restart: samples of
+            what memory looked like while the setup ran (the OOM story shows
+            up as available memory collapsing right before the crash)."""
+            while True:
+                await asyncio.sleep(30)
+                try:
+                    self._build_log_line(log, f"[helixsr] mem: {_mem_line()}")
+                except OSError:
+                    pass
+
+        mem_task = asyncio.create_task(mem_watch())
         try:
             try:
                 await asyncio.wait_for(proc.wait(), timeout=BUILD_TIMEOUT)
@@ -3673,6 +3763,11 @@ class Plugin:
             except Exception:  # noqa: BLE001 (e.g. unloading)
                 pass
         finally:
+            mem_task.cancel()
+            try:
+                (_helixsr_root() / BUILD_PID_FILE).unlink(missing_ok=True)
+            except OSError:
+                pass
             self._build_running = False
             if self._build_proc is proc:
                 self._build_proc = None
@@ -3705,7 +3800,10 @@ class Plugin:
         proc, self._build_proc = self._build_proc, None
         if proc is not None and proc.returncode is None:
             try:
-                proc.terminate()
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    proc.terminate()
             except ProcessLookupError:
                 pass
         self._build_cancel.set()
@@ -3741,6 +3839,7 @@ class Plugin:
         self._ops_lock = threading.Lock()
         self._build_proc = None
         self._build_cancel = threading.Event()
+        _reap_orphaned_build()   # a reload/update mid-build leaves wine workers behind
         decky.logger.info("HelixSR Muse Plugin loaded")
 
     # Function called first during the unload process, utilize this to handle your plugin being stopped, but not
@@ -3749,12 +3848,16 @@ class Plugin:
         decky.logger.info("HelixSR unloading")
         # Mark this instance dead so a DLSS download / pending spawn in
         # _build_run aborts instead of orphaning work after a reload, and
-        # terminate a running setup script for the same reason.
+        # terminate a running build (whole process group: the setup's
+        # Wine/DXC workers die with it) for the same reason.
         self._alive = False
         proc, self._build_proc = self._build_proc, None
         if proc is not None and proc.returncode is None:
             try:
-                proc.terminate()
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    proc.terminate()
             except ProcessLookupError:
                 pass
 

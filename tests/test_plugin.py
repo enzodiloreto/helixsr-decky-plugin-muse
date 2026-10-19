@@ -2587,6 +2587,33 @@ def uninstall(g):
                 self.assertTrue(r["ok"], r)
         asyncio.run(go())
 
+    def test_download_build_mutual_exclusion(self):
+        """Download and build never run together (both touch memory/IO-heavy
+        phases; the download's log records memory in case the UI dies)."""
+        d = self._version_dir(tag="9.9.9", network=False)
+        p = self._plugin(active="v9.9.9")
+
+        class _Alive:
+            @staticmethod
+            def is_alive():
+                return True
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            p._build_thread = _Alive()
+            r = await p.start_download("v9.9.9", "file:///x.zip")
+            self.assertFalse(r["ok"])
+            self.assertIn("build is running", r["error"])
+            r = await p.start_build()
+            self.assertFalse(r["ok"])
+            self.assertIn("build already running", r["error"])
+            p._build_thread = None
+            p._dl["running"] = True
+            r = await p.start_build()
+            self.assertFalse(r["ok"])
+            self.assertIn("download is running", r["error"])
+        asyncio.run(go())
+
     def test_generation_dispatch(self):
         helixref = main.helixref
         legacy = self._version_dir(tag="9.9.8")
