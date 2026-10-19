@@ -112,6 +112,34 @@ def _dir_for_tag(tag: str) -> Path | None:
     return None
 
 
+STATUS_TTL = 300
+_status_cache: dict = {}
+
+
+def _status_of(d: Path) -> dict:
+    """The release's own status (network, frame generation, version), cached.
+    A probe runs the release's --status, which hashes NVIDIA's DLLs and reads
+    the frame-generation archives: once per build, not once per panel refresh
+    or build-log poll. Call _forget_status after anything that changes it."""
+    key = str(d)
+    hit = _status_cache.get(key)
+    if hit and time.monotonic() - hit[0] < STATUS_TTL:
+        return hit[1]
+    try:
+        st = bridge.status(d)
+    except bridge.BridgeError as e:
+        return {"error": str(e)}
+    _status_cache[key] = (time.monotonic(), st)
+    return st
+
+
+def _forget_status(d: Path | None = None):
+    if d is None:
+        _status_cache.clear()
+    else:
+        _status_cache.pop(str(d), None)
+
+
 def _zip_top(z: zipfile.ZipFile) -> str:
     tops = set()
     for info in z.infolist():
@@ -428,10 +456,7 @@ class Plugin:
         return await asyncio.to_thread(self._active_dir)
 
     def _version_info(self, d: Path) -> dict:
-        try:
-            st = bridge.status(d)
-        except bridge.BridgeError:
-            st = {}
+        st = _status_of(d)
         pkg, sver = bridge.bundled_scaler_version(d)
         return {"tag": _tag_of_dir(d), "dir": d.name,
                 "size_mb": round(_dir_size_cached(d) / 1e6, 1),
@@ -588,10 +613,8 @@ class Plugin:
                 raise OSError(f"not a HelixSR 2.0+ release layout (no setup/helixsr_bridge.py or "
                               f"HelixSR-fsrfg DLL in {top})")
             _repair_exec_bits(d)
-            try:
-                st["network_built"] = bool(bridge.status(d).get("network_ready"))
-            except bridge.BridgeError:
-                st["network_built"] = False
+            _forget_status(d)
+            st["network_built"] = bool(_status_of(d).get("network_ready"))
             st["dir"] = top
             with open(dlog, "a") as dl:
                 dl.write(f"[helixsr] done ok — {_mem_line()}, network_built={st['network_built']}\n")
@@ -640,6 +663,7 @@ class Plugin:
         try:
             size = _dir_size(d)
             shutil.rmtree(d, ignore_errors=True)
+            _forget_status(d)
             return {"ok": True, "freed_mb": round(size / 1e6, 1)}
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
@@ -653,6 +677,7 @@ class Plugin:
                 continue
             freed += _dir_size(d)
             shutil.rmtree(d, ignore_errors=True)
+            _forget_status(d)
             removed.append(_tag_of_dir(d))
         if active is None and removed:
             self.settings.setSetting("active_tag", "")
@@ -682,6 +707,7 @@ class Plugin:
         for v in _version_dirs():
             versions_removed.append(_tag_of_dir(v))
             shutil.rmtree(v, ignore_errors=True)
+        _forget_status()
         self.settings.setSetting("active_tag", "")
         self.settings.commit()
         return {"ok": True, "games_uninstalled": uninstalled, "games_failed": failed,
@@ -1062,12 +1088,9 @@ class Plugin:
         network_built, fg_built = False, False
         d = await asyncio.to_thread(self._active_dir)
         if d is not None:
-            try:
-                st = await asyncio.to_thread(bridge.status, d)
-                network_built = bool(st.get("network_ready"))
-                fg_built = bool(st.get("fg_ready"))
-            except bridge.BridgeError:
-                pass
+            st = await asyncio.to_thread(_status_of, d)
+            network_built = bool(st.get("network_ready"))
+            fg_built = bool(st.get("fg_ready"))
         return {"running": running, "log": text,
                 "log_path": str(log) if log else "",
                 "network_built": network_built, "fg_built": fg_built}
@@ -1161,6 +1184,7 @@ class Plugin:
             header = f"HelixSR {bridge.dll_version(bridge.release_dll(d))} build"
             asyncio.run(self._spawn_and_watch(d, log, header, args))
         finally:
+            _forget_status(d)
             try:
                 (_helixsr_root() / BUILD_PID_FILE).unlink(missing_ok=True)
             except OSError:
@@ -1224,6 +1248,7 @@ class Plugin:
                         pass
                     await proc.wait()
             rc = proc.returncode
+            _forget_status(d)
             # Exit 3 = the upscaler built, frame generation did not (retry it
             # with an FG build); still a usable result.
             ok = rc in (0, 3)
@@ -1683,12 +1708,10 @@ class Plugin:
         else:
             bad = []
             for v in versions:
-                try:
-                    st = bridge.status(v)
-                except bridge.BridgeError as e:
-                    bad.append(f"{_tag_of_dir(v)}: {e}")
-                    continue
-                if not st.get("network_ready"):
+                st = _status_of(v)
+                if "error" in st:
+                    bad.append(f"{_tag_of_dir(v)}: {st['error']}")
+                elif not st.get("network_ready"):
                     bad.append(f"{_tag_of_dir(v)}: network not built")
             checks.append({"name": "Versions", "ok": not bad,
                            "detail": f"{len(versions)} downloaded, all healthy" if not bad

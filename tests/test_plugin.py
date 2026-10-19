@@ -223,6 +223,7 @@ class PluginCase(unittest.TestCase):
         os.environ["DECKY_PLUGIN_DIR"] = str(REPO)
         os.environ.pop("HELIXSR_SETUP_JOBS", None)
         emitted.clear()
+        main._status_cache.clear()
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.addCleanup(self._restore_env)
 
@@ -345,6 +346,53 @@ class PluginCase(unittest.TestCase):
     def test_bridge_missing_script(self):
         with self.assertRaises(bridge.BridgeError):
             bridge.run(self.tmp, "status")
+
+    def test_bridge_never_launches_the_running_binary(self):
+        # Inside Decky sys.executable is the frozen PluginLoader binary; running
+        # it with a script argument starts a second loader, whose startup
+        # restarts Steam's web UI. The bridge must run a real Python instead.
+        d = self._release_dir()
+        launched = self.tmp / "launched"
+        fake = self.tmp / "PluginLoader"
+        fake.write_text(f'#!/bin/sh\necho "$@" >> {launched}\nexit 1\n')
+        fake.chmod(0o755)
+        with mock.patch.object(sys, "executable", str(fake)):
+            out = bridge.run(d, "status")
+        self.assertTrue(out["ok"])
+        self.assertFalse(launched.exists(), "bridge launched sys.executable")
+
+    def test_plugin_code_never_uses_sys_executable(self):
+        import ast
+        for rel in ("main.py", "py_modules/bridge.py"):
+            tree = ast.parse((REPO / rel).read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Attribute) and node.attr == "executable"
+                        and isinstance(node.value, ast.Name) and node.value.id == "sys"):
+                    self.fail(f"{rel}:{node.lineno} uses sys.executable")
+                if (isinstance(node, ast.ImportFrom) and node.module == "sys"
+                        and any(a.name == "executable" for a in node.names)):
+                    self.fail(f"{rel}:{node.lineno} imports sys.executable")
+
+    def test_status_probed_once_across_refreshes(self):
+        self._release_dir(tag="2.0.0")
+        p = self._plugin(active="v2.0.0")
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            with mock.patch.object(bridge, "status", wraps=bridge.status) as probe:
+                await p.get_state()
+                await p.get_state()
+            self.assertEqual(probe.call_count, 1)
+        asyncio.run(go())
+
+    def test_status_error_is_reported_and_not_cached(self):
+        d = self._release_dir(tag="2.0.0")
+        bridge_py = d / "setup" / "helixsr_bridge.py"
+        good = bridge_py.read_text()
+        bridge_py.write_text("print('not json')\n")
+        self.assertIn("error", main._status_of(d))
+        bridge_py.write_text(good)
+        self.assertEqual(main._status_of(d).get("version"), "9.9.9")
 
     def test_dll_version_stamp(self):
         d = self._release_dir(tag="2.0.0")

@@ -10,8 +10,8 @@ documented interface.
 import json
 import os
 import re
+import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 BRIDGE_REL = Path("setup/helixsr_bridge.py")
@@ -21,6 +21,25 @@ DLL_REL = Path("HelixSR-fsrfg/amd_fidelityfx_dx12.dll")
 
 class BridgeError(Exception):
     """The bridge refused or could not answer (message is user-facing)."""
+
+
+_python = None
+
+
+def python_path() -> str:
+    """A Python 3 interpreter for the bridge. Never the running one: inside
+    Decky that is the frozen PluginLoader binary, and running it with a script
+    argument starts a second Decky loader whose startup restarts Steam's web UI
+    (decky_loader/main.py: inject_javascript -> restart_webhelper)."""
+    global _python
+    if _python is None:
+        for cand in (shutil.which("python3"), "/usr/bin/python3"):
+            if cand and os.access(cand, os.X_OK):
+                _python = cand
+                break
+        else:
+            raise BridgeError("no Python 3 found: HelixSR's bridge needs one (install python3)")
+    return _python
 
 
 def script_of(release_dir) -> Path:
@@ -46,7 +65,7 @@ def run(release_dir, command: str, args: dict | None = None, timeout: int = 300)
     script = script_of(release_dir)
     if not script.is_file():
         raise BridgeError(f"not a HelixSR 2.0+ release (no {BRIDGE_REL}): {release_dir}")
-    argv = [sys.executable, "-I", str(script), str(Path(release_dir).resolve()), command]
+    argv = [python_path(), "-I", str(script), str(Path(release_dir).resolve()), command]
     for key, value in (args or {}).items():
         if value is None:
             continue
