@@ -751,6 +751,10 @@ class Plugin:
     async def start_plugin_update(self) -> dict:
         if self._pu["running"]:
             return {"ok": False, "error": "a plugin update is already running"}
+        if self._dl["running"]:
+            return {"ok": False, "error": "a download is running — update after it finishes"}
+        if self._build_lock.locked():
+            return {"ok": False, "error": "a build is running — update after it finishes"}
         info = await asyncio.to_thread(self._check_plugin_update_sync, True)
         if not info.get("ok"):
             return {"ok": False, "error": info.get("error", "update check failed")}
@@ -807,6 +811,8 @@ class Plugin:
             st["version"] = new_version
             st["mode"] = "in-place"
             self._update_pending = new_version
+        except PermissionError as e:
+            st["error"] = _update_error(e)
         except Exception as e:  # noqa: BLE001
             st["error"] = f"{type(e).__name__}: {e}"
         else:
@@ -1783,7 +1789,65 @@ def _plugin_version() -> str:
     return "?"
 
 
+def _update_error(e: Exception) -> str:
+    """Human-readable reason for a failed plugin self-update."""
+    if isinstance(e, PermissionError):
+        # The plugin folder is not writable by this user: update it through
+        # Decky's installer (the panel's update button does that) or install
+        # the zip from the developer settings.
+        return (f"permission denied: {e.strerror or 'EACCES'} — the plugin folder "
+                "is not writable by this user. Use the panel's update button (it "
+                "installs through Decky) or install the release zip from Decky's "
+                "developer settings.")
+    return f"{type(e).__name__}: {e}"
+
+
+def _replace_tree(src: Path, dst: Path) -> None:
+    """Replace dst's content with src's, file by file.
+
+    Only renames inside the target folder are used (os.replace of a file in
+    the same directory), so the plugin folder itself must be writable — it
+    is: Decky chowns it to the host user. The parent folder is NOT touched
+    (Decky owns plugins/ as root, so renaming the plugin folder fails with
+    EACCES).
+    """
+    new_files: list[str] = []
+    tops: set[str] = set()
+    for p in sorted(src.rglob("*")):
+        rel = p.relative_to(src)
+        tops.add(rel.parts[0])
+        if p.is_dir():
+            (dst / rel).mkdir(parents=True, exist_ok=True)
+        else:
+            new_files.append(str(rel))
+    # main.py and dist/index.js last: the loader reads exactly those two.
+    for rel in sorted(new_files, key=lambda r: (r in ("main.py", "dist/index.js"), r)):
+        target = dst / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".new")
+        shutil.copy2(src / rel, tmp)
+        os.replace(tmp, target)
+    # Drop files the new version does not have. Only inside the entries the
+    # new version ships: anything else in the folder (pycache, assets) is
+    # none of the update's business.
+    for p in sorted(dst.rglob("*"), reverse=True):
+        rel = p.relative_to(dst)
+        if rel.parts[0] not in tops:
+            continue
+        if p.is_file() and str(rel) not in new_files:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
 def _install_plugin_zip(zip_path: Path, plug: Path, current: str) -> str:
+    """Install the plugin zip into the running plugin folder.
+
+    The folder is patched in place (file by file): Decky owns the parent
+    (plugins/) as root, so the plugin folder cannot be renamed, but Decky
+    chowns the folder itself to the user.
+    """
     plug = plug.resolve()
     stage = plug / ".update-stage"
     shutil.rmtree(stage, ignore_errors=True)
@@ -1808,19 +1872,7 @@ def _install_plugin_zip(zip_path: Path, plug: Path, current: str) -> str:
             raise OSError(f"zip version {new_version or '?'} is not newer than {current}")
         if not (stage / top / "dist" / "index.js").is_file() or not (stage / top / "main.py").is_file():
             raise OSError("zip is missing dist/index.js or main.py")
-        bak = plug.parent / (plug.name + ".update-bak")
-        shutil.rmtree(bak, ignore_errors=True)
-        os.rename(plug, bak)
-        staged_top = bak / stage.name / top
-        try:
-            os.rename(staged_top, plug)
-        except Exception:
-            try:
-                os.rename(bak, plug)
-            except OSError:
-                pass
-            raise
-        shutil.rmtree(bak, ignore_errors=True)
+        _replace_tree(stage / top, plug)
         return new_version
     finally:
         shutil.rmtree(stage, ignore_errors=True)

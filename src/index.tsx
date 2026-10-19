@@ -895,7 +895,85 @@ function Content() {
     });
   };
 
+  // Decky's privileged installer bridge (same JS realm Decky itself runs in).
+  // Null when unreachable (e.g. the desktop port): the backend's in-place
+  // swap is then the fallback.
+  const getDeckyBridge = (): { call: (route: string, ...args: any[]) => Promise<any> } | null => {
+    const b = (window as any).DeckyBackend;
+    return b && typeof b.call === "function" ? b : null;
+  };
+
+  // Update through Decky's own installer: native consent popup, privileged
+  // install (works for the root-owned plugins/ folder Decky owns), hot reload
+  // afterwards. Throws only before the popup appears (the caller falls back to
+  // the backend flow); once triggered it owns the flow to success or timeout.
+  const updateViaDecky = async (
+    bridge: { call: (route: string, ...args: any[]) => Promise<any> },
+    tag: string,
+    url: string,
+  ) => {
+    // A legacy entry would install side-by-side instead of replacing: refuse
+    // (no silent auto-uninstall) and point at the old entry.
+    try {
+      const plugins = await bridge.call("loader/get_plugins");
+      const names = (Array.isArray(plugins) ? plugins : []).map((p: any) => p && p.name).filter(Boolean);
+      if (names.includes("HelixSR-Decky-Plugin-Muse")) {
+        setOutput("Old 'HelixSR-Decky-Plugin-Muse' entry still installed: uninstall it first (Decky menu), then update.");
+        toaster.toast({ title: "Update blocked", body: "uninstall the old entry first" });
+        return;
+      }
+    } catch { /* get_plugins is optional: carry on */ }
+    // install_type 2 = UPDATE: Decky shows its install popup for confirmation.
+    await bridge.call("utilities/install_plugin", url, "HelixSR Muse Plugin", tag, "", 2);
+    setUpdating(true);
+    setPu(null);
+    setPuRate("");
+    puPrev.current = null;
+    setOutput(`Confirm Decky's install popup for v${tag} ...`);
+    const deadline = Date.now() + 10 * 60 * 1000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 3000));
+      let s: HelixState | null = null;
+      try {
+        s = await Promise.race([
+          apiGetState(),
+          new Promise<null>((r) => setTimeout(() => r(null), 8000)),
+        ]);
+      } catch { /* backend mid-replacement: keep waiting */ }
+      if (s && cmpTags(s.plugin_version, tag) === 0) {
+        setUpdating(false);
+        setOutput(`Updated to v${tag} — reopen this panel for the new UI.`);
+        toaster.toast({ title: `Plugin updated to v${tag}`, body: "Reopen this panel" });
+        refreshState();
+        onCheckPluginUpdate(false);
+        return;
+      }
+    }
+    setUpdating(false);
+    setOutput("Still on the old version — confirm Decky's popup, or retry the update.");
+    toaster.toast({ title: "Update not detected", body: "confirm the popup or retry" });
+  };
+
   const onStartPluginUpdate = async () => {
+    // An update replaces the plugin folder: never in the middle of a
+    // download or a build.
+    if (downloading || building || scanning) {
+      setOutput("Finish the running download, build or scan first, then update.");
+      toaster.toast({ title: "Update not started", body: "another task is running" });
+      return;
+    }
+    // Decky's installer first: it installs with elevated rights. The
+    // backend's own in-place swap cannot rename the plugin folder (Decky
+    // owns plugins/ as root), so on a Deck it fails with EACCES.
+    const bridge = getDeckyBridge();
+    if (bridge && updateInfo?.latest && updateInfo?.url) {
+      try {
+        await updateViaDecky(bridge, updateInfo.latest, updateInfo.url);
+        return;
+      } catch (e) {
+        console.error("[helixsr] decky install unavailable, falling back", e);
+      }
+    }
     setBusy("update");
     try {
       const r = await apiStartPluginUpdate();

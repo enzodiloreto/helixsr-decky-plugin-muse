@@ -830,6 +830,93 @@ class PluginCase(unittest.TestCase):
 
     # --- self-update / health / misc ---------------------------------------------------
 
+    def _installed_plugin(self, version="0.6.2"):
+        """A plugin folder as Decky installs it: inside plugins/."""
+        plug = self.tmp / "plugins" / "helixsr-muse-plugin"
+        (plug / "dist").mkdir(parents=True)
+        (plug / "py_modules").mkdir()
+        (plug / "plugin.json").write_text(json.dumps({"name": "HelixSR Muse Plugin"}))
+        (plug / "package.json").write_text(
+            json.dumps({"name": "helixsr-muse-plugin", "version": version}))
+        (plug / "main.py").write_text("# old backend\n")
+        (plug / "dist" / "index.js").write_text("// old bundle\n")
+        return plug
+
+    def _plugin_zip(self, version="0.6.3"):
+        """A release zip shaped like the plugin's own zip."""
+        src = self.tmp / "pluginsrc"
+        (src / "dist").mkdir(parents=True)
+        (src / "py_modules").mkdir()
+        (src / "plugin.json").write_text(json.dumps({"name": "HelixSR Muse Plugin"}))
+        (src / "package.json").write_text(
+            json.dumps({"name": "helixsr-muse-plugin", "version": version}))
+        (src / "main.py").write_text("# new backend\n")
+        (src / "dist" / "index.js").write_text("// new bundle\n")
+        (src / "py_modules" / "bridge.py").write_text("# bridge\n")
+        zp = self.tmp / "plugin.zip"
+        with zipfile.ZipFile(zp, "w") as z:
+            for f in sorted(src.rglob("*")):
+                if f.is_file():
+                    z.write(f, f"helixsr-muse-plugin/{f.relative_to(src)}")
+        return zp
+
+    def test_update_patches_files_when_parent_is_read_only(self):
+        """Decky owns plugins/ as root: the folder itself must be patched in
+        place, renaming it fails with EACCES."""
+        plug = self._installed_plugin()
+        zp = self._plugin_zip("0.6.3")
+        os.chmod(plug.parent, 0o555)
+        self.addCleanup(os.chmod, plug.parent, 0o755)
+        new = main._install_plugin_zip(zp, plug, "0.6.2")
+        self.assertEqual(new, "0.6.3")
+        self.assertEqual((plug / "main.py").read_text(), "# new backend\n")
+        self.assertEqual((plug / "dist" / "index.js").read_text(), "// new bundle\n")
+        self.assertEqual((plug / "py_modules" / "bridge.py").read_text(), "# bridge\n")
+        self.assertFalse((plug / ".update-stage").exists())
+        self.assertEqual(json.loads((plug / "package.json").read_text())["version"], "0.6.3")
+
+    def test_update_removes_stale_files(self):
+        plug = self._installed_plugin()
+        (plug / "dist" / "obsolete.js").write_text("old\n")
+        (plug / "assets").mkdir()
+        (plug / "assets" / "banner.png").write_bytes(b"png")
+        zp = self._plugin_zip("0.6.3")
+        main._install_plugin_zip(zp, plug, "0.6.2")
+        self.assertFalse((plug / "dist" / "obsolete.js").exists())
+        # Entries the version does not ship are none of the update's business.
+        self.assertTrue((plug / "assets" / "banner.png").exists())
+
+    def test_update_refuses_older_zip(self):
+        plug = self._installed_plugin()
+        zp = self._plugin_zip("0.6.1")
+        with self.assertRaises(OSError):
+            main._install_plugin_zip(zp, plug, "0.6.2")
+        self.assertEqual((plug / "main.py").read_text(), "# old backend\n")
+
+    def test_update_permission_error_is_actionable(self):
+        msg = main._update_error(PermissionError(13, "Permission denied"))
+        self.assertIn("permission denied", msg.lower())
+        self.assertIn("Decky", msg)
+
+    def test_plugin_update_refuses_while_a_task_runs(self):
+        p = self._plugin()
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            p._dl["running"] = True
+            r = await p.start_plugin_update()
+            self.assertFalse(r["ok"])
+            self.assertIn("download", r["error"])
+            p._dl["running"] = False
+            p._build_lock.acquire()
+            try:
+                r = await p.start_plugin_update()
+            finally:
+                p._build_lock.release()
+            self.assertFalse(r["ok"])
+            self.assertIn("build", r["error"])
+        asyncio.run(go())
+
     def test_check_plugin_update_newer(self):
         p = self._plugin()
 
