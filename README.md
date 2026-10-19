@@ -68,8 +68,12 @@ release's `--yes` wrapper, which would also install the game behind your back.
 
 **Scan games** walks your Steam libraries (plus any folder you add by hand) with the
 release's own scanner, in the background: it can be cancelled, and the last scan is
-remembered and reused. Each game card shows its state, the inputs it was detected
-with, anti-cheat markers and the Steam launch options, and offers:
+remembered and reused. Only the games HelixSR can actually use are listed — a game
+with FSR 3.1 (the drop-in) or a detected upscaler (DLSS/XeSS/FSR 2, the Scaler).
+Games with no upscaler to take over are left out; a game that already has HelixSR
+in it always stays listed, so it can be updated or removed. Each game card shows
+its state, the inputs it was detected with, anti-cheat markers and the Steam launch
+options, and offers:
 
 - the **way** picker — **Recommended** (HelixSR picks the game's best way),
   **HelixSR Scaler** (pick DLSS in the game's graphics menu; Insert opens its
@@ -79,8 +83,9 @@ with, anti-cheat markers and the Steam launch options, and offers:
 - **Install**, **Update**, **Switch to …**, **Remove**, **Repair** (a clean
   re-install of the same way), **Roll back** (restore the previous install),
   **FG on/off** (Scaler games on an FG build), **Settings** and **Log**.
-- Anti-cheat games warn before a Scaler install (two-tap): that install is for
-  offline / single-player use only.
+- **Anti-cheat games get the FSR drop-in only.** The Scaler is not used there (it
+  can get the account banned in online play), so an anti-cheat game without FSR 3.1
+  is not listed at all.
 - **Verify installs** checks the install markers *and* the files, so a Steam update
   that replaced the drop-ins is detected; affected games get a one-tap **Repair**.
 - **Settings** edits the game's own ini inline (the editor follows the kind of

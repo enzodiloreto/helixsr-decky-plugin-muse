@@ -15,6 +15,7 @@ import {
   ROUTE_LABELS,
   ROUTE_SHORT,
   shortRoute,
+  waysFor,
 } from "../.uitest/utils.js";
 
 describe("fmtSize", () => {
@@ -97,6 +98,25 @@ describe("installWayFor", () => {
     assert.equal(installWayFor("auto", "scaler"), "scaler");
     assert.equal(installWayFor(null, "fsr"), "fsr");
     assert.equal(installWayFor("auto", null), "auto");
+  });
+  it("never picks a way the game does not allow", () => {
+    // an anti-cheat game: only the FSR drop-in
+    assert.equal(installWayFor("scaler", null, ["fsr"]), "auto");
+    assert.equal(installWayFor("auto", "scaler", ["fsr"]), "auto");
+    assert.equal(installWayFor("fsr", "scaler", ["fsr"]), "fsr");
+  });
+});
+
+describe("waysFor", () => {
+  it("offers both ways for a normal game", () => {
+    assert.deepEqual(waysFor({ anticheat: [], ways: ["scaler", "fsr"] }), ["scaler", "fsr"]);
+    assert.deepEqual(waysFor({ anticheat: [], ways: ["scaler"] }), ["scaler"]);
+  });
+  it("offers only the FSR drop-in in an anti-cheat game", () => {
+    assert.deepEqual(waysFor({ anticheat: ["EasyAntiCheat"], ways: ["scaler", "fsr"] }), ["fsr"]);
+  });
+  it("offers nothing in an anti-cheat game without FSR 3.1", () => {
+    assert.deepEqual(waysFor({ anticheat: ["BattlEye"], ways: ["scaler"] }), []);
   });
 });
 

@@ -59,6 +59,16 @@ subprocess; upstream files are never imported.
   release's own scanner. Backgrounded, cancellable, per-folder failure isolation.
   The last scan is cached for 5 minutes and reused across panel opens, with the
   scan age and the scanned version shown.
+- **Only the games HelixSR can use are listed**: the release's scan returns every
+  folder with a game .exe (the Scaler can take over an upscaler built into the
+  exe, which the scan cannot see), the plugin keeps the ones with something to
+  take over — FSR 3.1 (the drop-in) or a detected upscaler (DLSS/XeSS/FSR 2, the
+  Scaler). A game with an install always stays listed (it must stay manageable).
+- **An anti-cheat game gets the FSR drop-in only**: the Scaler is not used there
+  (it can get the account banned in online play), so an anti-cheat game without
+  FSR 3.1 is not listed, and the way picker of an anti-cheat game offers only the
+  FSR drop-in. The backend refuses a Scaler install in a game the scan flags as
+  anti-cheat.
 - Each game card shows: name, state chip (installed way + version, the
   recommended way, or the pending switch), folder, detected inputs, anti-cheat
   markers, FG state (Scaler games), Steam launch options and whether a previous
@@ -67,12 +77,13 @@ subprocess; upstream files are never imported.
   **HelixSR Scaler** (pick DLSS in the game's graphics menu; Insert opens its
   menu) or **FSR drop-in** (pick AMD FSR in the game). The pick survives
   re-scans; the install action uses the picked way, and switching ways removes
-  the other install first (the button reads *Switch to …*).
+  the other install first (the button reads *Switch to …*). An anti-cheat game
+  only offers the FSR drop-in.
 - **Install**, **Update**, **Switch to …**, **Remove**, **Repair** (remove +
   reinstall of the same way), **Roll back** (restore the previous install),
-  **FG on/off** (Scaler games on an FG build), **Settings**, **Log**. Anti-cheat
-  games get a two-tap warning: a Scaler install there is for offline /
-  single-player use only.
+  **FG on/off** (Scaler games on an FG build), **Settings**, **Log**. An
+  anti-cheat game has no Scaler: it gets the FSR drop-in (or is not listed at
+  all when it has no FSR 3.1).
 - **Verify installs** checks the install markers *and* the files (loader, HelixSR
   DLL, scaler ini for Scaler; marker + log/backup for the drop-in), so a Steam
   update that replaced the drop-ins is detected and can be repaired.
@@ -106,8 +117,8 @@ subprocess; upstream files are never imported.
 
 - Every failure surfaces its actual reason here (network, TLS, rate limit, bridge
   error, missing file) instead of failing silently.
-- Destructive actions (remove, repair, factory reset, install into an anti-cheat
-  game) use two-tap confirm-arming with a 15 s expiry.
+- Destructive actions (remove, repair, factory reset) use two-tap confirm-arming
+  with a 15 s expiry.
 
 ## Panel behaviour
 

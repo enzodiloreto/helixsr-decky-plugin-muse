@@ -305,6 +305,83 @@ class PluginCase(unittest.TestCase):
         Path(folder).mkdir(parents=True, exist_ok=True)
         return g
 
+    def test_scan_lists_only_compatible_games(self):
+        """The release's scan lists every game with an .exe; only the games
+        HelixSR can use are listed."""
+        d = self._release_dir()
+        fsr = self._game(str(self.tmp / "games" / "FSR"), name="FSR",
+                         ways=["scaler", "fsr"], recommended="scaler")
+        dlss = self._game(str(self.tmp / "games" / "DLSS"), name="DLSS",
+                          ways=["scaler"], recommended="scaler")
+        # no upscaler file at all: nothing for HelixSR to take over
+        plain = self._game(str(self.tmp / "games" / "Plain"), name="Plain",
+                           ways=["scaler"], recommended="scaler",
+                           inputs=[], inputs_found=False)
+        # anti-cheat without FSR 3.1: only the Scaler could work -> not listed
+        ac = self._game(str(self.tmp / "games" / "AC"), name="AC",
+                        ways=["scaler"], recommended=None,
+                        blocked="anti-cheat", anticheat=["EasyAntiCheat"])
+        # anti-cheat with FSR 3.1: the drop-in is fine
+        ac_fsr = self._game(str(self.tmp / "games" / "ACFSR"), name="ACFSR",
+                            ways=["scaler", "fsr"], recommended="fsr",
+                            anticheat=["EasyAntiCheat"])
+        (d / ".stub-games.json").write_text(
+            json.dumps([fsr, dlss, plain, ac, ac_fsr]))
+        p = self._plugin(active="v2.0.0")
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            self.assertEqual(await p.start_scan(), {"ok": True})
+            st = await self._wait_done(p.get_scan_status)
+            self.assertTrue(st["ok"], st["error"])
+            names = [g["name"] for g in st["games"]]
+            self.assertEqual(names, ["FSR", "DLSS", "ACFSR"])
+            self.assertEqual([g["index"] for g in st["games"]], [1, 2, 3])
+            cached = await p.get_last_scan()
+            self.assertEqual([g["name"] for g in cached["games"]], ["FSR", "DLSS", "ACFSR"])
+        asyncio.run(go())
+
+    def test_scan_keeps_games_with_an_install(self):
+        d = self._release_dir()
+        g1 = self._game(str(self.tmp / "games" / "Old"), name="Old",
+                        ways=["scaler"], recommended="scaler",
+                        inputs=[], inputs_found=False)
+        (d / ".stub-games.json").write_text(json.dumps([g1]))
+        # the stub reports the install from its own state
+        (d / ".stub-state.json").write_text(json.dumps(
+            {"installs": {g1["folder"]: {"way": "scaler", "version": "9.9.9"}},
+             "settings": {}}))
+        p = self._plugin(active="v2.0.0")
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            await p.start_scan()
+            st = await self._wait_done(p.get_scan_status)
+            self.assertEqual([g["name"] for g in st["games"]], ["Old"])
+        asyncio.run(go())
+
+    def test_install_refuses_scaler_in_anticheat_game(self):
+        d = self._release_dir()
+        g1 = self._game(str(self.tmp / "games" / "AC"), name="AC",
+                        ways=["scaler", "fsr"], recommended="fsr",
+                        anticheat=["EasyAntiCheat"])
+        (d / ".stub-games.json").write_text(json.dumps([g1]))
+        p = self._plugin(active="v2.0.0")
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            # the scan knows the game's anti-cheat
+            await p.start_scan()
+            await self._wait_done(p.get_scan_status)
+            r = await p.install_games([{"folder": g1["folder"], "way": "scaler"}])
+            self.assertFalse(r["ok"])
+            self.assertIn("anti-cheat", r["results"][0]["detail"])
+            # the FSR drop-in is fine
+            r = await p.install_games([{"folder": g1["folder"], "way": "fsr"}])
+            self.assertTrue(r["ok"], r)
+            self.assertEqual(r["results"][0]["installed"], "fsr")
+        asyncio.run(go())
+
     def _release_zip(self, tag="2.0.0"):
         src = self.tmp / "src" / f"HelixSR-{tag}"
         src.mkdir(parents=True)

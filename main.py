@@ -1332,7 +1332,7 @@ class Plugin:
 
     def _scan_games_run(self, d: Path, extra: list) -> list:
         out = bridge.games(d, extra)
-        games = out.get("games", [])
+        games = [g for g in out.get("games", []) if _game_compatible(g)]
         for i, g in enumerate(games, 1):
             g["index"] = i
         return games
@@ -1375,6 +1375,13 @@ class Plugin:
         pkg, sver = await asyncio.to_thread(bridge.bundled_scaler_version, d)
         return await asyncio.to_thread(self._install_run, d, items, pkg, sver)
 
+    def _anticheat_of(self, folder: str) -> list:
+        """The anti-cheat of a game, from the last scan (empty when unknown)."""
+        for g in self._scan_cache.get("games") or []:
+            if g.get("folder") == folder:
+                return list(g.get("anticheat") or [])
+        return []
+
     def _install_run(self, d: Path, items: list, pkg, sver) -> dict:
         results = []
         for it in items:
@@ -1382,6 +1389,15 @@ class Plugin:
             way = str((it or {}).get("way", "auto") or "auto")
             if not folder:
                 results.append({"folder": folder, "ok": False, "detail": "no folder given"})
+                continue
+            ac = self._anticheat_of(folder)
+            if way == "scaler" and ac and not (it or {}).get("anticheat_ok"):
+                # An anti-cheat game only gets the FSR drop-in: the Scaler
+                # can get the account banned in online play.
+                results.append({"folder": folder, "ok": False,
+                                "detail": f"this game has anti-cheat ({', '.join(ac)}): "
+                                          "HelixSR Scaler is not used there — install the "
+                                          "FSR drop-in instead"})
                 continue
             args: dict = {"game": folder, "way": way}
             if way in ("auto", "scaler"):
@@ -1763,6 +1779,25 @@ def _read_marker(p: Path) -> dict:
     except (OSError, ValueError):
         return {}
     return rec if isinstance(rec, dict) else {}
+
+
+def _game_compatible(g: dict) -> bool:
+    """Whether HelixSR can do anything in this game.
+
+    The release's scan lists every folder with a game .exe: the Scaler can
+    take over an upscaler built into the exe, which the scan cannot see (the
+    release calls those games 'unsupported'). Only the games with something
+    to take over are listed: FSR 3.1 (the drop-in) or a detected upscaler
+    (the Scaler). An anti-cheat game only gets the FSR drop-in — the Scaler
+    is not used there. A game with an install always stays listed, so it can
+    be updated or removed.
+    """
+    if g.get("installed"):
+        return True
+    ways = g.get("ways") or []
+    if g.get("anticheat"):
+        return "fsr" in ways
+    return bool(g.get("inputs_found"))
 
 
 def bridge_clean(f: str) -> str:

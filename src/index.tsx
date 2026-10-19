@@ -81,6 +81,7 @@ import {
   installWayFor,
   isWaySwitch,
   parseBuildProgress,
+  waysFor,
 } from "./utils";
 
 // True while the panel is open; the plugin-scope build listener only
@@ -617,19 +618,14 @@ function Content() {
       if (way === "scaler" || (way === "auto" && g?.recommended === "scaler")) {
         if (fgFor[folder]) it.fg = true;
       }
-      if (g && g.anticheat.length) it.anticheat_ok = true;
       return it;
     });
 
   const onInstall = async (folders: string[], way: string) => {
     if (!folders.length) return;
-    const hasAc = folders.some((f) => (games.find((x) => x.folder === f)?.anticheat.length || 0) > 0);
     const switches = folders.some((f) => isWaySwitch(way, games.find((x) => x.folder === f)?.installed));
     const label = switches ? `Switch to ${WAY_SHORT[way] || way}` : "Install HelixSR";
     await armOrRun(`install:${folders.join(",")}:${way}`, label, async () => {
-      if (hasAc && way !== "fsr") {
-        setOutput("Anti-cheat game: confirming installs HelixSR Scaler for offline / single-player use only.");
-      }
       setBusy("games");
       try {
         const r = await apiInstallGames(installItems(folders, way));
@@ -1152,26 +1148,35 @@ function Content() {
 
   const renderGame = (g: HelixGame) => {
     const way = ways[g.folder] || "auto";
-    const wayChoices = ["auto", ...g.ways];
+    // An anti-cheat game only gets the FSR drop-in (HelixSR Scaler is not
+    // used there); the other games get both ways.
+    const allowed = waysFor(g);
+    const wayChoices = allowed.length ? ["auto", ...allowed] : [];
+    // With one way only, "auto" is that way.
+    const effWay = allowed.length === 1 ? allowed[0] : way;
     // What the install action uses: the picked way, or the way the game
     // already has when nothing is picked (an update keeps that way).
-    const installWay = installWayFor(way, g.installed);
+    const installWay = installWayFor(effWay, g.installed, allowed);
     // The picked way is not the installed one -> the action switches it.
-    const switching = isWaySwitch(way, g.installed);
+    const switching = isWaySwitch(effWay, g.installed);
     const installId = `install:${g.folder}:${installWay}`;
     // The chip shows what the game gets: the installed one, the recommended
     // one, or the picked one when it is another way than both.
     const currentWay = g.installed || g.recommended || "";
-    const pending = way !== "auto" && way !== currentWay;
+    const pending = effWay !== "auto" && effWay !== currentWay;
     // Short state chip. It must stay short: a long chip squeezed the game's
     // name out of the header row and wrote it vertically, one letter per line.
     const chipText = pending
-      ? `→ ${WAY_SHORT[way] || way}`
+      ? `→ ${WAY_SHORT[effWay] || effWay}`
       : g.installed
         ? `✓ ${ROUTE_SHORT[g.installed] || g.installed}${g.version ? ` ${g.version}` : ""}`
         : (g.blocked
             ? ROUTE_SHORT.blocked
             : (ROUTE_SHORT[g.recommended || ""] || (g.supported ? "Recommended" : "Not supported")));
+    // The Scaler is not used in an anti-cheat game: no Scaler frame
+    // generation there, and an install of an earlier Scaler is not
+    // repeated.
+    const scalerBlocked = g.anticheat.length > 0;
     return (
       <Card key={g.folder}>
         {/* flexWrap + a flex basis on the name: the chip drops to its own line
@@ -1211,7 +1216,7 @@ function Content() {
             ))}
           </div>
         </PanelSectionRow>
-        {(way === "scaler" || (way === "auto" && g.recommended === "scaler")) && g.fg_possible && !g.anticheat.length && (
+        {(effWay === "scaler" || (effWay === "auto" && g.recommended === "scaler")) && g.fg_possible && !scalerBlocked && (
           <PanelSectionRow>
             <ToggleField
               label="Frame generation with Scaler"
@@ -1223,28 +1228,32 @@ function Content() {
         )}
         <PanelSectionRow>
           <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
-            {!g.installed && (
+            {!g.installed && allowed.length > 0 && (
               <MButton variant="filled" disabled={busy !== "" || !g.supported}
-                onClick={() => onInstall([g.folder], way)}>
+                onClick={() => onInstall([g.folder], installWay)}>
                 {confirm.startsWith(`install:${g.folder}`) ? "Tap again to confirm" : "Install"}
               </MButton>
             )}
             {g.installed && (
               <Fragment>
-                <MButton variant="tonal" disabled={busy !== ""}
-                  onClick={() => onInstall([g.folder], installWay)}>
-                  {confirm === installId
-                    ? "Tap again to confirm"
-                    : switching
-                      ? `Switch to ${WAY_SHORT[way] || way}`
-                      : "Update"}
-                </MButton>
+                {allowed.length > 0 && (
+                  <MButton variant="tonal" disabled={busy !== ""}
+                    onClick={() => onInstall([g.folder], installWay)}>
+                    {confirm === installId
+                      ? "Tap again to confirm"
+                      : switching
+                        ? `Switch to ${WAY_SHORT[effWay] || effWay}`
+                        : "Update"}
+                  </MButton>
+                )}
                 <MButton variant="outlined" disabled={busy !== ""}
                   onClick={() => onUninstall([g.folder])}>
                   {confirm.startsWith(`uninstall:${g.folder}`) ? "Tap again to confirm" : "Remove"}
                 </MButton>
-                <MButton variant="text" disabled={busy !== ""} onClick={() => onRepair([g.folder])}>Repair</MButton>
-                {g.installed === "scaler" && g.fg_possible && (
+                {!scalerBlocked && (
+                  <MButton variant="text" disabled={busy !== ""} onClick={() => onRepair([g.folder])}>Repair</MButton>
+                )}
+                {g.installed === "scaler" && g.fg_possible && !scalerBlocked && (
                   <MButton variant="tonal" disabled={busy !== ""}
                     onClick={() => onToggleFg(g.folder, !(g.frame_generation ?? false))}>
                     FG {g.frame_generation ? "off" : "on"}

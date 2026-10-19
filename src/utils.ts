@@ -50,12 +50,22 @@ export function shortRoute(route: string): string {
   return route;
 }
 
+/** The ways a game can take. An anti-cheat game only gets the FSR drop-in:
+ *  HelixSR Scaler is not used there (it can get the account banned). */
+export function waysFor(game: { anticheat?: string[] | null; ways?: string[] | null }): string[] {
+  const ways = game.ways || [];
+  if ((game.anticheat || []).length) return ways.includes("fsr") ? ["fsr"] : [];
+  return ways;
+}
+
 /** The way an install action uses: the way the user picked, or the way the
  * game already has when nothing is picked (an update keeps that way). */
-export function installWayFor(picked?: string | null, installed?: string | null): string {
+export function installWayFor(picked?: string | null, installed?: string | null, allowed?: string[] | null): string {
   const p = picked || "auto";
-  if (p !== "auto") return p;
-  return installed || "auto";
+  const ok = (w: string) => !allowed || allowed.length === 0 || allowed.includes(w);
+  if (p !== "auto" && ok(p)) return p;
+  if (installed && ok(installed)) return installed;
+  return "auto";
 }
 
 /** Whether the picked way is another one than the installed way: the install
