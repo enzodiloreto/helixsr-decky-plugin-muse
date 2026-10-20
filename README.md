@@ -60,9 +60,10 @@ release's `--yes` wrapper, which would also install the game behind your back.
   shader compile may need (the compile fans out one worker per CPU thread).
 - **Build** / **Rebuild** — the log streams with a parsed % bar, and **Cancel
   build** stops the whole process group (no orphaned workers left behind).
-- **Frame generation** toggle — adds the FG build (extra downloads; close the game
-  first). A build whose shader compile does not fit in the free memory is refused
-  up front, with the reason.
+- **Frame generation** toggle — adds the FG build (NVIDIA's DLSS Frame Generation
+  DLLs and the NGX core are downloaded during the build; close the game first). A
+  build whose shader compile does not fit in the free memory is refused up front,
+  with the reason.
 
 ### Games
 
@@ -126,9 +127,15 @@ inside each game's folder (the originals are kept as backups).
 - **"UI vX but backend vY" warning**: a partial update — tap **Reload plugin**
   in the banner first (it heals it without reinstalling in most cases); if it
   persists, reinstall the zip and restart Decky.
-- **Build fails**: the log names the step. Handled automatically so far: a system
-  Python without SSL support (the plugin downloads NVIDIA's DLL itself and passes
-  it via `--dlss`), missing executable bits on extracted files (repaired).
+- **Build fails**: the log names the step. Handled automatically so far: a Python
+  without CA certificates (the plugin hands the release's setup the CA bundle it
+  ships, so the setup's own downloads verify), a system Python without SSL
+  support (the plugin downloads NVIDIA's DLSS DLL itself and passes it via
+  `--dlss`), missing executable bits on extracted files (repaired).
+- **"certificate verify failed: unable to get local issuer certificate"**: the
+  Python that ran the setup had no CA certificates. The plugin now passes its own
+  CA bundle to the setup (`SSL_CERT_FILE`); on an older plugin, install the new
+  zip to get it.
 - **Frame generation build refused**: the shader compile needs more memory than
   the readiness check found. Close the game and retry, or build without FG.
 - **Download refused**: not enough free disk for the zip plus its extraction (on a

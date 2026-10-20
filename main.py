@@ -35,13 +35,11 @@ GITHUB_REPO = "HelixSR"
 RELEASES_URL = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases?per_page=30"
 
 # Frame-generation build inputs (upstream pins; factual interop values).
-DLSSG_SL_URL = "https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.8.0/streamline-sdk-v2.8.0.zip"
-DLSSG2_SL_URL = "https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.14.16/streamline-sdk-v2.14.16.zip"
-DLSSG_ENTRY = "bin/x64/nvngx_dlssg.dll"
+# The release's own setup takes NVIDIA's DLSS Frame Generation DLLs from the
+# Streamline release (only the one file out of the SDK zip, with range
+# requests) and checks their hashes itself: the plugin does not fetch them.
 DLSSG_SHA256 = "0a6212a33ebaa708e7907468db7345c92cfdc6f8dd29c6e1248f32dbea4bcdaf"
-DLSSG_FILE = "nvngx_dlssg.dll"
 DLSSG2_SHA256 = "8d59d49b36410dd6b62fef2503a5871d347415bd85d943fa0848563a95dd50c7"
-DLSSG2_FILE = "nvngx_dlssg_310.9.16.dll"
 
 # NVIDIA's DLSS SDK DLL the 2.0 setup builds the network from, hash-pinned.
 # The plugin fetches it with its own TLS (the setup's Python may lack SSL)
@@ -72,15 +70,36 @@ def _helixsr_root() -> Path:
 _SSL_CONTEXT = None
 
 
+def _ca_bundle() -> Path | None:
+    """The CA bundle shipped with the plugin (the Python running Decky
+    plugins on SteamOS may not find system CA certificates)."""
+    bundle = Path(__file__).parent / "py_modules" / "cacert.pem"
+    return bundle if bundle.is_file() else None
+
+
 def _ssl_context() -> ssl.SSLContext:
     """TLS context using the CA bundle shipped with the plugin (the Python
     running Decky plugins on SteamOS may not find system CA certificates)."""
     global _SSL_CONTEXT
     if _SSL_CONTEXT is None:
-        bundle = Path(__file__).parent / "py_modules" / "cacert.pem"
-        _SSL_CONTEXT = (ssl.create_default_context(cafile=str(bundle)) if bundle.is_file()
+        bundle = _ca_bundle()
+        _SSL_CONTEXT = (ssl.create_default_context(cafile=str(bundle)) if bundle
                         else ssl.create_default_context())
     return _SSL_CONTEXT
+
+
+def _ca_env() -> dict:
+    """The CA bundle for a child process: the release's own setup downloads
+    over HTTPS (NVIDIA's Streamline DLLs, the NGX core) and the Python that
+    runs it has no CA certificates of its own (the portable Python the
+    plugin provisions has none at all). SSL_CERT_FILE is what OpenSSL's
+    default verify paths use."""
+    bundle = _ca_bundle()
+    if bundle is None:
+        return {}
+    return {"SSL_CERT_FILE": str(bundle),
+            "REQUESTS_CA_BUNDLE": str(bundle),
+            "CURL_CA_BUNDLE": str(bundle)}
 
 
 def _fetch_json(url: str, timeout: int = 30):
@@ -1025,12 +1044,9 @@ class Plugin:
         if fg:
             ok_mem, mem_detail = _fg_compile_fits()
             checks.append({"name": "Shader compile memory", "ok": ok_mem, "detail": mem_detail})
-            have = [name for name, sha in ((DLSSG_FILE, DLSSG_SHA256), (DLSSG2_FILE, DLSSG2_SHA256))
-                    if (d / name).is_file() and _sha256_file(d / name) == sha]
             checks.append({"name": "DLSS Frame Generation DLLs", "ok": True,
-                           "detail": ("cached, verified" if len(have) == 2
-                                      else "will download ~8 MB each of 2 on build "
-                                           "(NVIDIA Streamline SDK)")})
+                           "detail": "the setup takes them from NVIDIA's Streamline "
+                                     "(~8 MB each of 2, hashes checked there)"})
             zstd = shutil.which("zstd") or ""
             py314 = ""
             for c in ([str(portable)] if portable.is_file() else []) + ["python3"]:
@@ -1161,28 +1177,29 @@ class Plugin:
                         args.append("--fg-only")
                 except bridge.BridgeError:
                     pass
-            for name, sha, url in ((DLSS_FILE, DLSS_SHA256, DLSS_URL),
-                                  (DLSSG_FILE, DLSSG_SHA256, DLSSG_SL_URL),
-                                  (DLSSG2_FILE, DLSSG2_SHA256, DLSSG2_SL_URL)):
-                dest = d / name
+            # The DLSS DLL is fetched here (the plugin's own TLS, hash
+            # pinned) and handed to the setup. The frame generation DLLs are
+            # NOT: they live inside NVIDIA's 226/276 MB Streamline SDK zip,
+            # while the hash the setup checks is the DLL's — the release's
+            # own setup takes them from the zip with range requests (~8 MB
+            # each) and verifies them there.
+            dest = d / DLSS_FILE
+            try:
+                if dest.is_file() and _sha256_file(dest) == DLSS_SHA256:
+                    line(f"[helixsr] {DLSS_FILE}: cached, verified")
+                    args += ["--dlss", str(dest)]
+                else:
+                    dl_tmp = d / f".{DLSS_FILE}.dl"
+                    self._download_for_setup(DLSS_URL, dl_tmp, DLSS_SHA256, line, self._build_cancel)
+                    dl_tmp.rename(dest)
+                    args += ["--dlss", str(dest)]
+            except OSError as e:
+                line(f"[helixsr] {DLSS_FILE}: {e}")
                 try:
-                    if dest.is_file() and _sha256_file(dest) == sha:
-                        line(f"[helixsr] {name}: cached, verified")
-                        args += ["--dlss" if name == DLSS_FILE else "--dlssg", str(dest)]
-                        continue
-                    if name == DLSS_FILE or fg:
-                        dl_tmp = d / f".{name}.dl"
-                        self._download_for_setup(url, dl_tmp, sha, line, self._build_cancel)
-                        dl_tmp.rename(dest)
-                        args += ["--dlss" if name == DLSS_FILE else "--dlssg", str(dest)]
-                except OSError as e:
-                    line(f"[helixsr] {name}: {e}")
-                    if name == DLSS_FILE:
-                        try:
-                            asyncio.run(decky.emit("helixsr_build_done", False, -1))
-                        except Exception:  # noqa: BLE001
-                            pass
-                        return
+                    asyncio.run(decky.emit("helixsr_build_done", False, -1))
+                except Exception:  # noqa: BLE001
+                    pass
+                return
             if not self._alive or self._build_cancel.is_set():
                 line("[helixsr] build cancelled")
                 return
@@ -1202,10 +1219,13 @@ class Plugin:
                     pass
 
     async def _spawn_and_watch(self, d: Path, log: Path, header: str, args: list):
-        env = _compile_jobs_env()
-        if env:
+        jobs = _compile_jobs_env()
+        if jobs:
             self._build_log_line(log, f"[helixsr] capping shader-compile workers at "
-                                      f"{env['HELIXSR_SETUP_JOBS']} (HELIXSR_SETUP_JOBS, Steam UI headroom)")
+                                      f"{jobs['HELIXSR_SETUP_JOBS']} (HELIXSR_SETUP_JOBS, Steam UI headroom)")
+        # The setup's Python downloads over HTTPS (NVIDIA's Streamline DLLs,
+        # the NGX core): it needs the CA bundle the plugin ships.
+        env = {**jobs, **_ca_env()}
         try:
             proc = await asyncio.create_subprocess_exec(
                 *args,

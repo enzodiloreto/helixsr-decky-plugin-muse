@@ -35,14 +35,22 @@ subprocess; upstream files are never imported.
   *Python 3 + numpy* (a note, not a gate — the plugin downloads a portable Python
   during the build), *Proton/Wine (shader compiler)*, *Disk space*, *Network /
   frame generation*. With FG enabled it adds *Shader compile memory*, *DLSS Frame
-  Generation DLLs* (two NVIDIA Streamline archives) and *NGX core prerequisites*
-  (`zstd` or Python 3.14).
+  Generation DLLs* (the setup takes them from NVIDIA's Streamline, ~8 MB each of 2)
+  and *NGX core prerequisites* (`zstd` or Python 3.14).
 - **Build** / **Rebuild** (two-tap) run the release's own
   `setup/helixsr_setup.py` directly — never the release's `--yes` wrapper, which
   would also install the game behind the user's back. Exit code 3 (upscaling built,
   FG failed) counts as success.
 - The build provisions what the release's own setup script would: a portable
   Python with numpy, the pinned Windows DXC and a `dxc-wine.sh` shim.
+- The setup's Python downloads over HTTPS (NVIDIA's Streamline DLLs, the NGX core)
+  and has no CA certificates of its own, so the plugin hands it the CA bundle it
+  ships (`SSL_CERT_FILE`): without it the setup's downloads fail with
+  "certificate verify failed: unable to get local issuer certificate".
+- Only the DLSS DLL is fetched by the plugin itself (hash-pinned, its own TLS, and
+  handed over as `--dlss`). The frame generation DLLs are taken by the release's
+  own setup out of NVIDIA's 226/276 MB Streamline zips with range requests
+  (~8 MB each) and checked there.
 - The build log streams with a parsed % bar and a memory line (free memory and
   swap) at the start, after every toolchain download and every 30 s — the trail
   used to diagnose the OOM that killed Steam's UI.

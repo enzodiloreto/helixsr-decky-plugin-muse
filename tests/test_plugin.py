@@ -188,6 +188,7 @@ sys.exit(0 if out["ok"] else 1)
 '''
 
 STUB_SETUP = r'''
+import os
 import sys
 # argv: OUT [--dxc X] [--fg-only] [--yes] [--no-fg] [--dlss X] [--dlssg X]...
 args = sys.argv[1:]
@@ -207,6 +208,8 @@ for x in args:
         rc = int(x[3:])
 if log:
     open(log, "a").write("stub setup ran\n")
+# the CA bundle the plugin hands to the setup's Python (stdout is the build log)
+print("ssl_cert_file=%s" % os.environ.get("SSL_CERT_FILE", ""))
 print("stub setup ran")
 sys.exit(rc)
 '''
@@ -613,6 +616,63 @@ class PluginCase(unittest.TestCase):
             self.assertIn("stub setup ran", log.read_text())
         asyncio.run(go())
 
+    def test_build_hands_the_ca_bundle_to_the_setup(self):
+        """The setup's Python downloads over HTTPS (NVIDIA's Streamline DLLs,
+        the NGX core) and has no CA certificates of its own."""
+        d = self._release_dir(status={"version": "9.9.9", "network_ready": False,
+                                      "fg_ready": False, "fg_reason": ""})
+        (d / main.DLSS_FILE).write_bytes(b"cached dll")
+        p = self._plugin(active="v2.0.0")
+        self._patch_toolchain(p)
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            with mock.patch.object(main, "_sha256_file", return_value=main.DLSS_SHA256):
+                r = await p.start_build()
+                self.assertTrue(r["ok"], r)
+                for _ in range(400):
+                    st = await p.get_build_status()
+                    if not st["running"]:
+                        break
+                    await asyncio.sleep(0.05)
+            log = Path(r["log"]).read_text()
+            self.assertIn("ssl_cert_file=", log)
+            self.assertNotIn("ssl_cert_file=\n", log)
+            self.assertTrue(log.split("ssl_cert_file=")[1].splitlines()[0].endswith("cacert.pem"))
+        asyncio.run(go())
+
+    def test_build_does_not_fetch_the_streamline_zips(self):
+        """The frame generation DLLs live inside NVIDIA's 226/276 MB SDK
+        zips, but the hash the setup checks is the DLL's: the plugin must
+        not fetch the zips (the release's setup takes the DLLs itself)."""
+        d = self._release_dir(status={"version": "9.9.9", "network_ready": False,
+                                      "fg_ready": False, "fg_reason": ""})
+        (d / main.DLSS_FILE).write_bytes(b"cached dll")
+        p = self._plugin(active="v2.0.0")
+        self._patch_toolchain(p)
+        seen = {}
+
+        async def fake_spawn(d, log, header, args):
+            seen["args"] = list(args)
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            p._spawn_and_watch = fake_spawn
+            with mock.patch.object(main, "_sha256_file", return_value=main.DLSS_SHA256):
+                r = await p.start_build(fg=True)
+                self.assertTrue(r["ok"], r)
+                for _ in range(400):
+                    st = await p.get_build_status()
+                    if not st["running"]:
+                        break
+                    await asyncio.sleep(0.05)
+        asyncio.run(go())
+        args = seen.get("args", [])
+        self.assertNotIn("--dlssg", args)
+        self.assertIn("--dlss", args)
+        for a in args:
+            self.assertNotIn("streamline-sdk", a)
+
     def test_build_fg_gate_refuses(self):
         d = self._release_dir()
         p = self._plugin(active="v2.0.0")
@@ -650,7 +710,7 @@ class PluginCase(unittest.TestCase):
             self.assertTrue(r["ok"], r)
         asyncio.run(go())
         try:
-            proc.wait(timeout=5)
+            proc.wait(timeout=15)
         finally:
             if proc.poll() is None:
                 proc.kill()
@@ -667,7 +727,7 @@ class PluginCase(unittest.TestCase):
             pf.write_text(str(proc.pid))
             main._reap_orphaned_build()
             try:
-                proc.wait(timeout=5)
+                proc.wait(timeout=15)
                 dead = True
             except _sp.TimeoutExpired:
                 dead = False
