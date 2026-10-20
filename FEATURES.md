@@ -9,6 +9,17 @@ HelixSR **2.0+ only**: 1.x support, the separate Scaler feed and the migration
 flow are gone. Every game operation runs the downloaded release's own bridge as a
 subprocess; upstream files are never imported.
 
+## Panel header (always on top)
+
+- **Where you are**: "Step 2 of 4 — Build the network" with the step's title, a
+  one-line hint, and the one button that moves the flow forward (Download the
+  picked release / Build network (+ FG) / Scan games). The step comes from the
+  state: no version → download, no network → build, no games → scan, else install.
+- The active version and its network state as a chip; a running download or build
+  shows its progress bar and a cancel button in the same card.
+- **Last action**: the result of the last thing the plugin did, right under the
+  header (the old Output section at the bottom of the panel is gone).
+
 ## Version (HelixSR releases)
 
 - Release feed from the HelixSR GitHub API (newest first, zip assets only), the
@@ -72,6 +83,7 @@ subprocess; upstream files are never imported.
   exe, which the scan cannot see), the plugin keeps the ones with something to
   take over — FSR 3.1 (the drop-in) or a detected upscaler (DLSS/XeSS/FSR 2, the
   Scaler). A game with an install always stays listed (it must stay manageable).
+  The list header says how many games are installed and how many were left out.
 - **An anti-cheat game gets the FSR drop-in only**: the Scaler is not used there
   (it can get the account banned in online play), so an anti-cheat game without
   FSR 3.1 is not listed, and the way picker of an anti-cheat game offers only the
@@ -88,11 +100,12 @@ subprocess; upstream files are never imported.
   the panel is closed and opened again; the install action uses the picked way,
   and switching ways removes the other install first (the button reads
   *Switch to …*). An anti-cheat game only offers the FSR drop-in.
-- **Install**, **Update**, **Switch to …**, **Remove**, **Repair** (remove +
-  reinstall of the same way), **Roll back** (restore the previous install),
-  **FG on/off** (Scaler games on an FG build), **Settings**, **Log**. An
-  anti-cheat game has no Scaler: it gets the FSR drop-in (or is not listed at
-  all when it has no FSR 3.1).
+- **Install**, **Update**, **Switch to …** and a **More** button that opens the
+  rest: **Remove**, **Repair** (remove + reinstall of the same way), **Roll back**
+  (restore the previous install), **FG on/off** (Scaler games on an FG build),
+  **Settings**, **Log**. An anti-cheat game has no Scaler: it gets the FSR
+  drop-in (or is not listed at all when it has no FSR 3.1). Destructive buttons
+  (Remove, Remove old versions, Factory reset) use the danger tone.
 - **Verify installs** checks the install markers *and* the files (loader, HelixSR
   DLL, scaler ini for Scaler; marker + log/backup for the drop-in), so a Steam
   update that replaced the drop-ins is detected and can be repaired.

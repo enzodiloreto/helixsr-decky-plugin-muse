@@ -36,8 +36,11 @@ automatically on first run. Then uninstall the old entry.
 
 ## Use
 
-The panel has five sections — Version, Build, Games, Storage & updates, Output — and
-every long action runs in the background while the panel stays responsive.
+The panel opens with a header that says where you are — **Step 2 of 4 — Build the
+network** — with the one button that moves you forward, and the **Last action** card
+right below it with the result of what you just did. Then the sections: Version,
+Build, Games, Storage & updates. Every long action runs in the background while the
+panel stays responsive.
 
 ### Version
 
@@ -71,20 +74,21 @@ release's `--yes` wrapper, which would also install the game behind your back.
 release's own scanner, in the background: it can be cancelled, and the last scan is
 remembered and reused. Only the games HelixSR can actually use are listed — a game
 with FSR 3.1 (the drop-in) or a detected upscaler (DLSS/XeSS/FSR 2, the Scaler).
-Games with no upscaler to take over are left out; a game that already has HelixSR
-in it always stays listed, so it can be updated or removed. Each game card shows
-its state, the inputs it was detected with, anti-cheat markers and the Steam launch
-options, and offers:
+Games with no upscaler to take over are left out (the count is shown next to the
+list); a game that already has HelixSR in it always stays listed, so it can be
+updated or removed. Each game card shows its state, the inputs it was detected
+with, anti-cheat markers and the Steam launch options, and offers:
 
-- the **way** picker — **Recommended** (HelixSR picks the game's best way),
+- the **way** picker — **Automatic** (HelixSR picks the game's best way),
   **HelixSR Scaler** (pick DLSS in the game's graphics menu; Insert opens its
   menu) or **FSR drop-in** (pick AMD FSR in the game). Your pick is remembered
   between sessions (it survives a re-scan and a panel close), and installing
   with a different way switches the game (the other install is removed first) —
   the button then reads *Switch to …*.
-- **Install**, **Update**, **Switch to …**, **Remove**, **Repair** (a clean
-  re-install of the same way), **Roll back** (restore the previous install),
-  **FG on/off** (Scaler games on an FG build), **Settings** and **Log**.
+- **Install**, **Update**, **Switch to …** and a **More** button that opens the
+  rest: **Remove**, **Repair** (a clean re-install of the same way), **Roll back**
+  (restore the previous install), **FG on/off** (Scaler games on an FG build),
+  **Settings** and **Log**.
 - **Anti-cheat games get the FSR drop-in only.** The Scaler is not used there (it
   can get the account banned in online play), so an anti-cheat game without FSR 3.1
   is not listed at all.

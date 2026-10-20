@@ -87,6 +87,7 @@ export interface ScanStatus {
   games: HelixGame[];
   tag: string;
   log: string;
+  skipped: number;
 }
 
 export interface ScanCache {

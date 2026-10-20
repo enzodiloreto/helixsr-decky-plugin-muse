@@ -82,6 +82,7 @@ import {
   fmtSize,
   installWayFor,
   isWaySwitch,
+  panelStep,
   parseBuildProgress,
   waysFor,
 } from "./utils";
@@ -116,7 +117,7 @@ const SCALER_OPTIONS: Record<string, [string, string][] | null> = {
 };
 
 const WAY_LABELS: Record<string, string> = {
-  auto: "Recommended",
+  auto: "Automatic",
   scaler: "HelixSR Scaler",
   fsr: "FSR drop-in",
 };
@@ -130,7 +131,7 @@ const WAY_HINTS: Record<string, string> = {
 
 // Short way names for buttons and chips (WAY_LABELS carries the in-game hint).
 const WAY_SHORT: Record<string, string> = {
-  auto: "Recommended",
+  auto: "Automatic",
   scaler: "HelixSR Scaler",
   fsr: "FSR drop-in",
 };
@@ -156,8 +157,12 @@ function Content() {
   // Games
   const [games, setGames] = useState<HelixGame[]>([]);
   const [gamesTag, setGamesTag] = useState("");
+  // The games the scan found that HelixSR cannot use (not listed).
+  const [skipped, setSkipped] = useState(0);
   const [scanning, setScanning] = useState(false);
   const [ways, setWays] = useState<Record<string, string>>({});
+  // Which game cards show their extra actions ("More").
+  const [moreFor, setMoreFor] = useState<Record<string, boolean>>({});
   const [fgFor, setFgFor] = useState<Record<string, boolean>>({});
   const [verify, setVerify] = useState<VerifyResult[] | null>(null);
   const [folderInput, setFolderInput] = useState("");
@@ -264,6 +269,7 @@ function Content() {
           if (cached.games.length) {
             setGames(cached.games);
             setGamesTag(cached.tag || "");
+            setSkipped(cached.skipped || 0);
             mergeWays(cached.games);
             if (!relsRes.error) {
               const tagNote = s.active_tag && cached.tag && cached.tag !== s.active_tag
@@ -358,9 +364,11 @@ function Content() {
           if (st.ok) {
             setGames(st.games);
             setGamesTag(st.tag || "");
+            setSkipped(st.skipped || 0);
             setVerify(null);
             mergeWays(st.games);
-            setOutput(`Found ${st.games.length} compatible game(s) with ${st.tag}.`);
+            setOutput(`Found ${st.games.length} compatible game(s) with ${st.tag}`
+              + (st.skipped ? ` (${st.skipped} more not compatible)` : "") + ".");
           } else if (st.cancelled) {
             setOutput("Scan cancelled.");
           } else {
@@ -1026,6 +1034,29 @@ function Content() {
       ? (() => { const p = parseBuildProgress(buildLog); return { label: "Building", pct: p ? p.pct : -1 }; })()
       : null;
 
+  // The step the panel is at, with the one action that moves it forward.
+  const step = panelStep(state?.versions.length || 0, !!activeVersion?.network_built, games.length);
+  const stepTitle = ["Download a HelixSR version", "Build the network",
+    "Scan your games", "Install HelixSR"][step.index];
+  const stepHint = [
+    "Pick a release below and download it — the plugin then builds and installs it.",
+    "The shaders and the DLSS model HelixSR puts into the games. Takes a few minutes.",
+    "HelixSR walks your Steam libraries for the games it can be used in.",
+    "Pick a game below and install HelixSR into it.",
+  ][step.index];
+  const stepAction = (() => {
+    if (step.action === "download" && picked) {
+      return { label: pickedDownloaded ? `Use ${picked}` : `Download ${picked}`, onClick: onDownloadOrUse };
+    }
+    if (step.action === "build") {
+      return { label: fgBuild ? "Build network + FG" : "Build network", onClick: () => onStartBuild(false) };
+    }
+    if (step.action === "scan") {
+      return { label: "Scan games", onClick: onScan };
+    }
+    return null;
+  })();
+
   // The settings editor and the log viewer are rendered INSIDE the game card
   // that opened them (not at the bottom of the game list).
   const renderSettingsEditor = () => {
@@ -1196,11 +1227,16 @@ function Content() {
         ? `✓ ${ROUTE_SHORT[g.installed] || g.installed}${g.version ? ` ${g.version}` : ""}`
         : (g.blocked
             ? ROUTE_SHORT.blocked
-            : (ROUTE_SHORT[g.recommended || ""] || (g.supported ? "Recommended" : "Not supported")));
+            : (g.recommended
+                ? `Auto: ${ROUTE_SHORT[g.recommended] || g.recommended}`
+                : (g.supported ? "Automatic" : "Not supported")));
     // The Scaler is not used in an anti-cheat game: no Scaler frame
     // generation there, and an install of an earlier Scaler is not
     // repeated.
     const scalerBlocked = g.anticheat.length > 0;
+    // The extra actions behind "More" (a game with no install and nothing
+    // to roll back has none).
+    const hasMore = !!g.installed || !!g.previous;
     return (
       <Card key={g.folder}>
         {/* flexWrap + a flex basis on the name: the chip drops to its own line
@@ -1251,6 +1287,8 @@ function Content() {
           </PanelSectionRow>
         )}
         <PanelSectionRow>
+          {/* The primary action stays visible; everything else is behind
+              "More" (nine focus stops per game was a lot on a Deck). */}
           <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
             {!g.installed && allowed.length > 0 && (
               <MButton variant="filled" disabled={busy !== "" || !g.supported}
@@ -1258,43 +1296,57 @@ function Content() {
                 {confirm.startsWith(`install:${g.folder}`) ? "Tap again to confirm" : "Install"}
               </MButton>
             )}
-            {g.installed && (
-              <Fragment>
-                {allowed.length > 0 && (
-                  <MButton variant="tonal" disabled={busy !== ""}
-                    onClick={() => onInstall([g.folder], installWay)}>
-                    {confirm === installId
-                      ? "Tap again to confirm"
-                      : switching
-                        ? `Switch to ${WAY_SHORT[effWay] || effWay}`
-                        : "Update"}
-                  </MButton>
-                )}
-                <MButton variant="outlined" disabled={busy !== ""}
-                  onClick={() => onUninstall([g.folder])}>
-                  {confirm.startsWith(`uninstall:${g.folder}`) ? "Tap again to confirm" : "Remove"}
-                </MButton>
-                {!scalerBlocked && (
-                  <MButton variant="text" disabled={busy !== ""} onClick={() => onRepair([g.folder])}>Repair</MButton>
-                )}
-                {g.installed === "scaler" && g.fg_possible && !scalerBlocked && (
-                  <MButton variant="tonal" disabled={busy !== ""}
-                    onClick={() => onToggleFg(g.folder, !(g.frame_generation ?? false))}>
-                    FG {g.frame_generation ? "off" : "on"}
-                  </MButton>
-                )}
-                {g.previous ? (
-                  <MButton variant="outlined" disabled={busy !== ""}
-                    onClick={() => onRollback(g.folder)}>
-                    {confirm === `rollback:${g.folder}` ? "Tap again to confirm" : "Roll back"}
-                  </MButton>
-                ) : null}
-                <MButton variant="text" disabled={busy !== ""} onClick={() => openSettings(g.folder)}>Settings</MButton>
-                <MButton variant="text" disabled={busy !== ""} onClick={() => openLog(g.folder)}>Log</MButton>
-              </Fragment>
+            {g.installed && allowed.length > 0 && (
+              <MButton variant="tonal" disabled={busy !== ""}
+                onClick={() => onInstall([g.folder], installWay)}>
+                {confirm === installId
+                  ? "Tap again to confirm"
+                  : switching
+                    ? `Switch to ${WAY_SHORT[effWay] || effWay}`
+                    : "Update"}
+              </MButton>
+            )}
+            {hasMore && (
+              <MButton variant="text" disabled={busy !== ""}
+                onClick={() => setMoreFor({ ...moreFor, [g.folder]: !moreFor[g.folder] })}>
+                {moreFor[g.folder] ? "Less" : "More"}
+              </MButton>
             )}
           </div>
         </PanelSectionRow>
+        {moreFor[g.folder] && (
+          <PanelSectionRow>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
+              {g.installed && (
+                <MButton variant="danger-outline" disabled={busy !== ""}
+                  onClick={() => onUninstall([g.folder])}>
+                  {confirm.startsWith(`uninstall:${g.folder}`) ? "Tap again to confirm" : "Remove"}
+                </MButton>
+              )}
+              {!scalerBlocked && g.installed && (
+                <MButton variant="text" disabled={busy !== ""} onClick={() => onRepair([g.folder])}>Repair</MButton>
+              )}
+              {g.installed === "scaler" && g.fg_possible && !scalerBlocked && (
+                <MButton variant="tonal" disabled={busy !== ""}
+                  onClick={() => onToggleFg(g.folder, !(g.frame_generation ?? false))}>
+                  FG {g.frame_generation ? "off" : "on"}
+                </MButton>
+              )}
+              {g.previous ? (
+                <MButton variant="outlined" disabled={busy !== ""}
+                  onClick={() => onRollback(g.folder)}>
+                  {confirm === `rollback:${g.folder}` ? "Tap again to confirm" : "Roll back"}
+                </MButton>
+              ) : null}
+              {g.installed && (
+                <MButton variant="text" disabled={busy !== ""} onClick={() => openSettings(g.folder)}>Settings</MButton>
+              )}
+              {g.installed && (
+                <MButton variant="text" disabled={busy !== ""} onClick={() => openLog(g.folder)}>Log</MButton>
+              )}
+            </div>
+          </PanelSectionRow>
+        )}
         {/* The settings editor and the log open inside this card, not at the
             bottom of the game list. */}
         {settingsFor === g.folder && settings && (
@@ -1309,26 +1361,59 @@ function Content() {
 
   return (
     <div>
-      {heroOp && (
-        <PanelSectionRow>
-          <div style={{ width: "100%" }}>
-            <div style={M3.type.caption}>{heroOp.label}{dlRate ? ` — ${dlRate}` : ""}</div>
-            {heroOp.pct < 0
-              ? <ProgressBar indeterminate nTransitionSec={M3.motion.bar} />
-              : <ProgressBar nProgress={heroOp.pct} nTransitionSec={M3.motion.bar} />}
+      {/* The header and the last action sit above everything: where the user
+          is, and what just happened. */}
+      <div style={{ display: "flex", flexDirection: "column", gap: M3.space.md, width: "100%", minWidth: 0 }}>
+        <Card>
+          <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: M3.space.sm }}>
+            <div style={{ fontWeight: 600, minWidth: 0 }}>
+              {activeVersion
+                ? `HelixSR ${activeVersion.dll_version}`
+                : "No HelixSR version yet"}
+            </div>
+            <Chip tone={activeVersion?.network_built ? "success" : "neutral"}>
+              {activeVersion ? (activeVersion.network_built ? "Network built" : "Network missing") : "—"}
+            </Chip>
           </div>
-        </PanelSectionRow>
-      )}
-      {downloading && (
-        <PanelSectionRow>
-          <MButton variant="outlined" onClick={onCancelDownload}>Cancel download</MButton>
-        </PanelSectionRow>
-      )}
-      {building && (
-        <PanelSectionRow>
-          <MButton variant="outlined" onClick={onCancelBuild}>Cancel build</MButton>
-        </PanelSectionRow>
-      )}
+          <div style={{ marginTop: M3.space.xs }}>
+            {`Step ${step.index + 1} of 4 — ${stepTitle}`}
+          </div>
+          <div style={{ ...M3.type.caption, opacity: 0.85 }}>{stepHint}</div>
+          {stepAction && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm, marginTop: M3.space.sm }}>
+              <MButton variant="filled" disabled={busy !== ""} onClick={stepAction.onClick}>
+                {stepAction.label}
+              </MButton>
+            </div>
+          )}
+          {heroOp && (
+            <div style={{ width: "100%", marginTop: M3.space.sm }}>
+              <div style={M3.type.caption}>{heroOp.label}{dlRate ? ` — ${dlRate}` : ""}</div>
+              {heroOp.pct < 0
+                ? <ProgressBar indeterminate nTransitionSec={M3.motion.bar} />
+                : <ProgressBar nProgress={heroOp.pct} nTransitionSec={M3.motion.bar} />}
+            </div>
+          )}
+          {(downloading || building) && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm, marginTop: M3.space.sm }}>
+              {downloading && (
+                <MButton variant="outlined" onClick={onCancelDownload}>Cancel download</MButton>
+              )}
+              {building && (
+                <MButton variant="outlined" onClick={onCancelBuild}>Cancel build</MButton>
+              )}
+            </div>
+          )}
+        </Card>
+
+        {/* The last action's result: here, not at the bottom of the panel. */}
+        <Card>
+          <div style={{ fontWeight: 600 }}>Last action</div>
+          {output
+            ? <PagedText text={output} pageSize={20} maxHeight={160} />
+            : <div style={{ ...M3.type.caption, opacity: 0.85 }}>Nothing yet.</div>}
+        </Card>
+      </div>
 
       <PanelSection title="Version">
         <PanelSectionRow>
@@ -1472,7 +1557,10 @@ function Content() {
         {gamesTag && (
           <PanelSectionRow>
             <div style={M3.type.caption}>
-              {games.length} game(s) scanned with {gamesTag}{verify ? ` — ${verify.filter((v) => v.ok).length}/${verify.length} verified` : ""}.
+              {games.length} game(s) scanned with {gamesTag}
+              {` · ${games.filter((g) => g.installed).length} installed`}
+              {verify ? ` · ${verify.filter((v) => v.ok).length}/${verify.length} verified` : ""}
+              {skipped ? ` · ${skipped} not compatible (not listed)` : ""}.
             </div>
           </PanelSectionRow>
         )}
@@ -1486,16 +1574,16 @@ function Content() {
       <PanelSection title="Storage & updates">
         <PanelSectionRow>
           <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
-            <MButton variant="tonal" disabled={busy !== ""}
+            <MButton variant="tonal" disabled={busy !== ""} onClick={onHealth}>
+              {busy === "health" ? "Checking ..." : "Health check"}
+            </MButton>
+            <MButton variant="danger-outline" disabled={busy !== ""}
               onClick={onRemoveOld}>
               {confirm === "storage:old" ? "Tap again to confirm" : "Remove old versions"}
             </MButton>
-            <MButton variant="outlined" disabled={busy !== ""}
+            <MButton variant="danger" disabled={busy !== ""}
               onClick={onFactoryReset}>
               {confirm === "storage:factory" ? "Tap again to confirm" : "Factory reset"}
-            </MButton>
-            <MButton variant="tonal" disabled={busy !== ""} onClick={onHealth}>
-              {busy === "health" ? "Checking ..." : "Health check"}
             </MButton>
           </div>
         </PanelSectionRow>
@@ -1538,14 +1626,6 @@ function Content() {
           </span>
         </PanelSectionRow>
       </PanelSection>
-
-      {output && (
-        <PanelSection title="Output">
-          <PanelSectionRow>
-            <PagedText text={output.slice(-4000)} pageSize={30} maxHeight={220} />
-          </PanelSectionRow>
-        </PanelSection>
-      )}
     </div>
   );
 }

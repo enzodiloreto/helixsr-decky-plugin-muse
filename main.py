@@ -402,11 +402,11 @@ def _new_dl_state(tag: str = "") -> dict:
 
 def _new_scan_state() -> dict:
     return {"running": False, "done": False, "ok": False, "cancelled": False, "error": "",
-            "games": [], "tag": "", "log": ""}
+            "games": [], "tag": "", "log": "", "skipped": 0}
 
 
 def _empty_scan_cache() -> dict:
-    return {"dir": "", "games": [], "tag": "", "extra": [], "time": 0.0}
+    return {"dir": "", "games": [], "tag": "", "extra": [], "time": 0.0, "skipped": 0}
 
 
 def _new_mig_state() -> dict:  # kept for API shape; unused (no 1.x anymore)
@@ -427,6 +427,7 @@ class Plugin:
         self._scan_stop = threading.Event()
         self._scan_cache = _empty_scan_cache()
         self._scan_lock = threading.Lock()
+        self._scan_hidden = 0
         self._update_check = {"at": 0.0, "result": {"ok": True, "update_available": False}}
         self._pu = {"running": False, "done": False, "ok": False, "error": "",
                     "version": "", "url": "", "downloaded": 0, "total": 0,
@@ -1326,7 +1327,7 @@ class Plugin:
         cache = self._scan_cache
         if cache["time"] and time.time() - cache["time"] < SCAN_CACHE_TTL and cache["games"]:
             return {"ok": True, "games": cache["games"], "tag": cache["tag"],
-                    "skipped": 0, "scanned_at": cache["time"]}
+                    "skipped": int(cache.get("skipped") or 0), "scanned_at": cache["time"]}
         return {"ok": True, "games": [], "tag": "", "skipped": 0, "scanned_at": 0}
 
     async def get_way_picks(self) -> dict:
@@ -1375,10 +1376,14 @@ class Plugin:
         return {"ok": True, "folders": folders}
 
     def _scan_games_run(self, d: Path, extra: list) -> list:
+        """The games HelixSR can use; the ones left out are counted (the
+        panel says how many games are not listed)."""
         out = bridge.games(d, extra)
-        games = [g for g in out.get("games", []) if _game_compatible(g)]
+        all_games = out.get("games", [])
+        games = [g for g in all_games if _game_compatible(g)]
         for i, g in enumerate(games, 1):
             g["index"] = i
+        self._scan_hidden = len(all_games) - len(games)
         return games
 
     def _scan_run(self, d: Path, extra: list):
@@ -1391,9 +1396,10 @@ class Plugin:
                     st["error"] = "scan cancelled"
                     return
                 st["games"] = games
+                st["skipped"] = self._scan_hidden
                 self._scan_cache = {"dir": str(d), "games": copy.deepcopy(games),
                                     "tag": _tag_of_dir(d), "extra": list(extra),
-                                    "time": time.time()}
+                                    "time": time.time(), "skipped": self._scan_hidden}
         except bridge.BridgeError as e:
             st["error"] = str(e)
         except Exception as e:  # noqa: BLE001

@@ -50,6 +50,16 @@ export function shortRoute(route: string): string {
   return route;
 }
 
+/** The step the panel is at, so the user always sees where they are:
+ *  download a version, build the network, scan the games, install. */
+export type PanelAction = "download" | "build" | "scan" | "none";
+export function panelStep(versions: number, networkBuilt: boolean, games: number): { index: number; action: PanelAction } {
+  if (!versions) return { index: 0, action: "download" };
+  if (!networkBuilt) return { index: 1, action: "build" };
+  if (!games) return { index: 2, action: "scan" };
+  return { index: 3, action: "none" };
+}
+
 /** The ways a game can take. An anti-cheat game only gets the FSR drop-in:
  *  HelixSR Scaler is not used there (it can get the account banned). */
 export function waysFor(game: { anticheat?: string[] | null; ways?: string[] | null }): string[] {

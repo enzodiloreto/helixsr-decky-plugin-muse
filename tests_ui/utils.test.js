@@ -11,6 +11,7 @@ import {
   fmtSize,
   installWayFor,
   isWaySwitch,
+  panelStep,
   parseBuildProgress,
   ROUTE_LABELS,
   ROUTE_SHORT,
@@ -104,6 +105,19 @@ describe("installWayFor", () => {
     assert.equal(installWayFor("scaler", null, ["fsr"]), "auto");
     assert.equal(installWayFor("auto", "scaler", ["fsr"]), "auto");
     assert.equal(installWayFor("fsr", "scaler", ["fsr"]), "fsr");
+  });
+});
+
+describe("panelStep", () => {
+  it("walks download, build, scan, install", () => {
+    assert.deepEqual(panelStep(0, false, 0), { index: 0, action: "download" });
+    assert.deepEqual(panelStep(1, false, 0), { index: 1, action: "build" });
+    assert.deepEqual(panelStep(1, true, 0), { index: 2, action: "scan" });
+    assert.deepEqual(panelStep(1, true, 3), { index: 3, action: "none" });
+  });
+  it("does not go back a step when a scan finds games", () => {
+    // a version that is downloaded but whose network is not built yet
+    assert.deepEqual(panelStep(1, false, 5), { index: 1, action: "build" });
   });
 });
 

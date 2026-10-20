@@ -1078,6 +1078,25 @@ class PluginCase(unittest.TestCase):
             self.assertNotIn("/games/A", r["ways"])
         asyncio.run(go())
 
+    def test_scan_counts_the_games_it_does_not_list(self):
+        d = self._release_dir()
+        fsr = self._game(str(self.tmp / "games" / "FSR"), name="FSR")
+        plain = self._game(str(self.tmp / "games" / "Plain"), name="Plain",
+                           ways=["scaler"], recommended="scaler",
+                           inputs=[], inputs_found=False)
+        (d / ".stub-games.json").write_text(json.dumps([fsr, plain]))
+        p = self._plugin(active="v2.0.0")
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            await p.start_scan()
+            st = await self._wait_done(p.get_scan_status)
+            self.assertEqual(len(st["games"]), 1)
+            self.assertEqual(st["skipped"], 1)
+            cached = await p.get_last_scan()
+            self.assertEqual(cached["skipped"], 1)
+        asyncio.run(go())
+
     def test_check_plugin_update_newer(self):
         p = self._plugin()
 
