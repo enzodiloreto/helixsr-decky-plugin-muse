@@ -11,6 +11,10 @@ subprocess; upstream files are never imported.
 
 ## Panel header (always on top)
 
+- **The HelixSR version in use has its own card at the very top**: the release
+  tag, the network state as a chip, and a line with the DLL version, the size on
+  disk, the bundled Scaler version and whether frame generation is built. It is
+  the first thing in the panel, so it is never mistaken for part of the log.
 - **Where you are**: "Step 2 of 4 — Build the network" with the step's title, a
   one-line hint, and the one button that moves the flow forward (Download the
   picked release / Build network (+ FG) / Scan games). The step comes from the
@@ -18,10 +22,11 @@ subprocess; upstream files are never imported.
   At the last step the header offers *Re-scan games* instead.
 - The header shows the step and its action at the top of the panel (it scrolls
   away with the list; it does not stick).
-- The active version and its network state as a chip; a running download or build
-  shows its progress bar and a cancel button in the same card.
-- **Last action**: the result of the last thing the plugin did, right under the
-  header (the old Output section at the bottom of the panel is gone).
+- A running download or build shows its progress bar and a cancel button in the
+  step card.
+- **Last action**: the result of the last thing the plugin did, below a divider
+  that keeps the log apart from the state above (the old Output section at the
+  bottom of the panel is gone).
 
 ## Version (HelixSR releases)
 

@@ -15,7 +15,7 @@ import {
 } from "@decky/api"
 import { Fragment, useEffect, useRef, useState } from "react";
 import { MdMemory } from "react-icons/md";
-import { Card, Chip, MButton, PagedText } from "./components";
+import { Card, Chip, Divider, MButton, PagedText } from "./components";
 import { M3 } from "./theme";
 import {
   DownloadStatus,
@@ -465,7 +465,7 @@ function Content() {
   // have are in the list below, with their details and Use/Remove).
   const notDownloaded = releases.filter((r) => !downloadedTags.has(r.tag));
   const listedReleases = showAllReleases ? notDownloaded : notDownloaded.slice(0, 3);
-  const activeVersion = state?.versions.find((v) => v.tag === state.active_tag);
+  const activeVersion = state?.versions.find((v) => v.tag === state.active_tag) || state?.versions[0];
   const pickedRelease = releases.find((r) => r.tag === picked);
   const pickedDownloaded = picked ? downloadedTags.has(picked) : false;
   // The games the last verify found broken.
@@ -1416,20 +1416,33 @@ function Content() {
 
   return (
     <div>
+      {/* The version in use: its own card at the very top, so it is never
+          mistaken for part of the log. */}
+      <Card>
+        <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: M3.space.sm }}>
+          <div style={{ fontWeight: 600, minWidth: 0 }}>
+            {activeVersion ? `HelixSR ${activeVersion.tag}` : "No HelixSR version yet"}
+          </div>
+          <Chip tone={activeVersion?.network_built ? "success" : "neutral"}>
+            {activeVersion ? (activeVersion.network_built ? "Network built" : "Network missing") : "—"}
+          </Chip>
+        </div>
+        <div style={{ ...M3.type.caption, opacity: 0.85, marginTop: M3.space.xs }}>
+          {activeVersion
+            ? [
+              `DLL ${activeVersion.dll_version}`,
+              `${activeVersion.size_mb} MB`,
+              activeVersion.scaler_version ? `Scaler ${activeVersion.scaler_version}` : "no Scaler",
+              activeVersion.fg_built ? "FG built" : "no FG",
+            ].join(" · ")
+            : "Download a HelixSR release to start."}
+        </div>
+      </Card>
+
       {/* The header: where the user is in the flow and the one action that
           moves them forward. */}
-      <div style={{ width: "100%", minWidth: 0 }}>
+      <div style={{ marginTop: M3.space.md }}>
         <Card>
-          <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: M3.space.sm }}>
-            <div style={{ fontWeight: 600, minWidth: 0 }}>
-              {activeVersion
-                ? `HelixSR ${activeVersion.dll_version}`
-                : "No HelixSR version yet"}
-            </div>
-            <Chip tone={activeVersion?.network_built ? "success" : "neutral"}>
-              {activeVersion ? (activeVersion.network_built ? "Network built" : "Network missing") : "—"}
-            </Chip>
-          </div>
           <div style={{ marginTop: M3.space.xs }}>
             {`Step ${step.index + 1} of 4 — ${stepTitle}`}
           </div>
@@ -1469,15 +1482,14 @@ function Content() {
         </Card>
       </div>
 
-      {/* The last action's result: here, not at the bottom of the panel. */}
-      <div style={{ marginTop: M3.space.md }}>
-        <Card>
-          <div style={{ fontWeight: 600 }}>Last action</div>
-          {output
-            ? <PagedText text={output} pageSize={20} maxHeight={160} />
-            : <div style={{ ...M3.type.caption, opacity: 0.85 }}>Nothing yet.</div>}
-        </Card>
-      </div>
+      {/* The log of the last action, clearly apart from the state above. */}
+      <Divider />
+      <Card>
+        <div style={{ fontWeight: 600 }}>Last action</div>
+        {output
+          ? <PagedText text={output} pageSize={20} maxHeight={160} />
+          : <div style={{ ...M3.type.caption, opacity: 0.85 }}>Nothing yet.</div>}
+      </Card>
 
       <PanelSection title="Version">
         <PanelSectionRow>
