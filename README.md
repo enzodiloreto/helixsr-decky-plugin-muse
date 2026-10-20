@@ -77,17 +77,23 @@ options, and offers:
 
 - the **way** picker — **Recommended** (HelixSR picks the game's best way),
   **HelixSR Scaler** (pick DLSS in the game's graphics menu; Insert opens its
-  menu) or **FSR drop-in** (pick AMD FSR in the game). Your pick survives re-scans,
-  and installing with a different way switches the game (the other install is
-  removed first) — the button then reads *Switch to …*.
+  menu) or **FSR drop-in** (pick AMD FSR in the game). Your pick is remembered
+  between sessions (it survives a re-scan and a panel close), and installing
+  with a different way switches the game (the other install is removed first) —
+  the button then reads *Switch to …*.
 - **Install**, **Update**, **Switch to …**, **Remove**, **Repair** (a clean
   re-install of the same way), **Roll back** (restore the previous install),
   **FG on/off** (Scaler games on an FG build), **Settings** and **Log**.
 - **Anti-cheat games get the FSR drop-in only.** The Scaler is not used there (it
   can get the account banned in online play), so an anti-cheat game without FSR 3.1
   is not listed at all.
-- **Verify installs** checks the install markers *and* the files, so a Steam update
-  that replaced the drop-ins is detected; affected games get a one-tap **Repair**.
+- **Settings** edits the game's own ini inline (the editor follows the kind of
+  settings the installed way uses) with named **presets** (save, apply, delete) and
+  a **Defaults** reset. **Log** shows the game's log files with one-tap fixes for
+  the known patterns. Both open inside the game's own card, right under its
+  buttons.
+- **Verify installs** checks the install markers and files, so a Steam update that
+  replaced the drop-ins is detected; affected games get a one-tap **Repair**.
 - **Settings** edits the game's own ini inline (the editor follows the kind of
   settings the installed way uses) with named **presets** (save, apply, delete) and
   a **Defaults** reset. **Log** shows the game's log files with one-tap fixes for

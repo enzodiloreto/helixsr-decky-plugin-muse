@@ -76,9 +76,10 @@ subprocess; upstream files are never imported.
 - **Way picker** per game: **Recommended** (HelixSR picks the game's best way),
   **HelixSR Scaler** (pick DLSS in the game's graphics menu; Insert opens its
   menu) or **FSR drop-in** (pick AMD FSR in the game). The pick survives
-  re-scans; the install action uses the picked way, and switching ways removes
-  the other install first (the button reads *Switch to …*). An anti-cheat game
-  only offers the FSR drop-in.
+  re-scans and is persisted in the plugin's settings, so it is still there after
+  the panel is closed and opened again; the install action uses the picked way,
+  and switching ways removes the other install first (the button reads
+  *Switch to …*). An anti-cheat game only offers the FSR drop-in.
 - **Install**, **Update**, **Switch to …**, **Remove**, **Repair** (remove +
   reinstall of the same way), **Roll back** (restore the previous install),
   **FG on/off** (Scaler games on an FG build), **Settings**, **Log**. An
@@ -91,10 +92,11 @@ subprocess; upstream files are never imported.
   settings the installed way uses (`helixsr` — Sharpening/Compatibility — or
   `scaler` — `HelixSR.*`), with labelled options, a Sharpness slider, free-text
   keys and a list of the other keys in the file. Named **presets** (save, apply,
-  delete) plus a built-in **Default**; the bridge validates the values.
+  delete) plus a built-in **Default**; the bridge validates the values. The
+  editor and the log open **inside the game's own card**, under its buttons.
 - **Log** viewer: the game's log files with line counts, paged tails, the
   important lines and one-tap fixes for known patterns (the pattern is
-  re-verified before anything is written).
+  re-verified before anything is written). It opens inside the game card too.
 - Extra non-Steam folders can be added and removed by path.
 
 ## Storage & updates

@@ -1309,6 +1309,30 @@ class Plugin:
                     "skipped": 0, "scanned_at": cache["time"]}
         return {"ok": True, "games": [], "tag": "", "skipped": 0, "scanned_at": 0}
 
+    async def get_way_picks(self) -> dict:
+        """The way the user picked per game folder (persisted between sessions)."""
+        picks = self.settings.getSetting("way_picks", {}) or {}
+        if not isinstance(picks, dict):
+            picks = {}
+        return {"ok": True, "ways": {str(k): str(v) for k, v in picks.items()}}
+
+    async def set_way_pick(self, folder: str, way: str) -> dict:
+        """Remember the way picked for a game (the panel re-reads it on open)."""
+        picks = self.settings.getSetting("way_picks", {}) or {}
+        if not isinstance(picks, dict):
+            picks = {}
+        folder = str(folder or "")
+        way = str(way or "auto")
+        if not folder:
+            return {"ok": False, "error": "no game folder given"}
+        if way in ("auto", "scaler", "fsr"):
+            picks[folder] = way
+        else:
+            picks.pop(folder, None)
+        self.settings.setSetting("way_picks", picks)
+        self.settings.commit()
+        return {"ok": True, "ways": {str(k): str(v) for k, v in picks.items()}}
+
     async def add_scan_folder(self, path: str) -> dict:
         cleaned = bridge_clean(str(path or ""))
         d = Path(cleaned).expanduser()

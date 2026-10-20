@@ -52,6 +52,7 @@ import {
   apiGetReleases,
   apiGetScanStatus,
   apiGetState,
+  apiGetWayPicks,
   apiHealthCheck,
   apiInstallGames,
   apiRemoveOldVersions,
@@ -64,6 +65,7 @@ import {
   apiSetActiveVersion,
   apiSetGameSettings,
   apiSetScalerFg,
+  apiSetWayPick,
   apiStartBuild,
   apiStartDownload,
   apiStartPluginUpdate,
@@ -191,13 +193,21 @@ function Content() {
 
   // Keep the way the user picked for a game: every install, repair and manual
   // scan re-scans the libraries, and that must not throw the selection back
-  // to "Recommended" (the pick is what the install action uses).
+  // to "Recommended" (the pick is what the install action uses). The picks
+  // are persisted (backend settings), so they also survive closing the panel.
   const mergeWays = (list: HelixGame[]) => {
     setWays((prev) => {
-      const next: Record<string, string> = {};
-      list.forEach((g) => { next[g.folder] = prev[g.folder] || "auto"; });
+      const next: Record<string, string> = { ...prev };
+      list.forEach((g) => { if (!next[g.folder]) next[g.folder] = "auto"; });
       return next;
     });
+  };
+
+  // Pick a way for a game and remember it (the backend keeps it in its
+  // settings: the pick survives a panel close and a re-scan).
+  const pickWay = (folder: string, w: string) => {
+    setWays((prev) => ({ ...prev, [folder]: w }));
+    apiSetWayPick(folder, w).catch((e) => console.error("[helixsr] set_way_pick failed", e));
   };
 
   const refreshState = async () => {
@@ -242,6 +252,13 @@ function Content() {
         setState(s);
         setPicked(s.active_tag || s.versions[0]?.tag || relsRes.releases[0]?.tag || "");
         if (relsRes.error) setOutput(`Failed to load HelixSR releases: ${relsRes.error}`);
+        try {
+          // The way picked per game: remembered between sessions. Loaded
+          // before the scan, so a remembered pick wins over the "auto"
+          // default the scan merge fills in.
+          const picks = await apiGetWayPicks();
+          if (picks.ways) setWays(picks.ways);
+        } catch { /* no picks yet */ }
         try {
           const cached: ScanCache = await apiGetLastScan();
           if (cached.games.length) {
@@ -1009,6 +1026,8 @@ function Content() {
       ? (() => { const p = parseBuildProgress(buildLog); return { label: "Building", pct: p ? p.pct : -1 }; })()
       : null;
 
+  // The settings editor and the log viewer are rendered INSIDE the game card
+  // that opened them (not at the bottom of the game list).
   const renderSettingsEditor = () => {
     if (!settingsFor || !settings) return null;
     const isScaler = settings.schema === "scaler";
@@ -1016,8 +1035,8 @@ function Content() {
     const options = isScaler ? SCALER_OPTIONS : HELIXSR_OPTIONS;
     const keys = Object.keys(labels);
     return (
-      <Card>
-        <div style={{ fontWeight: 600 }}>Settings — {base(settingsFor)}</div>
+      <Fragment>
+        <div style={{ fontWeight: 600, marginTop: M3.space.sm }}>Settings — {base(settingsFor)}</div>
         <div style={{ ...M3.type.caption, opacity: 0.8, overflowWrap: "anywhere" }}>{settings.path}</div>
         {keys.map((key) => {
           const opts = options[key];
@@ -1038,8 +1057,12 @@ function Content() {
           }
           if (key.endsWith("Sharpness")) {
             return (
-              <PanelSectionRow key={key}>
+              <div key={key} style={{ width: "100%", minWidth: 0, maxWidth: "100%", boxSizing: "border-box", marginTop: M3.space.xs }}>
+                {/* The slider gets the card's full width: inside a row its
+                    track kept its own minimum width and pushed past the
+                    card's right edge. */}
                 <SliderField
+                  layout="below"
                   label="Sharpness"
                   description={labels[key]}
                   value={parseFloat(cur) || 0}
@@ -1049,18 +1072,18 @@ function Content() {
                   showValue
                   onChange={(v: number) => setSettingsDraft({ ...settingsDraft, [key]: String(Math.round(v * 100) / 100) })}
                 />
-              </PanelSectionRow>
+              </div>
             );
           }
           return (
-            <PanelSectionRow key={key}>
+            <div key={key} style={{ width: "100%", minWidth: 0, maxWidth: "100%", boxSizing: "border-box", marginTop: M3.space.xs }}>
               <TextField
                 label={key.split(".")[1]}
                 description={labels[key]}
                 value={cur}
                 onChange={(e) => setSettingsDraft({ ...settingsDraft, [key]: (e.target as HTMLInputElement).value })}
               />
-            </PanelSectionRow>
+            </div>
           );
         })}
         {settings.other && Object.keys(settings.other).length > 0 && (
@@ -1082,13 +1105,14 @@ function Content() {
           </div>
         </PanelSectionRow>
         <PanelSectionRow>
-          <TextField
-            label="Preset name"
-            value={presetName}
-            onChange={(e) => setPresetName((e.target as HTMLInputElement).value.slice(0, 40))}
-          />
-        </PanelSectionRow>
-        <PanelSectionRow>
+          <div style={{ width: "100%", minWidth: 0, maxWidth: "100%", boxSizing: "border-box" }}>
+            <TextField
+              label="Preset name"
+              value={presetName}
+              onChange={(e) => setPresetName((e.target as HTMLInputElement).value.slice(0, 40))}
+            />
+          </div>
+        </PanelSectionRow>        <PanelSectionRow>
           <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
             <MButton variant="tonal" disabled={busy !== ""} onClick={onSavePreset}>Save preset</MButton>
             <MButton variant="tonal" disabled={busy !== "" || !presetName} onClick={onApplyPreset}>
@@ -1110,15 +1134,15 @@ function Content() {
             </div>
           </PanelSectionRow>
         )}
-      </Card>
+      </Fragment>
     );
   };
 
   const renderLog = () => {
     if (!logFor || !gameLog) return null;
     return (
-      <Card>
-        <div style={{ fontWeight: 600 }}>Log — {base(logFor)}</div>
+      <Fragment>
+        <div style={{ fontWeight: 600, marginTop: M3.space.sm }}>Log — {base(logFor)}</div>
         {(gameLog.files || []).map((f) => (
           <div key={String(f.path)} style={{ marginTop: M3.space.sm }}>
             <div style={{ ...M3.type.caption, overflowWrap: "anywhere" }}>{String(f.path)} ({f.lines} lines)</div>
@@ -1142,7 +1166,7 @@ function Content() {
         <PanelSectionRow>
           <MButton variant="text" onClick={() => { setLogFor(null); setGameLog(null); }}>Close</MButton>
         </PanelSectionRow>
-      </Card>
+      </Fragment>
     );
   };
 
@@ -1210,7 +1234,7 @@ function Content() {
               <MButton key={w} variant={way === w ? "filled" : "tonal"}
                 disabled={busy !== "" || !g.supported}
                 description={WAY_HINTS[w]}
-                onClick={() => setWays({ ...ways, [g.folder]: w })}>
+                onClick={() => pickWay(g.folder, w)}>
                 {WAY_LABELS[w] || w}
               </MButton>
             ))}
@@ -1271,6 +1295,14 @@ function Content() {
             )}
           </div>
         </PanelSectionRow>
+        {/* The settings editor and the log open inside this card, not at the
+            bottom of the game list. */}
+        {settingsFor === g.folder && settings && (
+          <div style={{ marginTop: M3.space.sm, minWidth: 0 }}>{renderSettingsEditor()}</div>
+        )}
+        {logFor === g.folder && gameLog && (
+          <div style={{ marginTop: M3.space.sm, minWidth: 0 }}>{renderLog()}</div>
+        )}
       </Card>
     );
   };
@@ -1444,17 +1476,11 @@ function Content() {
             </div>
           </PanelSectionRow>
         )}
-        {games.map(renderGame)}
-        {settingsFor && settings && (
-          <PanelSectionRow>
-            <div style={{ width: "100%" }}>{renderSettingsEditor()}</div>
-          </PanelSectionRow>
-        )}
-        {logFor && gameLog && (
-          <PanelSectionRow>
-            <div style={{ width: "100%" }}>{renderLog()}</div>
-          </PanelSectionRow>
-        )}
+        {/* The game cards in a column with a gap: they used to sit flush
+            against each other. */}
+        <div style={{ display: "flex", flexDirection: "column", gap: M3.space.md, width: "100%", minWidth: 0 }}>
+          {games.map(renderGame)}
+        </div>
       </PanelSection>
 
       <PanelSection title="Storage & updates">

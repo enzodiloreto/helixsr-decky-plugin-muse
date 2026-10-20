@@ -994,6 +994,30 @@ class PluginCase(unittest.TestCase):
             self.assertIn("build", r["error"])
         asyncio.run(go())
 
+    def test_way_picks_are_persisted(self):
+        p = self._plugin()
+
+        async def go():
+            p.loop = asyncio.get_event_loop()
+            r = await p.get_way_picks()
+            self.assertTrue(r["ok"])
+            self.assertEqual(r["ways"], {})
+            r = await p.set_way_pick("/games/A", "fsr")
+            self.assertTrue(r["ok"])
+            self.assertEqual(r["ways"], {"/games/A": "fsr"})
+            r = await p.set_way_pick("/games/B", "auto")
+            self.assertTrue(r["ok"])
+            r = await p.get_way_picks()
+            self.assertEqual(r["ways"], {"/games/A": "fsr", "/games/B": "auto"})
+            # a pick for a game that is gone stays (the game may come back)
+            r = await p.set_way_pick("/games/C", "scaler")
+            self.assertEqual(r["ways"]["/games/C"], "scaler")
+            # an unknown way is dropped
+            r = await p.set_way_pick("/games/A", "nonsense")
+            self.assertTrue(r["ok"])
+            self.assertNotIn("/games/A", r["ways"])
+        asyncio.run(go())
+
     def test_check_plugin_update_newer(self):
         p = self._plugin()
 
