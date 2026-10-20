@@ -1416,9 +1416,9 @@ function Content() {
 
   return (
     <div>
-      {/* The header sticks to the top: with a long game list the step and
-          its action would otherwise scroll out of sight. */}
-      <div style={{ position: "sticky", top: 0, zIndex: 2, width: "100%", minWidth: 0 }}>
+      {/* The header: where the user is in the flow and the one action that
+          moves them forward. */}
+      <div style={{ width: "100%", minWidth: 0 }}>
         <Card>
           <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: M3.space.sm }}>
             <div style={{ fontWeight: 600, minWidth: 0 }}>

@@ -16,8 +16,8 @@ subprocess; upstream files are never imported.
   picked release / Build network (+ FG) / Scan games). The step comes from the
   state: no version → download, no network → build, no games → scan, else install.
   At the last step the header offers *Re-scan games* instead.
-- The header **sticks to the top** of the panel: with a long game list the step
-  and its action stay in sight.
+- The header shows the step and its action at the top of the panel (it scrolls
+  away with the list; it does not stick).
 - The active version and its network state as a chip; a running download or build
   shows its progress bar and a cancel button in the same card.
 - **Last action**: the result of the last thing the plugin did, right under the
