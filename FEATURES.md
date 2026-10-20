@@ -15,12 +15,19 @@ subprocess; upstream files are never imported.
   one-line hint, and the one button that moves the flow forward (Download the
   picked release / Build network (+ FG) / Scan games). The step comes from the
   state: no version → download, no network → build, no games → scan, else install.
+  At the last step the header offers *Re-scan games* instead.
+- The header **sticks to the top** of the panel: with a long game list the step
+  and its action stay in sight.
 - The active version and its network state as a chip; a running download or build
   shows its progress bar and a cancel button in the same card.
 - **Last action**: the result of the last thing the plugin did, right under the
   header (the old Output section at the bottom of the panel is gone).
 
 ## Version (HelixSR releases)
+
+- The release buttons are the ones you do **not** have yet; the versions you have
+  are in the list below them, with their details and **Use** / **Remove**. The
+  picked release defaults to the newest one you do not have.
 
 - Release feed from the HelixSR GitHub API (newest first, zip assets only), the
   three newest visible with a **Show all N releases** expander. Prereleases stay
@@ -104,8 +111,15 @@ subprocess; upstream files are never imported.
   rest: **Remove**, **Repair** (remove + reinstall of the same way), **Roll back**
   (restore the previous install), **FG on/off** (Scaler games on an FG build),
   **Settings**, **Log**. An anti-cheat game has no Scaler: it gets the FSR
-  drop-in (or is not listed at all when it has no FSR 3.1). Destructive buttons
-  (Remove, Remove old versions, Factory reset) use the danger tone.
+  drop-in (or is not listed at all when it has no FSR 3.1) and its card says so.
+  Destructive buttons (Remove, Remove old versions, Factory reset) use the danger
+  tone.
+- **The list can be filtered**: a search by name or folder and a status filter
+  (All / Installed / Not installed / Needs repair). A game the last verify found
+  broken gets a *Needs repair* chip, the reason, and **Repair** as its main
+  action.
+- The *Extra game folder* field is behind an **Add a game folder** button (a rare
+  action).
 - **Verify installs** checks the install markers *and* the files (loader, HelixSR
   DLL, scaler ini for Scaler; marker + log/backup for the drop-in), so a Steam
   update that replaced the drop-ins is detected and can be repaired.

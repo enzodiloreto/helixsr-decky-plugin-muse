@@ -60,6 +60,35 @@ export function panelStep(versions: number, networkBuilt: boolean, games: number
   return { index: 3, action: "none" };
 }
 
+/** The game list's status filter. */
+export type GameFilter = "all" | "installed" | "notinstalled" | "repair";
+
+export interface FilterableGame {
+  folder: string;
+  name: string;
+  installed?: string | null;
+}
+
+/** The games the list shows: the status filter and the text search (the
+ *  name or the folder). `broken` holds the folders the last verify found
+ *  damaged. */
+export function filterGames<T extends FilterableGame>(
+  games: T[],
+  filter: GameFilter,
+  query: string,
+  broken: string[] = [],
+): T[] {
+  const bad = new Set(broken);
+  const q = query.trim().toLowerCase();
+  return games.filter((g) => {
+    if (filter === "installed" && !g.installed) return false;
+    if (filter === "notinstalled" && g.installed) return false;
+    if (filter === "repair" && !bad.has(g.folder)) return false;
+    if (q && !g.name.toLowerCase().includes(q) && !g.folder.toLowerCase().includes(q)) return false;
+    return true;
+  });
+}
+
 /** The ways a game can take. An anti-cheat game only gets the FSR drop-in:
  *  HelixSR Scaler is not used there (it can get the account banned). */
 export function waysFor(game: { anticheat?: string[] | null; ways?: string[] | null }): string[] {

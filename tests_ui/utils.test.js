@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import {
   base,
   cmpTags,
+  filterGames,
   fmtAge,
   fmtSize,
   installWayFor,
@@ -118,6 +119,33 @@ describe("panelStep", () => {
   it("does not go back a step when a scan finds games", () => {
     // a version that is downloaded but whose network is not built yet
     assert.deepEqual(panelStep(1, false, 5), { index: 1, action: "build" });
+  });
+});
+
+describe("filterGames", () => {
+  const games = [
+    { folder: "/g/Alpha", name: "Alpha", installed: "scaler" },
+    { folder: "/g/Beta", name: "Beta", installed: null },
+    { folder: "/g/Gamma", name: "Gamma", installed: "fsr" },
+  ];
+  it("keeps everything for 'all'", () => {
+    assert.equal(filterGames(games, "all", "").length, 3);
+  });
+  it("filters by the install state", () => {
+    assert.deepEqual(filterGames(games, "installed", "").map((g) => g.name), ["Alpha", "Gamma"]);
+    assert.deepEqual(filterGames(games, "notinstalled", "").map((g) => g.name), ["Beta"]);
+  });
+  it("filters by the broken folders", () => {
+    assert.deepEqual(filterGames(games, "repair", "", ["/g/Beta"]).map((g) => g.name), ["Beta"]);
+    assert.equal(filterGames(games, "repair", "").length, 0);
+  });
+  it("searches the name and the folder", () => {
+    assert.deepEqual(filterGames(games, "all", "gam").map((g) => g.name), ["Gamma"]);
+    assert.deepEqual(filterGames(games, "all", "/g/beta").map((g) => g.name), ["Beta"]);
+    assert.equal(filterGames(games, "all", "nothing").length, 0);
+  });
+  it("combines the filter and the search", () => {
+    assert.deepEqual(filterGames(games, "installed", "a").map((g) => g.name), ["Alpha", "Gamma"]);
   });
 });
 

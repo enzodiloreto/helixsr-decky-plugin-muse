@@ -78,8 +78,10 @@ import {
   ROUTE_SHORT,
   base,
   cmpTags,
+  filterGames,
   fmtAge,
   fmtSize,
+  GameFilter,
   installWayFor,
   isWaySwitch,
   panelStep,
@@ -136,6 +138,14 @@ const WAY_SHORT: Record<string, string> = {
   fsr: "FSR drop-in",
 };
 
+// The game list's status filter.
+const GAME_FILTERS: { key: "all" | "installed" | "notinstalled" | "repair"; label: string }[] = [
+  { key: "all", label: "All" },
+  { key: "installed", label: "Installed" },
+  { key: "notinstalled", label: "Not installed" },
+  { key: "repair", label: "Needs repair" },
+];
+
 function Content() {
   const [releases, setReleases] = useState<HelixRelease[]>([]);
   const [showPrereleases, setShowPrereleases] = useState(false);
@@ -159,6 +169,11 @@ function Content() {
   const [gamesTag, setGamesTag] = useState("");
   // The games the scan found that HelixSR cannot use (not listed).
   const [skipped, setSkipped] = useState(0);
+  // The list filter: a text search and a status.
+  const [gameFilter, setGameFilter] = useState<GameFilter>("all");
+  const [gameQuery, setGameQuery] = useState("");
+  // The extra game folder field (a rare action, behind a button).
+  const [showAddFolder, setShowAddFolder] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [ways, setWays] = useState<Record<string, string>>({});
   // Which game cards show their extra actions ("More").
@@ -231,7 +246,12 @@ function Content() {
     try {
       const relsRes = await apiGetReleases(showPrereleases);
       setReleases(relsRes.releases);
-      if (!picked) setPicked(relsRes.releases[0]?.tag || "");
+      if (!picked) {
+        // The pick is a release to download: the newest one you do not have.
+        const have = new Set((state?.versions || []).map((v) => v.tag));
+        setPicked(relsRes.releases.find((r) => !have.has(r.tag))?.tag
+          || relsRes.releases[0]?.tag || "");
+      }
       if (relsRes.error) setOutput(`Failed to load HelixSR releases: ${relsRes.error}`);
       else if (relsRes.releases.length) setOutput("");
       return relsRes;
@@ -255,7 +275,11 @@ function Content() {
         const [relsRes, s] = await Promise.all([apiGetReleases(), apiGetState()]);
         setReleases(relsRes.releases);
         setState(s);
-        setPicked(s.active_tag || s.versions[0]?.tag || relsRes.releases[0]?.tag || "");
+        // The pick is a release to download: the newest one you do not have
+        // (the ones you have are in the list below, with Use/Remove).
+        const have = new Set((s.versions || []).map((v) => v.tag));
+        setPicked(relsRes.releases.find((r) => !have.has(r.tag))?.tag
+          || s.active_tag || s.versions[0]?.tag || relsRes.releases[0]?.tag || "");
         if (relsRes.error) setOutput(`Failed to load HelixSR releases: ${relsRes.error}`);
         try {
           // The way picked per game: remembered between sessions. Loaded
@@ -437,12 +461,17 @@ function Content() {
   }, [building]);
 
   const downloadedTags = new Set((state?.versions || []).map((v) => v.tag));
-  const listedReleases = showAllReleases
-    ? releases
-    : releases.filter((r, i) => downloadedTags.has(r.tag) || i < 3);
+  // The picker shows the releases that are NOT downloaded (the versions you
+  // have are in the list below, with their details and Use/Remove).
+  const notDownloaded = releases.filter((r) => !downloadedTags.has(r.tag));
+  const listedReleases = showAllReleases ? notDownloaded : notDownloaded.slice(0, 3);
   const activeVersion = state?.versions.find((v) => v.tag === state.active_tag);
   const pickedRelease = releases.find((r) => r.tag === picked);
   const pickedDownloaded = picked ? downloadedTags.has(picked) : false;
+  // The games the last verify found broken.
+  const brokenFolders = new Set((verify || []).filter((v) => !v.ok).map((v) => v.folder));
+  // The list the user sees: the scan's games, filtered.
+  const visibleGames = filterGames(games, gameFilter, gameQuery, [...brokenFolders]);
 
   const onCancelDownload = async () => {
     try {
@@ -1237,6 +1266,10 @@ function Content() {
     // The extra actions behind "More" (a game with no install and nothing
     // to roll back has none).
     const hasMore = !!g.installed || !!g.previous;
+    // The last verify found this game broken: it needs a repair, and the
+    // user has to know why.
+    const broken = brokenFolders.has(g.folder);
+    const problems = ((verify || []).find((v) => v.folder === g.folder && !v.ok)?.problems) || [];
     return (
       <Card key={g.folder}>
         {/* flexWrap + a flex basis on the name: the chip drops to its own line
@@ -1244,12 +1277,20 @@ function Content() {
         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: M3.space.sm }}>
           <div style={{ flex: "1 1 40%", minWidth: 0, fontWeight: 600, overflowWrap: "break-word" }}>{g.name}</div>
           <Chip tone={pending ? "warning" : g.installed ? "success" : "neutral"}>{chipText}</Chip>
+          {broken && <Chip tone="error">Needs repair</Chip>}
         </div>
         <div style={{ ...M3.type.caption, opacity: 0.8, overflowWrap: "anywhere" }}>{g.folder}</div>
         <div style={M3.type.caption}>
           {(g.inputs || []).join(" · ")}
-          {g.anticheat.length > 0 ? ` — anti-cheat (${g.anticheat.join(", ")})` : ""}
         </div>
+        {g.anticheat.length > 0 && (
+          <div style={M3.type.caption}>
+            {`Anti-cheat (${g.anticheat.join(", ")}) — only the FSR drop-in is used here.`}
+          </div>
+        )}
+        {broken && problems.length > 0 && (
+          <div style={M3.type.caption}>{problems.join("; ")}</div>
+        )}
         {g.installed === "scaler" && (
           <div style={M3.type.caption}>
             FG: {g.frame_generation == null ? "unknown" : g.frame_generation ? "on" : "off"}
@@ -1290,13 +1331,21 @@ function Content() {
           {/* The primary action stays visible; everything else is behind
               "More" (nine focus stops per game was a lot on a Deck). */}
           <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
-            {!g.installed && allowed.length > 0 && (
+            {/* A game the last verify found broken needs a repair: that is
+                its primary action. */}
+            {broken && g.installed && (
+              <MButton variant="filled" disabled={busy !== ""}
+                onClick={() => onRepair([g.folder])}>
+                Repair
+              </MButton>
+            )}
+            {!broken && !g.installed && allowed.length > 0 && (
               <MButton variant="filled" disabled={busy !== "" || !g.supported}
                 onClick={() => onInstall([g.folder], installWay)}>
                 {confirm.startsWith(`install:${g.folder}`) ? "Tap again to confirm" : "Install"}
               </MButton>
             )}
-            {g.installed && allowed.length > 0 && (
+            {!broken && g.installed && allowed.length > 0 && (
               <MButton variant="tonal" disabled={busy !== ""}
                 onClick={() => onInstall([g.folder], installWay)}>
                 {confirm === installId
@@ -1323,8 +1372,14 @@ function Content() {
                   {confirm.startsWith(`uninstall:${g.folder}`) ? "Tap again to confirm" : "Remove"}
                 </MButton>
               )}
-              {!scalerBlocked && g.installed && (
+              {!scalerBlocked && g.installed && !broken && (
                 <MButton variant="text" disabled={busy !== ""} onClick={() => onRepair([g.folder])}>Repair</MButton>
+              )}
+              {broken && g.installed && allowed.length > 0 && (
+                <MButton variant="text" disabled={busy !== ""}
+                  onClick={() => onInstall([g.folder], installWay)}>
+                  {confirm === installId ? "Tap again to confirm" : "Update"}
+                </MButton>
               )}
               {g.installed === "scaler" && g.fg_possible && !scalerBlocked && (
                 <MButton variant="tonal" disabled={busy !== ""}
@@ -1361,9 +1416,9 @@ function Content() {
 
   return (
     <div>
-      {/* The header and the last action sit above everything: where the user
-          is, and what just happened. */}
-      <div style={{ display: "flex", flexDirection: "column", gap: M3.space.md, width: "100%", minWidth: 0 }}>
+      {/* The header sticks to the top: with a long game list the step and
+          its action would otherwise scroll out of sight. */}
+      <div style={{ position: "sticky", top: 0, zIndex: 2, width: "100%", minWidth: 0 }}>
         <Card>
           <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: M3.space.sm }}>
             <div style={{ fontWeight: 600, minWidth: 0 }}>
@@ -1379,11 +1434,18 @@ function Content() {
             {`Step ${step.index + 1} of 4 — ${stepTitle}`}
           </div>
           <div style={{ ...M3.type.caption, opacity: 0.85 }}>{stepHint}</div>
-          {stepAction && (
+          {(stepAction || games.length > 0) && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm, marginTop: M3.space.sm }}>
-              <MButton variant="filled" disabled={busy !== ""} onClick={stepAction.onClick}>
-                {stepAction.label}
-              </MButton>
+              {stepAction && (
+                <MButton variant="filled" disabled={busy !== ""} onClick={stepAction.onClick}>
+                  {stepAction.label}
+                </MButton>
+              )}
+              {!stepAction && games.length > 0 && (
+                <MButton variant="tonal" disabled={busy !== "" || scanning} onClick={onScan}>
+                  {scanning ? "Scanning ..." : "Re-scan games"}
+                </MButton>
+              )}
             </div>
           )}
           {heroOp && (
@@ -1405,8 +1467,10 @@ function Content() {
             </div>
           )}
         </Card>
+      </div>
 
-        {/* The last action's result: here, not at the bottom of the panel. */}
+      {/* The last action's result: here, not at the bottom of the panel. */}
+      <div style={{ marginTop: M3.space.md }}>
         <Card>
           <div style={{ fontWeight: 600 }}>Last action</div>
           {output
@@ -1422,15 +1486,15 @@ function Content() {
               <MButton key={r.tag} variant={picked === r.tag ? "filled" : "tonal"}
                 onClick={() => setPicked(r.tag)}
                 description={`${r.zip_name} · ${fmtSize(r.size)}`}>
-                {r.tag}{downloadedTags.has(r.tag) ? " ✓" : ""}
+                {r.tag}
               </MButton>
             ))}
           </div>
         </PanelSectionRow>
-        {!showAllReleases && releases.length > 3 && (
+        {!showAllReleases && notDownloaded.length > 3 && (
           <PanelSectionRow>
             <MButton variant="text" onClick={() => setShowAllReleases(true)}>
-              Show all {releases.length} releases
+              Show all {notDownloaded.length} releases
             </MButton>
           </PanelSectionRow>
         )}
@@ -1535,16 +1599,11 @@ function Content() {
           </div>
         </PanelSectionRow>
         <PanelSectionRow>
-          <TextField
-            label="Extra game folder"
-            description="A game outside Steam libraries"
-            value={folderInput}
-            onChange={(e) => setFolderInput((e.target as HTMLInputElement).value)}
-          />
-        </PanelSectionRow>
-        <PanelSectionRow>
           <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
-            <MButton variant="tonal" disabled={busy !== "" || !folderInput.trim()} onClick={onAddFolder}>Add folder</MButton>
+            <MButton variant={showAddFolder ? "tonal" : "text"} disabled={busy !== ""}
+              onClick={() => setShowAddFolder(!showAddFolder)}>
+              {showAddFolder ? "Close" : "Add a game folder"}
+            </MButton>
             {(state?.extra_folders || []).map((f) => (
               <MButton key={f} variant="text" disabled={busy !== ""}
                 description={f}
@@ -1554,20 +1613,67 @@ function Content() {
             ))}
           </div>
         </PanelSectionRow>
+        {showAddFolder && (
+          <PanelSectionRow>
+            <div style={{ width: "100%", minWidth: 0, maxWidth: "100%", boxSizing: "border-box" }}>
+              <TextField
+                label="Extra game folder"
+                description="A game outside Steam libraries"
+                value={folderInput}
+                onChange={(e) => setFolderInput((e.target as HTMLInputElement).value)}
+              />
+            </div>
+          </PanelSectionRow>
+        )}
+        {showAddFolder && (
+          <PanelSectionRow>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
+              <MButton variant="tonal" disabled={busy !== "" || !folderInput.trim()} onClick={onAddFolder}>Add folder</MButton>
+            </div>
+          </PanelSectionRow>
+        )}
         {gamesTag && (
           <PanelSectionRow>
             <div style={M3.type.caption}>
               {games.length} game(s) scanned with {gamesTag}
               {` · ${games.filter((g) => g.installed).length} installed`}
               {verify ? ` · ${verify.filter((v) => v.ok).length}/${verify.length} verified` : ""}
-              {skipped ? ` · ${skipped} not compatible (not listed)` : ""}.
+              {skipped ? ` · ${skipped} not compatible (not listed)` : ""}
+              {visibleGames.length !== games.length ? ` · ${visibleGames.length} shown` : ""}.
+            </div>
+          </PanelSectionRow>
+        )}
+        {games.length > 0 && (
+          <PanelSectionRow>
+            <div style={{ width: "100%", minWidth: 0, maxWidth: "100%", boxSizing: "border-box" }}>
+              <TextField
+                label="Find a game"
+                description="Filters the list by name or folder"
+                value={gameQuery}
+                onChange={(e) => setGameQuery((e.target as HTMLInputElement).value)}
+              />
+            </div>
+          </PanelSectionRow>
+        )}
+        {games.length > 0 && (
+          <PanelSectionRow>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: M3.space.sm }}>
+              {GAME_FILTERS.map((f) => (
+                <MButton key={f.key} variant={gameFilter === f.key ? "filled" : "tonal"}
+                  onClick={() => setGameFilter(f.key)}>
+                  {f.label}
+                </MButton>
+              ))}
             </div>
           </PanelSectionRow>
         )}
         {/* The game cards in a column with a gap: they used to sit flush
             against each other. */}
         <div style={{ display: "flex", flexDirection: "column", gap: M3.space.md, width: "100%", minWidth: 0 }}>
-          {games.map(renderGame)}
+          {visibleGames.map(renderGame)}
+          {visibleGames.length === 0 && games.length > 0 && (
+            <div style={M3.type.caption}>No game matches the filter.</div>
+          )}
         </div>
       </PanelSection>
 

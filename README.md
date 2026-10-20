@@ -76,8 +76,10 @@ remembered and reused. Only the games HelixSR can actually use are listed — a 
 with FSR 3.1 (the drop-in) or a detected upscaler (DLSS/XeSS/FSR 2, the Scaler).
 Games with no upscaler to take over are left out (the count is shown next to the
 list); a game that already has HelixSR in it always stays listed, so it can be
-updated or removed. Each game card shows its state, the inputs it was detected
-with, anti-cheat markers and the Steam launch options, and offers:
+updated or removed. The list can be searched by name or folder and filtered by
+status (All / Installed / Not installed / Needs repair). Each game card shows
+its state, the inputs it was detected with, anti-cheat markers and the Steam launch
+options, and offers:
 
 - the **way** picker — **Automatic** (HelixSR picks the game's best way),
   **HelixSR Scaler** (pick DLSS in the game's graphics menu; Insert opens its
@@ -91,7 +93,9 @@ with, anti-cheat markers and the Steam launch options, and offers:
   **Settings** and **Log**.
 - **Anti-cheat games get the FSR drop-in only.** The Scaler is not used there (it
   can get the account banned in online play), so an anti-cheat game without FSR 3.1
-  is not listed at all.
+  is not listed at all, and the card says so.
+- **A game the last verify found broken** gets a *Needs repair* chip, the reason
+  (a Steam update replaced the drop-ins), and **Repair** as its main action.
 - **Settings** edits the game's own ini inline (the editor follows the kind of
   settings the installed way uses) with named **presets** (save, apply, delete) and
   a **Defaults** reset. **Log** shows the game's log files with one-tap fixes for
