@@ -13,7 +13,9 @@ subprocess; upstream files are never imported.
 
 - **The HelixSR version in use has its own card at the very top**: the release
   tag, the network state as a chip, and a line with the DLL version, the size on
-  disk, the bundled Scaler version and whether frame generation is built. It is
+  disk, the bundled Scaler version and whether frame generation is built. Under
+  the note with the folder it is installed in, a **Remove this version** button
+  (two-tap confirm; removing the active version switches to another one). It is
   the first thing in the panel, so it is never mistaken for part of the log.
 - **Where you are**: "Step 2 of 4 — Build the network" with the step's title, a
   one-line hint, and the one button that moves the flow forward (Download the

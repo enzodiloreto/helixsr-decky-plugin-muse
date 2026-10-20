@@ -1437,6 +1437,19 @@ function Content() {
             ].join(" · ")
             : "Download a HelixSR release to start."}
         </div>
+        {activeVersion && (
+          <div style={{ ...M3.type.caption, opacity: 0.6, marginTop: 2, overflowWrap: "anywhere" }}>
+            {activeVersion.dir}
+          </div>
+        )}
+        {activeVersion && (
+          <div style={{ marginTop: M3.space.sm }}>
+            <MButton variant="danger-outline" disabled={busy !== ""}
+              onClick={() => armOrRun(`rm:${activeVersion.tag}`, `Remove ${activeVersion.tag}`, () => onRemoveVersion(activeVersion.tag))}>
+              {confirm === `rm:${activeVersion.tag}` ? "Tap again to confirm" : "Remove this version"}
+            </MButton>
+          </div>
+        )}
       </Card>
 
       {/* The header: where the user is in the flow and the one action that

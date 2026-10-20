@@ -37,13 +37,14 @@ automatically on first run. Then uninstall the old entry.
 ## Use
 
 The panel opens with the **HelixSR version in use** in its own card at the very top
-(the release, its DLL version, size, the bundled Scaler and whether the network and
-frame generation are built), then the header with where you are — **Step 2 of 4 —
-Build the network** — and the one button that moves you forward. A divider then
-separates that from the **Last action** card, which holds the result of what you
-just did (the old Output section at the bottom is gone). Then the sections: Version,
-Build, Games, Storage & updates. Every long action runs in the background while
-the panel stays responsive.
+(the release, its DLL version, size, the bundled Scaler, whether the network and
+frame generation are built, where it is installed) and a **Remove this version**
+button right under it, then the header with where you are — **Step 2 of 4 — Build
+the network** — and the one button that moves you forward. A divider then separates
+that from the **Last action** card, which holds the result of what you just did
+(the old Output section at the bottom is gone). Then the sections: Version, Build,
+Games, Storage & updates. Every long action runs in the background while the panel
+stays responsive.
 
 ### Version
 
